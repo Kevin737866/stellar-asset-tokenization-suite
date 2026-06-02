@@ -328,6 +328,63 @@ export class CustodyClient {
         return result;
     }
 
+    /**
+     * Trigger an insurance claim for an undercollateralized asset.
+     *
+     * @param signerKeypair - Keypair of the authorized admin who triggers the claim
+     * @param assetId       - On-chain address of the RWA token asset
+     * @param claimReason   - Short symbol describing the reason (e.g. 'undercollateralized')
+     * @param evidenceHash  - 32-byte hex string evidence hash (64 hex chars)
+     * @returns Horizon submit transaction response
+     */
+    async triggerInsuranceClaim(
+        signerKeypair: Keypair,
+        assetId: string,
+        claimReason: string,
+        evidenceHash: string
+    ): Promise<Horizon.SubmitTransactionResponse> {
+        validateAddress(assetId, 'assetId');
+        validateNonEmptyString(claimReason, 'claimReason');
+        validateNonEmptyString(evidenceHash, 'evidenceHash');
+        if (!/^[0-9a-fA-F]{64}$/.test(evidenceHash)) {
+            throw new ContractError('evidenceHash must be a 64-character hex string (32 bytes)');
+        }
+
+        this.logger.info('Triggering insurance claim', {
+            assetId,
+            claimReason,
+            admin: signerKeypair.publicKey()
+        });
+
+        const account = await this.server.loadAccount(signerKeypair.publicKey());
+
+        const transaction = new TransactionBuilder(account, {
+            networkPassphrase: this.networkPassphrase,
+            fee: DEFAULT_FEE_RATE.toString()
+        })
+            .addOperation(Operation.invokeContractFunction({
+                contract: this.contractId,
+                function: 'trigger_insurance_claim',
+                args: [
+                    ...this.encodeAddress(signerKeypair.publicKey()), // auth
+                    ...this.encodeAddress(assetId),                   // asset_id
+                    ...this.encodeString(claimReason),                // claim_reason
+                    ...this.encodeString(evidenceHash),               // evidence_hash
+                ]
+            }))
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+            .build();
+
+        transaction.sign(signerKeypair);
+        const result = await this.server.submitTransaction(transaction);
+        this.logger.info('Insurance claim triggered', {
+            assetId,
+            claimReason,
+            hash: result.hash
+        });
+        return result;
+    }
+
     async getDispute(disputeId: number): Promise<DisputeRecord> {
         validatePositiveInteger(disputeId, 'disputeId');
         throw new ContractError('Not implemented');
