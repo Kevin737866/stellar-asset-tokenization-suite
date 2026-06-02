@@ -1,5 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
+    Symbol, Vec,
 };
 
 use crate::auth::assert_admin;
@@ -65,9 +66,8 @@ pub struct ComplianceRule {
 #[contract]
 pub struct ComplianceRegistry;
 
-const STORAGE_VERSION: u32 = 1;
-
 #[contractimpl]
+
 impl ComplianceRegistry {
     pub fn initialize(
         env: Env,
@@ -96,9 +96,10 @@ impl ComplianceRegistry {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "kyc_required"), &kyc_required);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "transfer_restrictions"), &transfer_restrictions);
+        env.storage().instance().set(
+            &Symbol::new(&env, "transfer_restrictions"),
+            &transfer_restrictions,
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "initialized"), &true);
@@ -112,8 +113,6 @@ impl ComplianceRegistry {
             .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
     }
 
-    pub fn update_kyc_status(env: Env, auth: Address, user: Address, kyc_status: KYCStatus) {
-        crate::shared_admin::require_admin(&env, &auth);
     fn read_version(env: &Env) -> u32 {
         env.storage()
             .instance()
@@ -132,7 +131,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::RegistryNotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::RegistryNotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -156,7 +157,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -193,7 +196,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -210,10 +215,8 @@ impl ComplianceRegistry {
             .instance()
             .set(&Symbol::new(&env, "blacklist"), &blacklist);
 
-        env.events().publish(
-            (Symbol::new(&env, "blacklisted"), address, auth),
-            reason,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "blacklisted"), address, auth), reason);
     }
 
     pub fn remove_from_blacklist(env: Env, auth: Address, address: Address) {
@@ -222,7 +225,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -261,7 +266,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -290,7 +297,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -488,7 +497,8 @@ impl ComplianceRegistry {
     }
 
     pub fn check_outbound_participant(env: Env, participant: Address, amount: i128) -> bool {
-        let result = Self::check_outbound_participant_internal(env.clone(), participant.clone(), amount);
+        let result =
+            Self::check_outbound_participant_internal(env.clone(), participant.clone(), amount);
 
         env.events().publish(
             (Symbol::new(&env, "outbound_compliance_check"), participant),
@@ -674,7 +684,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 
@@ -691,7 +703,11 @@ impl ComplianceRegistry {
 
         env.events().publish(
             (Symbol::new(&env, "transfer_limits_set"), user, auth),
-            (limits.daily_limit, limits.monthly_limit, limits.annual_limit),
+            (
+                limits.daily_limit,
+                limits.monthly_limit,
+                limits.annual_limit,
+            ),
         );
     }
 
@@ -708,7 +724,9 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, ComplianceError::NotInitialized); });
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
         assert_admin(&env, &auth, &admin);
 

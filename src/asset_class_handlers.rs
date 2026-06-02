@@ -1,5 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    Map, Symbol, Vec,
 };
 
 use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules, DividendSchedule};
@@ -10,12 +11,6 @@ pub use crate::commodity;
 pub use crate::invoice;
 pub use crate::real_estate;
 pub use crate::security;
-pub use crate::art;
-pub use crate::carbon_credit;
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map, Symbol, Vec, BytesN,
-};
-
-use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules, DividendSchedule};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -112,11 +107,14 @@ impl AssetClassHandlers {
             AssetClass::Security => ComplianceRules {
                 kyc_required: true,
                 accredited_investor_only: true,
-                geographic_restrictions: Vec::from_array(&env, [
-                    Symbol::new(&env, "US"),
-                    Symbol::new(&env, "EU"),
-                    Symbol::new(&env, "UK"),
-                ]),
+                geographic_restrictions: Vec::from_array(
+                    &env,
+                    [
+                        Symbol::new(&env, "US"),
+                        Symbol::new(&env, "EU"),
+                        Symbol::new(&env, "UK"),
+                    ],
+                ),
                 holding_period_days: 365,
                 transfer_limits: 100000, // 100K tokens
             },
@@ -138,7 +136,10 @@ impl AssetClassHandlers {
     }
 
     /// Get default dividend schedule for asset class
-    pub fn get_default_dividend_schedule(env: Env, asset_class: AssetClass) -> Option<DividendSchedule> {
+    pub fn get_default_dividend_schedule(
+        env: Env,
+        asset_class: AssetClass,
+    ) -> Option<DividendSchedule> {
         match asset_class {
             AssetClass::RealEstate => Some(DividendSchedule {
                 frequency_days: 90, // Quarterly

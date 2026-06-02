@@ -1,19 +1,31 @@
-# TODO - API Reference Documentation (Issue #70)
+# Project TODO
 
-## Plan
-1. Read Rust contract entrypoint files to extract all `pub fn` APIs.
-2. Read TypeScript SDK client files + types/errors to extract public method APIs.
-3. Create docs pages under `docs/api/` for each contract + SDK clients.
-4. Add a docs index page and update root `README.md` to link to API reference.
-5. Ensure coverage: all 6 contract modules + suite wrapper + all exported SDK clients.
+## #14 Security: Centralized Admin Control (Multi-sig / Governance)
 
-## Progress
-- [x] Step 1: Read Rust contract entrypoints (`src/asset_factory.rs`, `src/rwa_token.rs`, `src/compliance_registry.rs`, `src/dividend_distributor.rs`, `src/secondary_market.rs`, `src/custody_validator.rs`, `src/lib.rs`).
-- [x] Step 2: Read SDK client files (`sdk/src/assetFactory.ts`, `tokenClient.ts`, `complianceClient.ts`, `dividendClient.ts`, `marketClient.ts`, `custody.ts`, `custodyMonitoring.ts`, `types.ts`, `errors.ts`, plus any SDK index exports).
-- [x] Step 3: Implement docs templates and create `docs/api/*.md`.
+### Step 1 — Discovery
+- [x] Read existing admin enforcement implementation (`src/shared_admin.rs`).
+- [x] Identify contracts using single admin gating (asset_factory, rwa_token, compliance_registry, dividend_distributor).
 
-- [x] Step 4: Update `README.md` with API reference links.
-- [x] Step 5: Final verification (method name mapping, links, coverage). 
+### Step 2 — Governance design
+- [ ] Implement threshold-based multi-owner governance module.
+  - [ ] Store owners + threshold in contract instance storage.
+  - [ ] Provide `propose/approve/execute` (optionally timelock).
 
+### Step 3 — Integrate into contracts
+- [ ] Replace `require_admin/assert_admin` paths in:
+  - [ ] `src/asset_factory.rs`
+  - [ ] `src/rwa_token.rs`
+  - [ ] `src/compliance_registry.rs`
+  - [ ] `src/dividend_distributor.rs`
 
+### Step 4 — Migration / initialization
+- [ ] Decide storage compatibility strategy and implement `migrate` updates.
+
+### Step 5 — Tests
+- [ ] Add/adjust unit tests to cover:
+  - [ ] single-owner cannot execute
+  - [ ] threshold approvals can execute
+
+### Step 6 — Verify
+- [ ] Run `cargo test` and ensure build/test passes.
 
