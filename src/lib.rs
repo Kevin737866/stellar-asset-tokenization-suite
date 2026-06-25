@@ -1,13 +1,13 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec};
 
-mod asset_factory;
-mod asset_class_handlers;
-mod auth;
-mod compliance_registry;
-mod custody_validator;
-mod dividend_distributor;
-mod rwa_token;
-mod secondary_market;
+pub mod asset_factory;
+pub mod asset_class_handlers;
+pub mod auth;
+pub mod compliance_registry;
+pub mod custody_validator;
+pub mod dividend_distributor;
+pub mod rwa_token;
+pub mod secondary_market;
 
 use asset_factory::AssetFactoryClient;
 use compliance_registry::ComplianceRegistryClient;
