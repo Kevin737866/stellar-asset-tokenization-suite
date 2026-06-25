@@ -1,12 +1,14 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token::TokenClient, Address, Env, Map,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token::TokenClient, Address, Env, Map,
     Symbol, Vec, log,
 };
 
-use crate::auth::assert_admin;
 use crate::rwa_token::RWATokenClient;
 use crate::dividend_distributor::DividendDistributorClient;
 use crate::compliance_registry::ComplianceRegistryClient;
+use crate::auth::assert_admin;
+
+const STORAGE_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -22,6 +24,11 @@ pub enum MarketError {
     CircuitBreakerTripped = 9,
     DividendHalt = 10,
     MinOrderSizeNotMet = 11,
+    AlreadyInitialized = 12,
+    StorageOutdated = 13,
+    MarketNotInitialized = 14,
+    AlreadyAtLatestVersion = 15,
+    InvalidParameters = 16,
 }
 
 #[contracttype]
@@ -127,9 +134,22 @@ impl SecondaryMarket {
         dividend_distributor: Address,
         fee_rate_bps: i64,
         min_order_size: i128,
+        max_price_deviation_bps: i64,
     ) {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("Already initialized");
+            panic_with_error!(&env, MarketError::AlreadyInitialized);
+        }
+
+        if fee_rate_bps < 0 || fee_rate_bps > 10000 {
+            panic_with_error!(&env, MarketError::InvalidParameters);
+        }
+
+        if min_order_size <= 0 {
+            panic_with_error!(&env, MarketError::InvalidParameters);
+        }
+
+        if max_price_deviation_bps < 0 || max_price_deviation_bps > 10000 {
+            panic_with_error!(&env, MarketError::InvalidParameters);
         }
 
         let config = MarketConfig {
@@ -137,7 +157,7 @@ impl SecondaryMarket {
             fee_rate_bps,
             fee_recipient: admin.clone(),
             min_order_size,
-            max_price_deviation_bps: 2000, // 20%
+            max_price_deviation_bps,
             is_paused: false,
             base_currency,
             compliance_registry,
@@ -148,6 +168,60 @@ impl SecondaryMarket {
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::OrderCount, &0u64);
         env.storage().instance().set(&DataKey::TradeCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
+    }
+
+    fn read_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "version"))
+            .unwrap_or(0)
+    }
+
+    fn check_version(env: &Env) {
+        if Self::read_version(env) < STORAGE_VERSION {
+            panic_with_error!(env, MarketError::StorageOutdated);
+        }
+    }
+
+    fn read_config(env: &Env) -> MarketConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| panic_with_error!(env, MarketError::MarketNotInitialized))
+    }
+
+    pub fn migrate(env: Env, auth: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let ver = Self::read_version(&env);
+        if ver >= STORAGE_VERSION {
+            panic_with_error!(&env, MarketError::AlreadyAtLatestVersion);
+        }
+
+        let mut current = ver;
+        while current < STORAGE_VERSION {
+            current += 1;
+        }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
+    }
+
+    pub fn update_config(env: Env, auth: Address, config: MarketConfig) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert_admin(&auth, &admin);
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+
+    pub fn update_admin(env: Env, auth: Address, new_admin: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert_admin(&auth, &admin);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
     }
 
     pub fn place_order(
@@ -162,9 +236,11 @@ impl SecondaryMarket {
     ) -> u64 {
         maker.require_auth();
 
+        Self::check_version(&env);
+
         let config: MarketConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         if config.is_paused {
-            panic!("Market paused");
+            panic_with_error!(&env, MarketError::TradingPaused);
         }
 
         // 1. Compliance & Halt Checks
@@ -173,13 +249,16 @@ impl SecondaryMarket {
 
         // 2. Market Mechanic Checks
         if amount < config.min_order_size {
-            panic!("Amount below minimum order size");
+            panic_with_error!(&env, MarketError::MinOrderSizeNotMet);
         }
         if price <= 0 {
-            panic!("Invalid price");
+            panic_with_error!(&env, MarketError::InvalidOrder);
         }
         if expiry <= env.ledger().timestamp() {
-            panic!("Order already expired");
+            panic_with_error!(&env, MarketError::OrderExpired);
+        }
+        if min_fill < 0 || min_fill > amount {
+            panic_with_error!(&env, MarketError::InvalidParameters);
         }
 
         // 3. Circuit Breaker
@@ -194,7 +273,7 @@ impl SecondaryMarket {
             let rwa_token = RWATokenClient::new(&env, &token_address);
             rwa_token.transfer(&maker, &env.current_contract_address(), &amount);
         } else {
-            panic!("Invalid side");
+            panic_with_error!(&env, MarketError::InvalidOrder);
         }
 
         // 5. Create Order
@@ -221,7 +300,7 @@ impl SecondaryMarket {
 
         env.events().publish(
             (Symbol::new(&env, "order_placed"), token_address),
-            (count, maker, side, price, amount),
+            (count, maker, side, price, amount, env.ledger().timestamp()),
         );
 
         count
@@ -230,19 +309,21 @@ impl SecondaryMarket {
     pub fn fill_order(env: Env, taker: Address, order_id: u64, fill_amount: i128) {
         taker.require_auth();
 
+        Self::check_version(&env);
+
         let mut order: Order = env
             .storage()
             .temporary()
             .get(&DataKey::Order(order_id))
-            .unwrap_or_else(|| panic!("Order not found or expired"));
+            .unwrap_or_else(|| { panic_with_error!(&env, MarketError::OrderNotFound); });
 
         if !order.is_active || order.expires_at <= env.ledger().timestamp() {
-            panic!("Order inactive or expired");
+            panic_with_error!(&env, MarketError::OrderExpired);
         }
 
         let config: MarketConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         if config.is_paused {
-            panic!("Market paused");
+            panic_with_error!(&env, MarketError::TradingPaused);
         }
 
         // Compliance & Halt Checks
@@ -251,10 +332,10 @@ impl SecondaryMarket {
 
         let remaining = order.amount - order.filled_amount;
         if fill_amount > remaining {
-            panic!("Fill amount exceeds remaining");
+            panic_with_error!(&env, MarketError::InvalidOrder);
         }
         if fill_amount < order.min_fill && fill_amount < remaining {
-            panic!("Fill amount below minimum fill");
+            panic_with_error!(&env, MarketError::MinOrderSizeNotMet);
         }
 
         // Settlement
@@ -300,24 +381,26 @@ impl SecondaryMarket {
 
         env.events().publish(
             (Symbol::new(&env, "trade"), order.token_address),
-            (order_id, taker, fill_amount, order.price),
+            (order_id, taker, fill_amount, order.price, env.ledger().timestamp()),
         );
     }
 
     pub fn cancel_order(env: Env, maker: Address, order_id: u64) {
         maker.require_auth();
 
+        Self::check_version(&env);
+
         let mut order: Order = env
             .storage()
             .temporary()
             .get(&DataKey::Order(order_id))
-            .unwrap_or_else(|| panic!("Order not found"));
+            .unwrap_or_else(|| { panic_with_error!(&env, MarketError::OrderNotFound); });
 
         if order.maker != maker {
-            panic!("Unauthorized");
+            panic_with_error!(&env, MarketError::Unauthorized);
         }
         if !order.is_active {
-            panic!("Order already inactive");
+            panic_with_error!(&env, MarketError::InvalidOrder);
         }
 
         let config: MarketConfig = env.storage().instance().get(&DataKey::Config).unwrap();
@@ -337,6 +420,8 @@ impl SecondaryMarket {
         env.storage().temporary().set(&DataKey::Order(order_id), &order);
 
         env.events().publish(
+            (Symbol::new(&env, "order_cancelled"), order.token_address),
+            (order_id, maker, order.side, order.filled_amount, env.ledger().timestamp()),
         );
     }
 
@@ -419,7 +504,7 @@ impl SecondaryMarket {
         let registry = ComplianceRegistryClient::new(env, &config.compliance_registry);
         let kyc = registry.get_kyc_status(user.clone());
         if !kyc.is_verified {
-            panic!("KYC required");
+            panic_with_error!(env, MarketError::ComplianceFailed);
         }
     }
 
@@ -429,7 +514,7 @@ impl SecondaryMarket {
             let deviation = if price > vwap { price - vwap } else { vwap - price };
             let deviation_bps = (deviation * 10000) / vwap;
             if deviation_bps > max_deviation_bps as i128 {
-                panic!("Price deviation too high");
+                panic_with_error!(env, MarketError::CircuitBreakerTripped);
             }
         }
     }

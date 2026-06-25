@@ -1,11 +1,17 @@
-//! Soroban v22-style authorization: callers pass `auth: Address` and prove control with `require_auth`.
+use soroban_sdk::{Address, Env, panic_with_error, contracterror};
 
-use soroban_sdk::Address;
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum AuthError {
+    Unauthorized = 1,
+    NotInitialized = 2,
+    AlreadyInitialized = 3,
+}
 
 #[inline(always)]
-pub fn assert_admin(auth: &Address, admin: &Address) {
+pub fn assert_admin(env: &Env, auth: &Address, admin: &Address) {
     auth.require_auth();
     if auth != admin {
-        panic!("Unauthorized");
+        panic_with_error!(env, AuthError::Unauthorized);
     }
 }

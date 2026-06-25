@@ -1,8 +1,11 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
+    Symbol, Vec,
 };
 
 use crate::auth::assert_admin;
+
+const STORAGE_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -14,6 +17,11 @@ pub enum ComplianceError {
     InvalidJurisdiction = 5,
     AccreditationRequired = 6,
     TransferLimitExceeded = 7,
+    AlreadyInitialized = 8,
+    NotInitialized = 9,
+    StorageOutdated = 10,
+    RegistryNotInitialized = 11,
+    AlreadyAtLatestVersion = 12,
 }
 
 #[contracttype]
@@ -99,6 +107,7 @@ impl<'a> ComplianceRegistryClient<'a> {
 }
 
 #[contractimpl]
+
 impl ComplianceRegistry {
 // ...
 
@@ -109,14 +118,19 @@ impl ComplianceRegistry {
         kyc_required: bool,
         transfer_restrictions: bool,
     ) {
+        crate::shared_admin::write_admin(&env, &auth, &admin);
         auth.require_auth();
         if env
             .storage()
             .instance()
             .has(&Symbol::new(&env, "initialized"))
         {
-            panic!("Registry already initialized");
+            panic_with_error!(&env, ComplianceError::AlreadyInitialized);
         }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
 
         env.storage()
             .instance()
@@ -132,65 +146,52 @@ impl ComplianceRegistry {
             .instance()
             .set(&Symbol::new(&env, "initialized"), &true);
 
-        let mut rules = Vec::<ComplianceRule>::new(&env);
-
-        let mut jur_us_144 = Vec::<Symbol>::new(&env);
-        jur_us_144.push_back(Symbol::new(&env, "US"));
-
-        rules.push_back(ComplianceRule {
-            rule_id: Symbol::new(&env, "rule_144"),
-            name: Symbol::new(&env, "SEC Rule 144"),
-            description: Symbol::new(&env, "Restricted securities resale limitations"),
-            is_active: true,
-            jurisdictions: jur_us_144,
-            min_verification_level: 2,
-            requires_accreditation: true,
-            max_amount: 1000000,
-        });
-
-        let mut jur_us_d = Vec::<Symbol>::new(&env);
-        jur_us_d.push_back(Symbol::new(&env, "US"));
-
-        rules.push_back(ComplianceRule {
-            rule_id: Symbol::new(&env, "reg_d"),
-            name: Symbol::new(&env, "Regulation D"),
-            description: Symbol::new(&env, "Private placement exemptions"),
-            is_active: true,
-            jurisdictions: jur_us_d,
-            min_verification_level: 2,
-            requires_accreditation: true,
-            max_amount: 50000000,
-        });
-
-        let mut jur_non_us = Vec::<Symbol>::new(&env);
-        jur_non_us.push_back(Symbol::new(&env, "EU"));
-        jur_non_us.push_back(Symbol::new(&env, "UK"));
-        jur_non_us.push_back(Symbol::new(&env, "JP"));
-
-        rules.push_back(ComplianceRule {
-            rule_id: Symbol::new(&env, "reg_s"),
-            name: Symbol::new(&env, "Regulation S"),
-            description: Symbol::new(&env, "Non-US offerings"),
-            is_active: true,
-            jurisdictions: jur_non_us,
-            min_verification_level: 1,
-            requires_accreditation: false,
-            max_amount: i128::MAX,
-        });
-
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "compliance_rules"), &rules);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "blacklist"), &Vec::<Address>::new(&env));
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "whitelist"), &Vec::<Address>::new(&env));
-        env.storage().instance().set(
-            &Symbol::new(&env, "xfer_lim"),
-            &Map::<Address, TransferLimits>::new(&env),
+        env.events().publish(
+            (Symbol::new(&env, "registry_initialized"), admin),
+            (kyc_required, transfer_restrictions),
         );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
+    }
+
+    fn read_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "version"))
+            .unwrap_or(0)
+    }
+
+    fn check_version(env: &Env) {
+        if Self::read_version(env) < STORAGE_VERSION {
+            panic_with_error!(env, ComplianceError::StorageOutdated);
+        }
+    }
+
+    pub fn migrate(env: Env, auth: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "admin"))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::RegistryNotInitialized);
+            });
+
+        assert_admin(&env, &auth, &admin);
+
+        let ver = Self::read_version(&env);
+        if ver >= STORAGE_VERSION {
+            panic_with_error!(&env, ComplianceError::AlreadyAtLatestVersion);
+        }
+
+        let mut current = ver;
+        while current < STORAGE_VERSION {
+            current += 1;
+        }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
     }
 
     pub fn update_kyc_status(env: Env, auth: Address, user: Address, kyc_status: KYCStatus) {
@@ -198,15 +199,24 @@ impl ComplianceRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         env.storage().instance().set(&user, &kyc_status);
 
         env.events().publish(
-            (Symbol::new(&env, "kyc_updated"), user),
-            (kyc_status.is_verified, kyc_status.verification_level),
+            (Symbol::new(&env, "kyc_updated"), user, auth),
+            (
+                kyc_status.is_verified,
+                kyc_status.verification_level,
+                kyc_status.jurisdiction,
+                kyc_status.risk_score,
+            ),
         );
     }
 
@@ -223,13 +233,18 @@ impl ComplianceRegistry {
     }
 
     pub fn add_to_blacklist(env: Env, auth: Address, address: Address, reason: Symbol) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let mut blacklist: Vec<Address> = env
             .storage()
@@ -243,17 +258,22 @@ impl ComplianceRegistry {
             .set(&Symbol::new(&env, "blacklist"), &blacklist);
 
         env.events()
-            .publish((Symbol::new(&env, "blacklisted"), address), reason);
+            .publish((Symbol::new(&env, "blacklisted"), address, auth), reason);
     }
 
     pub fn remove_from_blacklist(env: Env, auth: Address, address: Address) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let blacklist: Vec<Address> = env
             .storage()
@@ -276,20 +296,25 @@ impl ComplianceRegistry {
                 .instance()
                 .set(&Symbol::new(&env, "blacklist"), &new_blacklist);
             env.events().publish(
-                (Symbol::new(&env, "unblacklisted"), address),
+                (Symbol::new(&env, "unblacklisted"), address, auth),
                 Symbol::new(&env, "removed"),
             );
         }
     }
 
     pub fn add_to_whitelist(env: Env, auth: Address, address: Address) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let mut whitelist: Vec<Address> = env
             .storage()
@@ -303,19 +328,24 @@ impl ComplianceRegistry {
             .set(&Symbol::new(&env, "whitelist"), &whitelist);
 
         env.events().publish(
-            (Symbol::new(&env, "whitelisted"), address),
+            (Symbol::new(&env, "whitelisted"), address, auth),
             Symbol::new(&env, "added"),
         );
     }
 
     pub fn remove_from_whitelist(env: Env, auth: Address, address: Address) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let whitelist: Vec<Address> = env
             .storage()
@@ -338,19 +368,31 @@ impl ComplianceRegistry {
                 .instance()
                 .set(&Symbol::new(&env, "whitelist"), &new_whitelist);
             env.events().publish(
-                (Symbol::new(&env, "unwhitelisted"), address),
+                (Symbol::new(&env, "unwhitelisted"), address, auth),
                 Symbol::new(&env, "removed"),
             );
         }
     }
 
     pub fn check_compliance(env: Env, from: Address, to: Address, amount: i128) -> bool {
+        let result = Self::check_compliance_internal(env.clone(), from.clone(), to.clone(), amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "compliance_check"), from, to),
+            (amount, result),
+        );
+
+        result
+    }
+
+    fn check_compliance_internal(env: Env, from: Address, to: Address, amount: i128) -> bool {
         let kyc_required: bool = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "kyc_required"))
             .unwrap_or(true);
 
+        // 1. Blacklist check — always enforced, no exceptions
         let blacklist: Vec<Address> = env
             .storage()
             .instance()
@@ -363,6 +405,7 @@ impl ComplianceRegistry {
             }
         }
 
+        // 2. KYC / whitelist checks
         if kyc_required {
             let whitelist: Vec<Address> = env
                 .storage()
@@ -373,6 +416,10 @@ impl ComplianceRegistry {
             let from_whitelisted = whitelist.iter().any(|a| a.clone() == from);
             let to_whitelisted = whitelist.iter().any(|a| a.clone() == to);
 
+            // Whitelist only bypasses the KYC verification/expiry check —
+            // AML flags and risk score are still enforced for whitelisted addresses.
+            let current_time = env.ledger().timestamp();
+
             if !from_whitelisted || !to_whitelisted {
                 let from_kyc = Self::get_kyc_status(env.clone(), from.clone());
                 let to_kyc = Self::get_kyc_status(env.clone(), to.clone());
@@ -381,24 +428,47 @@ impl ComplianceRegistry {
                     return false;
                 }
 
-                let current_time = env.ledger().timestamp();
-                if from_kyc.expiry_date < current_time || to_kyc.expiry_date < current_time {
+                // Reject expired KYC — expiry_date 0 means never set, treat as expired
+                if from_kyc.expiry_date == 0 || from_kyc.expiry_date < current_time {
+                    return false;
+                }
+                if to_kyc.expiry_date == 0 || to_kyc.expiry_date < current_time {
                     return false;
                 }
             }
+
+            // 3. AML flag check — enforced for all participants including whitelisted
+            let from_kyc = Self::get_kyc_status(env.clone(), from.clone());
+            let to_kyc = Self::get_kyc_status(env.clone(), to.clone());
+
+            if from_kyc.aml_flags.len() > 0 || to_kyc.aml_flags.len() > 0 {
+                return false;
+            }
+
+            // 4. Risk score check — reject high-risk participants (score >= 8 out of 10)
+            if from_kyc.risk_score >= 8 || to_kyc.risk_score >= 8 {
+                return false;
+            }
         }
 
+        // 5. Transfer limits — applied to sender; receiver limit check is read-only
         let transfer_restrictions: bool = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "transfer_restrictions"))
             .unwrap_or(false);
 
-        if transfer_restrictions && !Self::check_transfer_limits(env.clone(), from.clone(), amount)
-        {
-            return false;
+        if transfer_restrictions {
+            if !Self::check_transfer_limits(env.clone(), from.clone(), amount) {
+                return false;
+            }
+            // Check receiver has capacity without consuming their limit
+            if !Self::check_transfer_limits_readonly(env.clone(), to.clone(), amount) {
+                return false;
+            }
         }
 
+        // 6. Regulatory rules — always enforced, independent of transfer_restrictions flag
         if !Self::evaluate_regulatory_rules(env.clone(), from.clone(), to.clone(), amount) {
             return false;
         }
@@ -469,6 +539,18 @@ impl ComplianceRegistry {
     }
 
     pub fn check_outbound_participant(env: Env, participant: Address, amount: i128) -> bool {
+        let result =
+            Self::check_outbound_participant_internal(env.clone(), participant.clone(), amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "outbound_compliance_check"), participant),
+            (amount, result),
+        );
+
+        result
+    }
+
+    fn check_outbound_participant_internal(env: Env, participant: Address, amount: i128) -> bool {
         let blacklist: Vec<Address> = env
             .storage()
             .instance()
@@ -489,11 +571,22 @@ impl ComplianceRegistry {
 
         if kyc_required {
             let kyc = Self::get_kyc_status(env.clone(), participant.clone());
+
             if !kyc.is_verified {
                 return false;
             }
+
+            // expiry_date 0 means never set — treat as expired
             let current_time = env.ledger().timestamp();
-            if kyc.expiry_date < current_time {
+            if kyc.expiry_date == 0 || kyc.expiry_date < current_time {
+                return false;
+            }
+
+            // AML flags and high risk score block outbound operations
+            if kyc.aml_flags.len() > 0 {
+                return false;
+            }
+            if kyc.risk_score >= 8 {
                 return false;
             }
         }
@@ -514,6 +607,17 @@ impl ComplianceRegistry {
     }
 
     pub fn check_transfer_limits(env: Env, user: Address, amount: i128) -> bool {
+        let result = Self::check_transfer_limits_internal(env.clone(), user.clone(), amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "transfer_limit_check"), user),
+            (amount, result),
+        );
+
+        result
+    }
+
+    fn check_transfer_limits_internal(env: Env, user: Address, amount: i128) -> bool {
         let map_key = Symbol::new(&env, "xfer_lim");
         let mut map: Map<Address, TransferLimits> = env
             .storage()
@@ -569,14 +673,66 @@ impl ComplianceRegistry {
         true
     }
 
+    /// Read-only variant of check_transfer_limits — verifies capacity without consuming limits.
+    /// Used to validate the receiver side of a transfer without side effects.
+    fn check_transfer_limits_readonly(env: Env, user: Address, amount: i128) -> bool {
+        let map_key = Symbol::new(&env, "xfer_lim");
+        let map: Map<Address, TransferLimits> = env
+            .storage()
+            .instance()
+            .get(&map_key)
+            .unwrap_or(Map::new(&env));
+
+        let limits: TransferLimits = map.get(user).unwrap_or(TransferLimits {
+            daily_limit: 10000,
+            monthly_limit: 100000,
+            annual_limit: 1000000,
+            remaining_daily: 10000,
+            remaining_monthly: 100000,
+            remaining_annual: 1000000,
+            last_reset_daily: 0,
+            last_reset_monthly: 0,
+            last_reset_annual: 0,
+        });
+
+        let current_time = env.ledger().timestamp();
+        let day_in_seconds: u64 = 86400;
+        let month_in_seconds: u64 = 30 * day_in_seconds;
+        let year_in_seconds: u64 = 365 * day_in_seconds;
+
+        // Compute effective remaining after potential resets (without writing)
+        let effective_daily = if current_time - limits.last_reset_daily >= day_in_seconds {
+            limits.daily_limit
+        } else {
+            limits.remaining_daily
+        };
+        let effective_monthly = if current_time - limits.last_reset_monthly >= month_in_seconds {
+            limits.monthly_limit
+        } else {
+            limits.remaining_monthly
+        };
+        let effective_annual = if current_time - limits.last_reset_annual >= year_in_seconds {
+            limits.annual_limit
+        } else {
+            limits.remaining_annual
+        };
+
+        amount <= effective_daily && amount <= effective_monthly && amount <= effective_annual
+    }
+
     pub fn set_transfer_limits(env: Env, auth: Address, user: Address, limits: TransferLimits) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let map_key = Symbol::new(&env, "xfer_lim");
         let mut map: Map<Address, TransferLimits> = env
@@ -586,6 +742,15 @@ impl ComplianceRegistry {
             .unwrap_or(Map::new(&env));
         map.set(user, limits);
         env.storage().instance().set(&map_key, &map);
+
+        env.events().publish(
+            (Symbol::new(&env, "transfer_limits_set"), user, auth),
+            (
+                limits.daily_limit,
+                limits.monthly_limit,
+                limits.annual_limit,
+            ),
+        );
     }
 
     pub fn get_compliance_rules(env: Env) -> Vec<ComplianceRule> {
@@ -596,13 +761,18 @@ impl ComplianceRegistry {
     }
 
     pub fn update_compliance_rule(env: Env, auth: Address, rule: ComplianceRule) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Registry not initialized"));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ComplianceError::NotInitialized);
+            });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let rules: Vec<ComplianceRule> = env
             .storage()
@@ -626,5 +796,10 @@ impl ComplianceRegistry {
                 .instance()
                 .set(&Symbol::new(&env, "compliance_rules"), &new_rules);
         }
+
+        env.events().publish(
+            (Symbol::new(&env, "compliance_rule_updated"), auth),
+            (rule.rule_id, rule.name, rule.is_active),
+        );
     }
 }

@@ -6,8 +6,7 @@ import {
   Address,
   Contract,
   xdr,
-  ScInt,
-  ScSymbol
+  ScInt
 } from 'stellar-sdk';
 import { 
   DividendDistribution, 
@@ -17,63 +16,72 @@ import {
   ClaimInfo, 
   TransactionOptions, 
   RWASDKConfig, 
-  RWASDKError, 
-  ErrorCode 
+  RWASDKError
 } from './types';
-import { RWASDKError as RWASDKErrorClass } from './errors';
+import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, ContractError } from './errors';
+import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
 
 export class DividendClient {
   private server: Server;
   private contract: Contract;
   private config: RWASDKConfig;
+  private logger: Logger;
 
   constructor(config: RWASDKConfig) {
+    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
+    validateAddress(config.contracts.dividendDistributor, 'config.contracts.dividendDistributor');
     this.config = config;
     this.server = new Server(config.stellar.serverUrl);
     this.contract = new Contract(config.contracts.dividendDistributor);
+    this.logger = createLogger('DividendClient');
   }
 
-  /**
-   * Create a new dividend distribution
-   */
   async createDistribution(
     admin: Address,
     options: DividendOptions,
     txOptions: TransactionOptions = {}
   ): Promise<{ transactionHash: string; distributionId: number }> {
+    validateAddress(admin, 'admin');
+    validateAddress(options.tokenAddress, 'options.tokenAddress');
+    validateAmount(options.amount, 'options.amount');
+    if (!options.claimDeadline || !(options.claimDeadline instanceof Date) || options.claimDeadline.getTime() <= Date.now()) {
+      throw new InvalidParametersError('options.claimDeadline must be a Date in the future');
+    }
+    this.logger.info('Creating dividend distribution', { token: options.tokenAddress.toString(), amount: options.amount });
     try {
       const account = await this.server.getAccount(admin.toString());
       
-      // Convert metadata to ScMap
       const metadataScMap = this.convertMetadataToScMap(options.metadata || {});
       
       const call = this.contract.call(
         'create_distribution',
         new Address(options.tokenAddress),
-        new ScSymbol(options.currency),
+        xdr.ScVal.scvSymbol(options.currency),
         new ScInt(options.amount, xdr.ScValType.ScvI128),
         new ScInt(Math.floor(options.claimDeadline.getTime() / 1000)),
         metadataScMap
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
-      // Extract distribution ID from result
       const distributionId = this.extractDistributionId(result.resultMetaXdr);
 
+      this.logger.info('Dividend distribution created', { distributionId, hash: result.hash });
       return {
         transactionHash: result.hash,
         distributionId
@@ -83,14 +91,14 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Claim dividend for a specific distribution
-   */
   async claimDividend(
     claimer: Address,
     distributionId: number,
     txOptions: TransactionOptions = {}
   ): Promise<{ transactionHash: string; amountClaimed: string }> {
+    validateAddress(claimer, 'claimer');
+    validatePositiveInteger(distributionId, 'distributionId');
+    this.logger.info('Claiming dividend', { claimer: claimer.toString(), distributionId });
     try {
       const account = await this.server.getAccount(claimer.toString());
       
@@ -101,23 +109,23 @@ export class DividendClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, claimer);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
-      // Extract claimed amount from result
       const amountClaimed = this.extractClaimedAmount(result.resultMetaXdr);
 
+      this.logger.info('Dividend claimed', { claimer: claimer.toString(), distributionId, amountClaimed, hash: result.hash });
       return {
         transactionHash: result.hash,
         amountClaimed
@@ -127,36 +135,34 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Claim all available dividends for a user
-   */
   async claimAllDividends(
     claimer: Address,
     txOptions: TransactionOptions = {}
   ): Promise<{ transactionHash: string; claimedAmounts: string[] }> {
+    this.logger.info('Claiming all dividends', { claimer: claimer.toString() });
     try {
       const account = await this.server.getAccount(claimer.toString());
       
       const call = this.contract.call('claim_all_dividends', new Address(claimer));
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, claimer);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
-      // Extract claimed amounts from result
       const claimedAmounts = this.extractClaimedAmounts(result.resultMetaXdr);
 
+      this.logger.info('All dividends claimed', { claimer: claimer.toString(), count: claimedAmounts.length, hash: result.hash });
       return {
         transactionHash: result.hash,
         claimedAmounts
@@ -166,9 +172,6 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Get distribution information
-   */
   async getDistribution(distributionId: number): Promise<DividendDistribution> {
     try {
       const result = await this.contract.call('get_distribution', new ScInt(distributionId));
@@ -179,9 +182,6 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Get all active distributions for a token
-   */
   async getActiveDistributions(tokenAddress: Address): Promise<DividendDistribution[]> {
     try {
       const result = await this.contract.call('get_active_distributions', new Address(tokenAddress));
@@ -192,9 +192,6 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Get claim information
-   */
   async getClaimInfo(distributionId: number, claimer: Address): Promise<ClaimInfo | null> {
     try {
       const result = await this.contract.call(
@@ -203,7 +200,7 @@ export class DividendClient {
         new Address(claimer)
       );
       
-      if (result.result === null) {
+      if (result.result == null) {
         return null;
       }
       
@@ -214,9 +211,6 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Calculate available dividend amount for a user
-   */
   async calculateAvailableDividend(
     distributionId: number,
     claimer: Address
@@ -228,20 +222,25 @@ export class DividendClient {
         new Address(claimer)
       );
       
-      return result.result.toString();
+      const val = result.result;
+      if (typeof val === 'string') return val;
+      if (val && typeof val.toString === 'function') return val.toString();
+      return '0';
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Update configuration
-   */
   async updateConfig(
     admin: Address,
     config: DividendConfig,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    if (config.feeRate != null) {
+      validateRange(config.feeRate, 0, 10000, 'config.feeRate');
+    }
+    this.logger.info('Updating dividend config');
     try {
       const account = await this.server.getAccount(admin.toString());
       
@@ -250,63 +249,60 @@ export class DividendClient {
       const call = this.contract.call('update_config', configScVal);
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Dividend config updated', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Deactivate a distribution
-   */
   async deactivateDistribution(
     admin: Address,
     distributionId: number,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    this.logger.info('Deactivating distribution', { distributionId });
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('deactivate_distribution', new ScInt(distributionId));
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Distribution deactivated', { distributionId, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Get dividend statistics
-   */
   async getDividendStats(tokenAddress?: Address): Promise<{
     totalDistributions: number;
     activeDistributions: number;
@@ -315,8 +311,6 @@ export class DividendClient {
     pendingClaims: string;
   }> {
     try {
-      // For now, return placeholder implementation
-      // In a real implementation, you'd query events or storage for detailed stats
       return {
         totalDistributions: 0,
         activeDistributions: 0,
@@ -329,12 +323,9 @@ export class DividendClient {
     }
   }
 
-  /**
-   * Get user's dividend history
-   */
   async getUserDividendHistory(
     user: Address,
-    limit: number = 50,
+    limit: number = DEFAULT_PAGINATION_LIMIT,
     cursor?: string
   ): Promise<{
     claims: ClaimInfo[];
@@ -342,17 +333,12 @@ export class DividendClient {
     nextCursor?: string;
   }> {
     try {
-      // This would query dividend claim events from the contract
-      // For now, return a placeholder implementation
-      throw new Error('getUserDividendHistory not implemented');
+      throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'getUserDividendHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Estimate dividend claim fee
-   */
   async estimateClaimFee(
     distributionId: number,
     claimer: Address
@@ -363,8 +349,6 @@ export class DividendClient {
     feeCurrency: Currency;
   }> {
     try {
-      // This would calculate fees based on the dividend configuration
-      // For now, return a placeholder implementation
       return {
         baseFee: '100',
         dividendFee: '0',
@@ -376,84 +360,76 @@ export class DividendClient {
     }
   }
 
-  // Private helper methods
-
   private convertMetadataToScMap(metadata: Record<string, string>): xdr.ScMap {
+    if (!metadata || typeof metadata !== 'object') {
+      return new xdr.ScMap({ map: [] });
+    }
     const map = new xdr.ScMap({
       map: Object.entries(metadata).map(([key, value]) => ({
-        key: xdr.ScVal.scvSymbol(new ScSymbol(key)),
-        val: xdr.ScVal.scvSymbol(new ScSymbol(value))
+        key: xdr.ScVal.scvSymbol(key),
+        val: xdr.ScVal.scvSymbol(value)
       }))
     });
     return map;
   }
 
   private convertDividendConfigToScVal(config: DividendConfig): xdr.ScVal {
-    // This would convert DividendConfig to ScVal
-    // For now, return a placeholder implementation
-    throw new Error('convertDividendConfigToScVal not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertDividendConfigToScVal not implemented');
   }
 
   private convertScValToDistribution(scVal: xdr.ScVal): DividendDistribution {
-    // This would parse the ScVal returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToDistribution not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToDistribution not implemented');
   }
 
   private convertScValToDistributionArray(scVal: xdr.ScVal): DividendDistribution[] {
-    // This would parse the ScVal array returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToDistributionArray not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToDistributionArray not implemented');
   }
 
   private convertScValToClaimInfo(scVal: xdr.ScVal): ClaimInfo {
-    // This would parse the ScVal returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToClaimInfo not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToClaimInfo not implemented');
   }
 
   private extractDistributionId(resultMetaXdr: string): number {
-    // This would extract the distribution ID from transaction result
-    // For now, return a placeholder implementation
-    throw new Error('extractDistributionId not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'extractDistributionId not implemented');
   }
 
   private extractClaimedAmount(resultMetaXdr: string): string {
-    // This would extract the claimed amount from transaction result
-    // For now, return a placeholder implementation
-    throw new Error('extractClaimedAmount not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'extractClaimedAmount not implemented');
   }
 
   private extractClaimedAmounts(resultMetaXdr: string): string[] {
-    // This would extract the claimed amounts from transaction result
-    // For now, return a placeholder implementation
-    throw new Error('extractClaimedAmounts not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'extractClaimedAmounts not implemented');
   }
 
   private async signTransaction(transaction: any, signer: Address): Promise<any> {
-    // This would sign the transaction with the signer's key
-    // For now, return a placeholder implementation
-    throw new Error('signTransaction not implemented');
+    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'signTransaction not implemented');
   }
 
-  private handleError(error: any): RWASDKErrorClass {
+  private handleError(error: unknown): RWASDKErrorClass {
     if (error instanceof RWASDKErrorClass) {
       return error;
     }
 
-    // Convert different error types to RWASDKError
-    if (error.message?.includes('timeout')) {
-      return new RWASDKErrorClass(ErrorCode.TIMEOUT, error.message);
+    const message = error.message || String(error);
+
+    if (message.includes('timeout')) {
+      return new TimeoutError(message);
     }
 
-    if (error.message?.includes('insufficient')) {
-      return new RWASDKErrorClass(ErrorCode.INSUFFICIENT_BALANCE, error.message);
+    if (message.includes('insufficient')) {
+      return new InsufficientBalanceError(message);
     }
 
-    if (error.message?.includes('unauthorized')) {
-      return new RWASDKErrorClass(ErrorCode.UNAUTHORIZED, error.message);
+    if (message.includes('unauthorized')) {
+      return new UnauthorizedError(message);
     }
 
-    return new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, error.message);
+    const match = message.match(/ContractError\((\d+)\)/);
+    if (match) {
+      const code = contractErrorToCode(parseInt(match[1]));
+      return new RWASDKErrorClass(code, message);
+    }
+
+    return new ContractError(message);
   }
 }

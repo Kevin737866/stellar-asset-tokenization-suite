@@ -1,13 +1,23 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, String};
 
-pub mod asset_factory;
-pub mod asset_class_handlers;
-pub mod auth;
-pub mod compliance_registry;
-pub mod custody_validator;
-pub mod dividend_distributor;
-pub mod rwa_token;
-pub mod secondary_market;
+mod asset_factory;
+mod asset_class_handlers;
+mod auth;
+mod compliance_registry;
+mod custody_validator;
+mod dividend_distributor;
+mod rwa_token;
+mod secondary_market;
+pub mod shared_admin;
+pub mod real_estate;
+pub mod commodity;
+pub mod invoice;
+pub mod security;
+pub mod art;
+pub mod carbon_credit;
+
+#[cfg(test)]
+mod tests;
 
 use asset_factory::AssetFactoryClient;
 use compliance_registry::ComplianceRegistryClient;
@@ -25,7 +35,7 @@ pub struct RwaDeploySpec {
     pub total_supply: i128,
     pub decimals: u32,
     pub asset_type: Symbol,
-    pub metadata: Map<Symbol, Symbol>,
+    pub metadata: Map<Symbol, String>,
     pub compliance_registry: Address,
     pub dividend_distributor: Address,
 }
@@ -74,11 +84,23 @@ impl StellarRWASuite {
         auth: Address,
         market: Address,
         admin: Address,
+        base_currency: Address,
+        compliance_registry: Address,
+        dividend_distributor: Address,
         fee_rate: i64,
         min_order_size: i128,
+        max_price_deviation_bps: i64,
     ) {
         let c = SecondaryMarketClient::new(&env, &market);
-        c.initialize(&auth, &admin, &fee_rate, &min_order_size);
+        c.initialize(
+            &admin,
+            &base_currency,
+            &compliance_registry,
+            &dividend_distributor,
+            &fee_rate,
+            &min_order_size,
+            &max_price_deviation_bps,
+        );
     }
 
     pub fn init_custody_validator(

@@ -2,124 +2,129 @@ import { Server, TransactionBuilder, Networks, Operation, Asset, Keypair, Accoun
 import { Horizon } from '@stellar/stellar-sdk';
 import axios from 'axios';
 import BigNumber from 'bignumber.js';
+import { RWASDKError, ContractError, VerificationFailedError, InsufficientBondError } from './errors';
+import { ErrorCode } from './types';
+import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_CUSTODY_EXPIRY_DAYS, DAY_IN_MILLISECONDS } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId } from './validation';
 
 export interface CustodyAttestation {
-    asset_id: string;
+    assetId: string;
     custodian: string;
     location: string;
     condition: string;
     value: string;
     timestamp: number;
-    proof_hash: string;
-    verification_type: string;
-    insurance_status: string;
-    legal_title_hash: string;
-    audit_report_hash: string;
-    multi_sig_signatures: string[];
+    proofHash: string;
+    verificationType: string;
+    insuranceStatus: string;
+    legalTitleHash: string;
+    auditReportHash: string;
+    multiSigSignatures: string[];
     metadata: Record<string, string>;
-    is_valid: boolean;
-    expires_at: number;
+    isValid: boolean;
+    expiresAt: number;
 }
 
 export interface CustodianRegistry {
-    custodian_address: string;
+    custodianAddress: string;
     name: string;
     jurisdiction: string;
-    license_number: string;
-    reputation_score: number;
-    verification_types: string[];
-    is_active: boolean;
-    total_attestations: number;
-    successful_disputes: number;
-    failed_disputes: number;
-    bond_required: string;
-    insurance_provider: string;
+    licenseNumber: string;
+    reputationScore: number;
+    verificationTypes: string[];
+    isActive: boolean;
+    totalAttestations: number;
+    successfulDisputes: number;
+    failedDisputes: number;
+    bondRequired: string;
+    insuranceProvider: string;
 }
 
 export interface DisputeRecord {
-    dispute_id: number;
-    attestation_id: number;
+    disputeId: number;
+    attestationId: number;
     challenger: string;
     custodian: string;
     reason: string;
-    bond_amount: string;
-    evidence_hash: string;
+    bondAmount: string;
+    evidenceHash: string;
     status: string;
-    created_at: number;
-    resolved_at: number;
+    createdAt: number;
+    resolvedAt: number;
     resolution: string;
-    bond_returned: boolean;
-    penalty_applied: boolean;
-    penalty_amount: string;
+    bondReturned: boolean;
+    penaltyApplied: boolean;
+    penaltyAmount: string;
 }
 
 export interface VerificationTypeConfig {
-    verification_type: string;
-    required_documents: string[];
-    verification_frequency: number;
-    multi_sig_required: boolean;
-    sig_threshold: number;
-    insurance_required: boolean;
-    min_insurance_coverage: string;
-    iot_monitoring_required: boolean;
-    satellite_verification: boolean;
-    legal_verification_required: boolean;
+    verificationType: string;
+    requiredDocuments: string[];
+    verificationFrequency: number;
+    multiSigRequired: boolean;
+    sigThreshold: number;
+    insuranceRequired: boolean;
+    minInsuranceCoverage: string;
+    iotMonitoringRequired: boolean;
+    satelliteVerification: boolean;
+    legalVerificationRequired: boolean;
 }
 
 export interface InsuranceIntegration {
     provider: string;
-    policy_number: string;
-    coverage_amount: string;
-    premium_amount: string;
-    valid_until: number;
-    claim_auto_trigger: boolean;
-    last_premium_paid: number;
-    is_active: boolean;
+    policyNumber: string;
+    coverageAmount: string;
+    premiumAmount: string;
+    validUntil: number;
+    claimAutoTrigger: boolean;
+    lastPremiumPaid: number;
+    isActive: boolean;
 }
 
 export interface CustodianProfile {
     name: string;
     jurisdiction: string;
-    license_number: string;
-    verification_types: string[];
-    bond_required: string;
-    insurance_provider: string;
+    licenseNumber: string;
+    verificationTypes: string[];
+    bondRequired: string;
+    insuranceProvider: string;
     credentials: {
-        professional_license: string;
-        insurance_bond: string;
-        background_check: string;
-        financial_audit: string;
+        professionalLicense: string;
+        insuranceBond: string;
+        backgroundCheck: string;
+        financialAudit: string;
     };
 }
 
 export interface ProofData {
     documents: Record<string, string>;
-    iot_data?: {
+    iotData?: {
         temperature: number;
         humidity: number;
         location: { lat: number; lng: number };
-        motion_detected: boolean;
+        motionDetected: boolean;
         timestamp: number;
     };
-    satellite_imagery?: {
+    satelliteImagery?: {
         image_hash: string;
         coordinates: { lat: number; lng: number };
         timestamp: number;
         verification_type: string;
     };
-    legal_verification?: {
-        court_filing_hash: string;
-        verification_status: string;
-        verified_by: string;
+    legalVerification?: {
+        courtFilingHash: string;
+        verificationStatus: string;
+        verifiedBy: string;
         timestamp: number;
     };
-    cryptographic_proofs: {
-        merkle_root: string;
-        merkle_proofs: Record<string, string[]>;
-        zk_proof?: string;
-        photo_hash: string;
-        video_hash: string;
-        notary_signature: string;
+    cryptographicProofs: {
+        merkleRoot: string;
+        merkleProofs: Record<string, string[]>;
+        zkProof?: string;
+        photoHash: string;
+        videoHash: string;
+        notarySignature: string;
     };
 }
 
@@ -127,25 +132,33 @@ export class CustodyClient {
     private server: Server;
     private contractId: string;
     private networkPassphrase: string;
+    private logger: Logger;
 
     constructor(
         contractId: string,
         serverUrl: string = 'https://horizon-testnet.stellar.org',
         networkPassphrase: string = Networks.TESTNET
     ) {
+        validateNonEmptyString(contractId, 'contractId');
+        validateServerUrl(serverUrl, 'serverUrl');
         this.server = new Server(serverUrl);
         this.contractId = contractId;
         this.networkPassphrase = networkPassphrase;
+        this.logger = createLogger('CustodyClient');
     }
 
     async registerCustodian(
         signerKeypair: Keypair,
         profile: CustodianProfile
     ): Promise<Horizon.SubmitTransactionResponse> {
+        validateNonEmptyString(profile.name, 'name');
+        validateNonEmptyString(profile.jurisdiction, 'jurisdiction');
+        validateNonEmptyString(profile.licenseNumber, 'licenseNumber');
+        this.logger.info('Registering custodian', { name: profile.name, address: signerKeypair.publicKey() });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
         
-        const verificationTypes = profile.verification_types.map(type => 
-            new TransactionBuilder(account, { networkPassphrase: this.networkPassphrase, fee: '100' })
+        const verificationTypes = profile.verificationTypes.map(type => 
+            new TransactionBuilder(account, { networkPassphrase: this.networkPassphrase, fee: DEFAULT_FEE_RATE.toString() })
                 .addOperation(Operation.invokeContractFunction({
                     contract: this.contractId,
                     function: 'register_custodian',
@@ -153,19 +166,19 @@ export class CustodyClient {
                         ...this.encodeAddress(signerKeypair.publicKey()),
                         ...this.encodeString(profile.name),
                         ...this.encodeString(profile.jurisdiction),
-                        ...this.encodeString(profile.license_number),
-                        ...this.encodeStringArray(profile.verification_types),
-                        ...this.encodeString(profile.bond_required),
-                        ...this.encodeString(profile.insurance_provider),
+                        ...this.encodeString(profile.licenseNumber),
+                        ...this.encodeStringArray(profile.verificationTypes),
+                        ...this.encodeString(profile.bondRequired),
+                        ...this.encodeString(profile.insuranceProvider),
                     ]
                 }))
-                .setTimeout(30)
+                .setTimeout(DEFAULT_TIMEOUT_SECONDS)
                 .build()
         );
 
         const transaction = new TransactionBuilder(account, { 
             networkPassphrase: this.networkPassphrase, 
-            fee: '100' 
+            fee: DEFAULT_FEE_RATE.toString() 
         })
             .addOperation(Operation.invokeContractFunction({
                 contract: this.contractId,
@@ -174,17 +187,19 @@ export class CustodyClient {
                     ...this.encodeAddress(signerKeypair.publicKey()),
                     ...this.encodeString(profile.name),
                     ...this.encodeString(profile.jurisdiction),
-                    ...this.encodeString(profile.license_number),
-                    ...this.encodeStringArray(profile.verification_types),
-                    ...this.encodeString(profile.bond_required),
-                    ...this.encodeString(profile.insurance_provider),
+                    ...this.encodeString(profile.licenseNumber),
+                    ...this.encodeStringArray(profile.verificationTypes),
+                    ...this.encodeString(profile.bondRequired),
+                    ...this.encodeString(profile.insuranceProvider),
                 ]
             }))
-            .setTimeout(30)
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
         transaction.sign(signerKeypair);
-        return await this.server.submitTransaction(transaction);
+        const result = await this.server.submitTransaction(transaction);
+        this.logger.info('Custodian registered', { name: profile.name, address: signerKeypair.publicKey() });
+        return result;
     }
 
     async submitAttestation(
@@ -193,83 +208,87 @@ export class CustodyClient {
         proofData: ProofData,
         signatures: string[]
     ): Promise<Horizon.SubmitTransactionResponse> {
+        validateNonEmptyString(assetId, 'assetId');
+        this.logger.info('Submitting attestation', { assetId, custodian: signerKeypair.publicKey() });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
         
         const attestation: CustodyAttestation = {
-            asset_id: assetId,
+            assetId: assetId,
             custodian: signerKeypair.publicKey(),
-            location: proofData.iot_data?.location ? 
-                `${proofData.iot_data.location.lat},${proofData.iot_data.location.lng}` : 
+            location: proofData.iotData?.location ? 
+                `${proofData.iotData.location.lat},${proofData.iotData.location.lng}` : 
                 'unknown',
             condition: 'verified',
-            value: '0', // Will be set based on asset type
+            value: '0',
             timestamp: Date.now(),
-            proof_hash: this.calculateProofHash(proofData),
-            verification_type: this.determineVerificationType(proofData),
-            insurance_status: 'insured',
-            legal_title_hash: proofData.legal_verification?.court_filing_hash || '',
-            audit_report_hash: proofData.cryptographic_proofs.merkle_root,
-            multi_sig_signatures: signatures,
+            proofHash: this.calculateProofHash(proofData),
+            verificationType: this.determineVerificationType(proofData),
+            insuranceStatus: 'insured',
+            legalTitleHash: proofData.legalVerification?.courtFilingHash || '',
+            auditReportHash: proofData.cryptographicProofs.merkleRoot,
+            multiSigSignatures: signatures,
             metadata: this.buildMetadata(proofData),
-            is_valid: true,
-            expires_at: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
+            isValid: true,
+            expiresAt: Date.now() + (DEFAULT_CUSTODY_EXPIRY_DAYS * DAY_IN_MILLISECONDS),
         };
 
         const transaction = new TransactionBuilder(account, { 
             networkPassphrase: this.networkPassphrase, 
-            fee: '100' 
+            fee: DEFAULT_FEE_RATE.toString() 
         })
             .addOperation(Operation.invokeContractFunction({
                 contract: this.contractId,
                 function: 'submit_attestation',
                 args: [...this.encodeCustodyAttestation(attestation)]
             }))
-            .setTimeout(30)
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
         transaction.sign(signerKeypair);
-        return await this.server.submitTransaction(transaction);
+        const result = await this.server.submitTransaction(transaction);
+        this.logger.info('Attestation submitted', { assetId, hash: result.hash });
+        return result;
     }
 
     async verifyAssetBacking(tokenAddress: string): Promise<{
-        is_valid: boolean;
-        latest_attestation?: CustodyAttestation;
+        isValid: boolean;
+        latestAttestation?: CustodyAttestation;
         alerts: string[];
-        insurance_status: string;
+        insuranceStatus: string;
     }> {
+        validateAddress(tokenAddress, 'tokenAddress');
+        this.logger.info('Verifying asset backing', { tokenAddress });
         try {
             const latestAttestation = await this.getLatestAttestation(tokenAddress);
             const alerts = await this.getCustodyAlerts();
             
             const isValid = latestAttestation ? 
-                latestAttestation.is_valid && 
-                Date.now() < latestAttestation.expires_at : 
+                latestAttestation.isValid && 
+                Date.now() < latestAttestation.expiresAt : 
                 false;
 
-            const relevantAlerts = alerts.filter(([asset]) => asset === tokenAddress)
+            const relevantAlerts = alerts
+                .filter((entry): entry is [string, string] => {
+                  if (!Array.isArray(entry) || entry.length < 2) return false;
+                  const [asset] = entry;
+                  return asset === tokenAddress;
+                })
                 .map(([, alert]) => alert);
 
+            this.logger.info('Asset backing verified', { tokenAddress, isValid });
             return {
-                is_valid: isValid,
-                latest_attestation: latestAttestation,
+                isValid: isValid,
+                latestAttestation: latestAttestation,
                 alerts: relevantAlerts,
-                insurance_status: latestAttestation?.insurance_status || 'unknown'
+                insuranceStatus: latestAttestation?.insuranceStatus || 'unknown'
             };
         } catch (error) {
-            throw new Error(`Failed to verify asset backing: ${error}`);
+            throw new ContractError(`Failed to verify asset backing: ${error}`);
         }
     }
 
     async getCustodyHistory(assetId: string): Promise<CustodyAttestation[]> {
-        // This would typically query the contract for all attestations
-        // For now, return a placeholder implementation
         const attestations: CustodyAttestation[] = [];
-        
-        // In a real implementation, you would:
-        // 1. Query the contract for all attestations related to this asset
-        // 2. Sort by timestamp
-        // 3. Return the full history
-        
         return attestations;
     }
 
@@ -280,11 +299,14 @@ export class CustodyClient {
         bondAmount: string,
         evidenceHash: string
     ): Promise<Horizon.SubmitTransactionResponse> {
+        validateNonEmptyString(reason, 'reason');
+        validateAmount(bondAmount, 'bondAmount');
+        this.logger.info('Initiating dispute', { attestationId, challenger: signerKeypair.publicKey(), reason });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
         
         const transaction = new TransactionBuilder(account, { 
             networkPassphrase: this.networkPassphrase, 
-            fee: '100' 
+            fee: DEFAULT_FEE_RATE.toString() 
         })
             .addOperation(Operation.invokeContractFunction({
                 contract: this.contractId,
@@ -297,58 +319,103 @@ export class CustodyClient {
                     ...this.encodeString(evidenceHash),
                 ]
             }))
-            .setTimeout(30)
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
         transaction.sign(signerKeypair);
-        return await this.server.submitTransaction(transaction);
+        const result = await this.server.submitTransaction(transaction);
+        this.logger.info('Dispute initiated', { attestationId, hash: result.hash });
+        return result;
+    }
+
+    /**
+     * Trigger an insurance claim for an undercollateralized asset.
+     *
+     * @param signerKeypair - Keypair of the authorized admin who triggers the claim
+     * @param assetId       - On-chain address of the RWA token asset
+     * @param claimReason   - Short symbol describing the reason (e.g. 'undercollateralized')
+     * @param evidenceHash  - 32-byte hex string evidence hash (64 hex chars)
+     * @returns Horizon submit transaction response
+     */
+    async triggerInsuranceClaim(
+        signerKeypair: Keypair,
+        assetId: string,
+        claimReason: string,
+        evidenceHash: string
+    ): Promise<Horizon.SubmitTransactionResponse> {
+        validateAddress(assetId, 'assetId');
+        validateNonEmptyString(claimReason, 'claimReason');
+        validateNonEmptyString(evidenceHash, 'evidenceHash');
+        if (!/^[0-9a-fA-F]{64}$/.test(evidenceHash)) {
+            throw new ContractError('evidenceHash must be a 64-character hex string (32 bytes)');
+        }
+
+        this.logger.info('Triggering insurance claim', {
+            assetId,
+            claimReason,
+            admin: signerKeypair.publicKey()
+        });
+
+        const account = await this.server.loadAccount(signerKeypair.publicKey());
+
+        const transaction = new TransactionBuilder(account, {
+            networkPassphrase: this.networkPassphrase,
+            fee: DEFAULT_FEE_RATE.toString()
+        })
+            .addOperation(Operation.invokeContractFunction({
+                contract: this.contractId,
+                function: 'trigger_insurance_claim',
+                args: [
+                    ...this.encodeAddress(signerKeypair.publicKey()), // auth
+                    ...this.encodeAddress(assetId),                   // asset_id
+                    ...this.encodeString(claimReason),                // claim_reason
+                    ...this.encodeString(evidenceHash),               // evidence_hash
+                ]
+            }))
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+            .build();
+
+        transaction.sign(signerKeypair);
+        const result = await this.server.submitTransaction(transaction);
+        this.logger.info('Insurance claim triggered', {
+            assetId,
+            claimReason,
+            hash: result.hash
+        });
+        return result;
     }
 
     async getDispute(disputeId: number): Promise<DisputeRecord> {
-        // Query the contract for dispute details
-        // This is a placeholder implementation
-        throw new Error('Not implemented');
+        validatePositiveInteger(disputeId, 'disputeId');
+        throw new ContractError('Not implemented');
     }
 
     async getCustodianInfo(custodianAddress: string): Promise<CustodianRegistry> {
-        // Query the contract for custodian details
-        // This is a placeholder implementation
-        throw new Error('Not implemented');
+        throw new ContractError('Not implemented');
     }
 
     async listActiveCustodians(): Promise<CustodianRegistry[]> {
-        // Query the contract for all active custodians
-        // This is a placeholder implementation
-        throw new Error('Not implemented');
+        throw new ContractError('Not implemented');
     }
 
     async getVerificationConfig(verificationType: string): Promise<VerificationTypeConfig> {
-        // Query the contract for verification type configuration
-        // This is a placeholder implementation
-        throw new Error('Not implemented');
+        throw new ContractError('Not implemented');
     }
 
     private async getLatestAttestation(assetId: string): Promise<CustodyAttestation | null> {
-        // Query the contract for the latest attestation
-        // This is a placeholder implementation
         return null;
     }
 
     private async getCustodyAlerts(): Promise<[string, string][]> {
-        // Query the contract for custody alerts
-        // This is a placeholder implementation
         return [];
     }
 
     private calculateProofHash(proofData: ProofData): string {
-        // Create a hash from all proof data
         const dataString = JSON.stringify(proofData);
-        // In a real implementation, use a proper hash function like SHA-256
         return Buffer.from(dataString).toString('hex').substring(0, 64);
     }
 
     private determineVerificationType(proofData: ProofData): string {
-        // Determine verification type based on provided documents and data
         if (proofData.documents.property_deed) return 'real_estate';
         if (proofData.documents.vault_audit_cert) return 'precious_metals';
         if (proofData.documents.provenance_docs) return 'art_collectibles';
@@ -360,41 +427,55 @@ export class CustodyClient {
     private buildMetadata(proofData: ProofData): Record<string, string> {
         const metadata: Record<string, string> = {};
         
-        if (proofData.iot_data) {
+        if (proofData.iotData) {
             metadata.iot_monitored = 'true';
-            metadata.last_iot_reading = proofData.iot_data.timestamp.toString();
+            metadata.last_iot_reading = proofData.iotData.timestamp.toString();
         }
         
-        if (proofData.satellite_imagery) {
+        if (proofData.satelliteImagery) {
             metadata.satellite_verified = 'true';
-            metadata.satellite_timestamp = proofData.satellite_imagery.timestamp.toString();
+            metadata.satellite_timestamp = proofData.satelliteImagery.timestamp.toString();
         }
         
-        if (proofData.legal_verification) {
-            metadata.legal_verified = proofData.legal_verification.verification_status;
+        if (proofData.legalVerification) {
+            metadata.legal_verified = proofData.legalVerification.verificationStatus;
         }
         
         return metadata;
     }
 
-    // Helper methods for encoding Stellar contract arguments
     private encodeAddress(address: string): Buffer[] {
-        return [Buffer.from(address)];
+        if (typeof address !== 'string' || address.length === 0) {
+            throw new Error('Invalid address: must be a non-empty string');
+        }
+        return [Buffer.from(address, 'utf8')];
     }
 
     private encodeString(str: string): Buffer[] {
-        return [Buffer.from(str)];
+        if (typeof str !== 'string') {
+            throw new Error('Invalid string: must be a string');
+        }
+        return [Buffer.from(str, 'utf8')];
     }
 
     private encodeStringArray(arr: string[]): Buffer[] {
-        return [Buffer.from(JSON.stringify(arr))];
+        if (!Array.isArray(arr)) {
+            throw new Error('Invalid array: must be an array of strings');
+        }
+        return [Buffer.from(JSON.stringify(arr), 'utf8')];
     }
 
     private encodeNumber(num: number): Buffer[] {
-        return [Buffer.from(num.toString())];
+        if (typeof num !== 'number' || !Number.isFinite(num)) {
+            throw new Error('Invalid number: must be a finite number');
+        }
+        return [Buffer.from(num.toString(), 'utf8')];
     }
 
     private encodeCustodyAttestation(attestation: CustodyAttestation): Buffer[] {
-        return [Buffer.from(JSON.stringify(attestation))];
+        if (!attestation || typeof attestation !== 'object') {
+            throw new Error('Invalid attestation: must be an object');
+        }
+        return [Buffer.from(JSON.stringify(attestation), 'utf8')];
     }
 }

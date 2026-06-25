@@ -126,9 +126,14 @@ function App() {
 
 ## 📖 Documentation
 
+### API Reference
+API reference for Soroban contracts and the TypeScript SDK:
+- [`docs/api/README.md`](docs/api/README.md)
+
 ### Architecture Overview
 
 The Stellar RWA Tokenization Suite follows a modular architecture:
+
 
 1. **Smart Contracts Layer**: Soroban contracts on Stellar blockchain
 2. **SDK Layer**: TypeScript client for contract interaction

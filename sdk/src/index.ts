@@ -7,6 +7,10 @@ import { MarketClient } from './marketClient';
 import { ComplianceClient } from './complianceClient';
 import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
+import { InvalidParametersError, RWASDKError, NetworkError, ContractError } from './errors';
+import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 
 // Type exports
 export * from './types';
@@ -38,6 +42,7 @@ export * from './errors';
 // Configuration utilities
 export class StellarRWASDK {
   private config: RWASDKConfig;
+  private logger: Logger;
   
   // Client instances
   public assetFactory: AssetFactory;
@@ -47,10 +52,18 @@ export class StellarRWASDK {
   public custodyClient: CustodyClient;
 
   constructor(config: RWASDKConfig) {
+    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
+    validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
     this.config = config;
+    this.logger = createLogger('StellarRWASDK');
+    this.logger.info('Initializing SDK', { network: config.stellar.network, serverUrl: config.stellar.serverUrl });
     
     // Initialize all clients
-    this.assetFactory = new AssetFactory(config);
+    this.assetFactory = new AssetFactory(
+      config.stellar.serverUrl,
+      config.contracts.assetFactory,
+      config.stellar.passphrase
+    );
     this.complianceClient = new ComplianceClient(config);
     this.dividendClient = new DividendClient(config);
     this.marketClient = new MarketClient(config);
@@ -59,12 +72,16 @@ export class StellarRWASDK {
       config.stellar.serverUrl,
       config.stellar.passphrase
     );
+    this.logger.info('SDK initialized successfully');
   }
 
   /**
    * Create a token client for a specific RWA token
    */
   createTokenClient(tokenAddress: Address): TokenClient {
+    if (tokenAddress == null) {
+      throw new InvalidParametersError('tokenAddress is required');
+    }
     return new TokenClient(this.config, tokenAddress);
   }
 
@@ -79,10 +96,36 @@ export class StellarRWASDK {
    * Update configuration
    */
   updateConfig(newConfig: Partial<RWASDKConfig>): void {
+    if (newConfig.stellar?.serverUrl) {
+      validateServerUrl(newConfig.stellar.serverUrl, 'config.stellar.serverUrl');
+    }
+    if (newConfig.stellar?.passphrase) {
+      validateNonEmptyString(newConfig.stellar.passphrase, 'config.stellar.passphrase');
+    }
+    if (newConfig.contracts?.assetFactory) {
+      validateAddress(newConfig.contracts.assetFactory, 'config.contracts.assetFactory');
+    }
+    if (newConfig.contracts?.complianceRegistry) {
+      validateAddress(newConfig.contracts.complianceRegistry, 'config.contracts.complianceRegistry');
+    }
+    if (newConfig.contracts?.dividendDistributor) {
+      validateAddress(newConfig.contracts.dividendDistributor, 'config.contracts.dividendDistributor');
+    }
+    if (newConfig.contracts?.secondaryMarket) {
+      validateAddress(newConfig.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
+    }
+    if (newConfig.contracts?.custodyValidator) {
+      validateAddress(newConfig.contracts.custodyValidator, 'config.contracts.custodyValidator');
+    }
+    this.logger.info('Updating SDK configuration', { newConfig: Object.keys(newConfig) });
     this.config = { ...this.config, ...newConfig };
     
     // Reinitialize clients with new config
-    this.assetFactory = new AssetFactory(this.config);
+    this.assetFactory = new AssetFactory(
+      this.config.stellar.serverUrl,
+      this.config.contracts.assetFactory,
+      this.config.stellar.passphrase
+    );
     this.complianceClient = new ComplianceClient(this.config);
     this.dividendClient = new DividendClient(this.config);
     this.marketClient = new MarketClient(this.config);
@@ -91,6 +134,7 @@ export class StellarRWASDK {
       this.config.stellar.serverUrl,
       this.config.stellar.passphrase
     );
+    this.logger.info('SDK configuration updated');
   }
 
   /**
@@ -115,7 +159,7 @@ export class StellarRWASDK {
         protocolVersion: network.protocolVersion
       };
     } catch (error) {
-      throw new Error(`Failed to get network info: ${error.message}`);
+      throw new NetworkError(`Failed to get network info: ${error.message}`);
     }
   }
 
@@ -124,23 +168,23 @@ export class StellarRWASDK {
    */
   validateConfig(): void {
     if (!this.config.stellar) {
-      throw new Error('Stellar configuration is required');
+      throw new InvalidParametersError('Stellar configuration is required');
     }
 
     if (!this.config.stellar.network) {
-      throw new Error('Stellar network is required');
+      throw new InvalidParametersError('Stellar network is required');
     }
 
     if (!this.config.stellar.serverUrl) {
-      throw new Error('Stellar server URL is required');
+      throw new InvalidParametersError('Stellar server URL is required');
     }
 
     if (!this.config.stellar.passphrase) {
-      throw new Error('Stellar passphrase is required');
+      throw new InvalidParametersError('Stellar passphrase is required');
     }
 
     if (!this.config.contracts) {
-      throw new Error('Contracts configuration is required');
+      throw new InvalidParametersError('Contracts configuration is required');
     }
 
     const requiredContracts = [
@@ -153,7 +197,7 @@ export class StellarRWASDK {
 
     for (const contract of requiredContracts) {
       if (!this.config.contracts[contract]) {
-        throw new Error(`${contract} contract address is required`);
+        throw new InvalidParametersError(`${contract} contract address is required`);
       }
     }
   }
@@ -172,6 +216,17 @@ export class StellarRWASDK {
     dividendHash: string;
     marketHash: string;
   }> {
+    validateAddress(deployer, 'deployer');
+    if (txOptions.fee != null) {
+      if (typeof txOptions.fee !== 'number' || txOptions.fee <= 0) {
+        throw new InvalidParametersError('txOptions.fee must be a positive number');
+      }
+    }
+    if (txOptions.timeout != null) {
+      if (typeof txOptions.timeout !== 'number' || txOptions.timeout <= 0) {
+        throw new InvalidParametersError('txOptions.timeout must be a positive number');
+      }
+    }
     try {
       // Step 1: Deploy the RWA token
       const tokenResult = await this.assetFactory.deployRWAToken(
@@ -214,7 +269,7 @@ export class StellarRWASDK {
         marketHash
       };
     } catch (error) {
-      throw new Error(`Complete deployment failed: ${error.message}`);
+      throw new ContractError(`Complete deployment failed: ${error.message}`);
     }
   }
 
@@ -236,9 +291,9 @@ export class StellarRWASDK {
     try {
       // This would aggregate data from all contracts
       // For now, return a placeholder implementation
-      throw new Error('getUserPortfolio not implemented');
+      throw new ContractError('getUserPortfolio not implemented');
     } catch (error) {
-      throw new Error(`Failed to get user portfolio: ${error.message}`);
+      throw new ContractError(`Failed to get user portfolio: ${error.message}`);
     }
   }
 
@@ -258,9 +313,9 @@ export class StellarRWASDK {
     try {
       // This would aggregate data from all contracts
       // For now, return a placeholder implementation
-      throw new Error('getPlatformStats not implemented');
+      throw new ContractError('getPlatformStats not implemented');
     } catch (error) {
-      throw new Error(`Failed to get platform stats: ${error.message}`);
+      throw new ContractError(`Failed to get platform stats: ${error.message}`);
     }
   }
 }
@@ -300,30 +355,7 @@ export function createStellarRWASDK(
     defaultTimeout?: number;
   }
 ): StellarRWASDK {
-  const networkConfigs = {
-    testnet: {
-      serverUrl: 'https://horizon-testnet.stellar.org',
-      horizonUrl: 'https://horizon-testnet.stellar.org',
-      passphrase: 'Test SDF Network ; September 2015'
-    },
-    mainnet: {
-      serverUrl: 'https://horizon.stellar.org',
-      horizonUrl: 'https://horizon.stellar.org',
-      passphrase: 'Public Global Stellar Network ; September 2015'
-    },
-    futurenet: {
-      serverUrl: 'https://horizon-futurenet.stellar.org',
-      horizonUrl: 'https://horizon-futurenet.stellar.org',
-      passphrase: 'Test SDF Future Network ; October 2022'
-    },
-    standalone: {
-      serverUrl: 'http://localhost:8000',
-      horizonUrl: 'http://localhost:8000',
-      passphrase: 'Standalone Network ; February 2017'
-    }
-  };
-
-  const config = networkConfigs[network];
+  const config = STELLAR_NETWORKS[network];
   
   const sdkConfig: RWASDKConfig = {
     stellar: {
@@ -333,8 +365,8 @@ export function createStellarRWASDK(
       passphrase: config.passphrase
     },
     contracts,
-    defaultFeeRate: options?.defaultFeeRate || 100,
-    defaultTimeout: options?.defaultTimeout || 30
+    defaultFeeRate: options?.defaultFeeRate || DEFAULT_FEE_RATE,
+    defaultTimeout: options?.defaultTimeout || DEFAULT_TIMEOUT_SECONDS
   };
 
   return new StellarRWASDK(sdkConfig);
@@ -343,16 +375,27 @@ export function createStellarRWASDK(
 // Utility functions
 export function isValidAddress(address: string): boolean {
   try {
-    new (require('stellar-sdk')).Address(address);
+    const { Address: StellarAddress } = require('stellar-sdk');
+    new StellarAddress(address);
     return true;
   } catch {
     return false;
   }
 }
 
-export function formatAmount(amount: string | number, decimals: number = 18): string {
-  const num = typeof amount === 'string' ? BigInt(amount) : BigInt(amount);
-  const divisor = BigInt(10 ** decimals);
+function safeBigInt(value: string | number): bigint {
+  try {
+    const str = typeof value === 'number' ? Math.floor(value).toString() : value;
+    return BigInt(str);
+  } catch {
+    return 0n;
+  }
+}
+
+export function formatAmount(amount: string | number, decimals: number = DEFAULT_DECIMALS): string {
+  validateAmount(amount, 'amount');
+  const num = safeBigInt(amount);
+  const divisor = safeBigInt(10) ** safeBigInt(decimals);
   const whole = num / divisor;
   const fractional = num % divisor;
   
@@ -366,11 +409,14 @@ export function formatAmount(amount: string | number, decimals: number = 18): st
   return `${whole}.${trimmedFractional}`;
 }
 
-export function parseAmount(amount: string, decimals: number = 18): string {
+export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS): string {
+  if (!/^\d+(\.\d+)?$/.test(amount)) {
+    throw new InvalidParametersError('Invalid amount format');
+  }
   const [whole, fractional = ''] = amount.split('.');
-  const wholeBigInt = BigInt(whole);
-  const fractionalBigInt = fractional ? BigInt(fractional.padEnd(decimals, '0').slice(0, decimals)) : 0n;
-  const divisor = BigInt(10 ** decimals);
+  const wholeBigInt = safeBigInt(whole.replace(/[^0-9-]/g, '') || '0');
+  const fractionalBigInt = fractional ? safeBigInt(fractional.padEnd(decimals, '0').slice(0, decimals)) : 0n;
+  const divisor = safeBigInt(10) ** safeBigInt(decimals);
   
   return (wholeBigInt * divisor + fractionalBigInt).toString();
 }

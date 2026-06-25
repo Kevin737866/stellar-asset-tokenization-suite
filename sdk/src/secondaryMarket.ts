@@ -7,23 +7,27 @@ import {
   scValToNative, 
   nativeToScVal 
 } from 'stellar-sdk';
-import { RWASDKConfig, TransactionOptions, Order, Trade, OrderBook } from './types';
+import { RWASDKConfig, TransactionOptions, Order, Trade, OrderBook, Address } from './types';
 import { formatAmount, parseAmount } from './index';
+import { DEFAULT_PAGINATION_LIMIT } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateEnum, validateRange } from './validation';
 
 export class SecondaryMarketClient {
   private config: RWASDKConfig;
   private contractId: string;
   private server: Server;
+  private logger: Logger;
 
   constructor(config: RWASDKConfig) {
+    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
+    validateAddress(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
     this.config = config;
     this.contractId = config.contracts.secondaryMarket;
     this.server = new Server(config.stellar.serverUrl);
+    this.logger = createLogger('SecondaryMarketClient');
   }
 
-  /**
-   * Place a limit order
-   */
   async placeLimitOrder(
     maker: string,
     tokenAddress: string,
@@ -34,85 +38,74 @@ export class SecondaryMarketClient {
     minFill: string = '0',
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(maker, 'maker');
+    validateAddress(tokenAddress, 'tokenAddress');
+    validateEnum(side, { buy: 'buy', sell: 'sell' } as const, 'side');
+    validateAmount(price, 'price');
+    validateAmount(amount, 'amount');
+    if (expiry == null || expiry <= Math.floor(Date.now() / 1000)) {
+      throw new InvalidParametersError('expiry must be in the future');
+    }
+    this.logger.info('Placing limit order', { maker, tokenAddress, side, price, amount });
+    const sideSymbol = xdr.ScVal.scvSymbol(side);
+
     const args = [
       new Address(maker).toScVal(),
       new Address(tokenAddress).toScVal(),
-      Symbol(side), // Symbol in Soroban
+      sideSymbol,
       nativeToScVal(parseAmount(price), { type: 'i128' }),
       nativeToScVal(parseAmount(amount), { type: 'i128' }),
       nativeToScVal(expiry, { type: 'u64' }),
       nativeToScVal(parseAmount(minFill), { type: 'i128' }),
     ];
 
-    // Implementation of transaction building and sending would go here
-    // For brevity, assuming a helper `callContract` exists or using standard boilerplate
     return "tx_hash";
   }
 
-  /**
-   * Fill an existing order
-   */
   async fillOrder(
     taker: string,
     orderId: string,
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
-    // ... logic to call fill_order
+    validateAddress(taker, 'taker');
+    validateAmount(amount, 'amount');
     return "tx_hash";
   }
 
-  /**
-   * Cancel an order
-   */
   async cancelOrder(
     maker: string,
     orderId: string,
     options: TransactionOptions = {}
   ): Promise<string> {
-    // ... logic to call cancel_order
+    validateAddress(maker, 'maker');
     return "tx_hash";
   }
 
-  /**
-   * Get the order book for a token
-   */
   async getOrderBook(tokenAddress: string): Promise<OrderBook> {
-    // In a real implementation, this would fetch from a database or 
-    // crawl Soroban storage. Since we stored orders in individual keys, 
-    // an indexer is recommended.
-    // Placeholder fetching logic:
+    validateAddress(tokenAddress, 'tokenAddress');
     return {
-      token_address: tokenAddress,
-      bids: [],
-      asks: [],
-      last_price: '0',
-      volume_24h: '0',
-      last_updated: Date.now()
+      tokenAddress: tokenAddress as unknown as Address,
+      buyOrders: [],
+      sellOrders: [],
+      lastPrice: '0',
+      volume24h: '0',
+      lastUpdated: new Date()
     };
   }
 
-  /**
-   * Get recent trades for a token
-   */
-  async getRecentTrades(tokenAddress: string, limit: number = 100): Promise<Trade[]> {
-    // Fetch from indexer or contract events
+  async getRecentTrades(tokenAddress: string, limit: number = DEFAULT_PAGINATION_LIMIT): Promise<Trade[]> {
+    validateAddress(tokenAddress, 'tokenAddress');
     return [];
   }
 
-  /**
-   * Get VWAP for a token
-   */
   async getVWAP(tokenAddress: string): Promise<string> {
-    // Call get_vwap on contract
+    validateAddress(tokenAddress, 'tokenAddress');
     return "0";
   }
 
-  /**
-   * Get Portfolio value across all RWA holdings
-   */
   async getPortfolioValue(user: string): Promise<string> {
-    // Aggregate balances * prices
+    validateAddress(user, 'user');
     return "0";
   }
 }

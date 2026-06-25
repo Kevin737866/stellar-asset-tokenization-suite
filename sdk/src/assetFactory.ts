@@ -1,8 +1,8 @@
-import { 
-  Server, 
-  TransactionBuilder, 
-  Asset, 
-  Keypair, 
+import {
+  Server,
+  TransactionBuilder,
+  Asset,
+  Keypair,
   Contract,
   SorobanRpc,
   xdr,
@@ -11,6 +11,12 @@ import {
   nativeToScVal,
   scValToNative
 } from '@stellar/stellar-sdk';
+
+import { RWASDKError, InvalidParametersError, TransactionError, NetworkError } from './errors';
+import { ErrorCode } from './types';
+import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, HOLDING_PERIOD_RULE_144, HOLDING_PERIOD_DEFAULT, HOLDING_PERIOD_INVOICE, HOLDING_PERIOD_ART, HOLDING_PERIOD_SECURITY, TRANSFER_LIMIT_REAL_ESTATE, TRANSFER_LIMIT_COMMODITY, TRANSFER_LIMIT_INVOICE, TRANSFER_LIMIT_SECURITY, TRANSFER_LIMIT_ART, TRANSFER_LIMIT_CARBON_CREDIT, RENTAL_YIELD_MAX_BASIS_POINTS, VALID_PURITY_GRADES, VALID_CREDIT_RATINGS, VALID_REGULATION_FRAMEWORKS, DAY_IN_SECONDS } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateNonNegativeInteger } from './validation';
 
 export enum AssetClass {
   RealEstate = 0,
@@ -22,136 +28,182 @@ export enum AssetClass {
 }
 
 export interface ComplianceRules {
-  kyc_required: boolean;
-  accredited_investor_only: boolean;
-  geographic_restrictions: string[];
-  holding_period_days: number;
-  transfer_limits: bigint;
+  kycRequired: boolean;
+  accreditedInvestorOnly: boolean;
+  geographicRestrictions: string[];
+  holdingPeriodDays: number;
+  transferLimits: bigint;
 }
 
 export interface DividendSchedule {
-  frequency_days: number;
-  next_distribution_date: number;
-  total_distributed: bigint;
-  is_active: boolean;
+  frequencyDays: number;
+  nextDistributionDate: number;
+  totalDistributed: bigint;
+  isActive: boolean;
 }
 
 export interface AssetConfig {
   name: string;
   symbol: string;
   decimals: number;
-  total_supply: bigint;
-  asset_class: AssetClass;
-  compliance_rules: ComplianceRules;
-  dividend_schedule?: DividendSchedule;
+  totalSupply: bigint;
+  assetClass: AssetClass;
+  complianceRules: ComplianceRules;
+  dividendSchedule?: DividendSchedule;
   metadata: Record<string, string>;
 }
 
 export interface RealEstateConfig {
-  property_address: string;
-  location_oracle: string;
-  rental_yield_rate: number; // in basis points
-  property_management_voting: boolean;
-  insurance_status: boolean;
-  appraisal_value: bigint;
+  propertyAddress: string;
+  locationOracle: string;
+  rentalYieldRate: number;
+  propertyManagementVoting: boolean;
+  insuranceStatus: boolean;
+  appraisalValue: bigint;
 }
 
 export interface CommodityConfig {
-  commodity_type: string;
-  vault_location: string;
-  custody_vault: string;
-  purity_grade: string;
-  physical_redemption_window: number;
-  quality_attestation: string;
+  commodityType: string;
+  vaultLocation: string;
+  custodyVault: string;
+  purityGrade: string;
+  physicalRedemptionWindow: number;
+  qualityAttestation: string;
 }
 
 export interface InvoiceConfig {
-  invoice_number: string;
-  debtor_address: string;
-  due_date: number;
-  credit_rating: string;
-  automatic_settlement: boolean;
-  invoice_amount: bigint;
+  invoiceNumber: string;
+  debtorAddress: string;
+  dueDate: number;
+  creditRating: string;
+  automaticSettlement: boolean;
+  invoiceAmount: bigint;
 }
 
 export interface SecurityConfig {
-  equity_type: string;
-  regulation_framework: string;
-  accreditation_required: boolean;
-  holding_period_days: number;
-  regulatory_reporting: boolean;
+  equityType: string;
+  regulationFramework: string;
+  accreditationRequired: boolean;
+  holdingPeriodDays: number;
+  regulatoryReporting: boolean;
   isin: string;
 }
 
 export interface ArtConfig {
-  artist_name: string;
-  provenance_hash: string;
-  insurance_status: boolean;
-  exhibition_voting: boolean;
-  appraisal_value: bigint;
-  authenticity_certificate: string;
+  artistName: string;
+  provenanceHash: string;
+  insuranceStatus: boolean;
+  exhibitionVoting: boolean;
+  appraisalValue: bigint;
+  authenticityCertificate: string;
 }
 
 export interface CarbonCreditConfig {
-  project_id: string;
-  vintage_year: number;
-  retirement_functionality: boolean;
-  project_metadata: Record<string, string>;
-  verification_standard: string;
-  carbon_offset_amount: bigint;
+  projectId: string;
+  vintageYear: number;
+  retirementFunctionality: boolean;
+  projectMetadata: Record<string, string>;
+  verificationStandard: string;
+  carbonOffsetAmount: bigint;
 }
 
 export interface DeploymentCost {
-  gas_cost_xlm: number;
-  storage_cost_bytes: number;
-  estimated_time_seconds: number;
+  gasCostXlm: number;
+  storageCostBytes: number;
+  estimatedTimeSeconds: number;
 }
 
+/**
+ * Client for interacting with the on-chain AssetFactory contract.
+ *
+ * Provides helpers for deploying asset-class-specific RWA tokens, estimating
+ * deployment costs, and querying the on-chain asset registry.
+ *
+ * @example
+ * ```ts
+ * const factory = new AssetFactory(
+ *   'https://horizon-testnet.stellar.org',
+ *   'CONTRACT_ID'
+ * );
+ * const result = await factory.deployRealEstateToken(signer, propertyDetails, config);
+ * ```
+ */
 export class AssetFactory {
   private server: Server;
   private contract: Contract;
   private networkPassphrase: string;
+  private logger: Logger;
 
+  /**
+   * Create a new AssetFactory client.
+   *
+   * @param serverUrl - Soroban RPC / Horizon server URL.
+   * @param contractId - Stellar contract ID of the deployed AssetFactory contract.
+   * @param networkPassphrase - Network passphrase used to sign transactions.
+   *   Defaults to the Stellar testnet passphrase.
+   */
   constructor(
     serverUrl: string,
     contractId: string,
     networkPassphrase: string = 'Test SDF Network ; September 2015'
   ) {
+    validateServerUrl(serverUrl, 'serverUrl');
+    validateContractId(contractId, 'contractId');
+    validateNonEmptyString(networkPassphrase, 'networkPassphrase');
     this.server = new Server(serverUrl);
     this.contract = new Contract(contractId);
     this.networkPassphrase = networkPassphrase;
+    this.logger = createLogger('AssetFactory');
+    this.logger.info('AssetFactory initialized', { contractId });
   }
 
   /**
-   * Deploy a Real Estate token with specialized configuration
+   * Deploy a Real Estate RWA token with property-specific metadata.
+   *
+   * Merges `propertyDetails` into the asset metadata and calls `create_asset`
+   * on the factory contract with `AssetClass.RealEstate`.
+   *
+   * @param signer - Keypair that authorises and signs the transaction.
+   * @param propertyDetails - Real-estate-specific configuration (location oracle,
+   *   rental yield, appraisal value, etc.).
+   * @param ownershipStructure - Base asset configuration (name, symbol, supply, etc.).
+   * @returns The deployed token contract address and the Stellar transaction ID.
+   * @throws {InvalidParametersError} If required fields in `ownershipStructure` are invalid.
+   * @throws {RWASDKError} If the transaction fails on-chain.
    */
   async deployRealEstateToken(
     signer: Keypair,
     propertyDetails: RealEstateConfig,
     ownershipStructure: AssetConfig
   ): Promise<{ address: string; transactionId: string }> {
+    validateNonEmptyString(propertyDetails.propertyAddress, 'propertyAddress');
+    validateNonEmptyString(propertyDetails.locationOracle, 'locationOracle');
+    if (propertyDetails.appraisalValue < 0n) {
+      throw new InvalidParametersError('appraisalValue must be non-negative');
+    }
     const account = await this.server.getAccount(signer.publicKey());
-    
-    // Create real estate specific metadata
+
     const metadata = {
       ...ownershipStructure.metadata,
-      property_address: propertyDetails.property_address,
-      location_oracle: propertyDetails.location_oracle,
-      rental_yield: propertyDetails.rental_yield_rate.toString(),
-      insurance_status: propertyDetails.insurance_status.toString(),
-      appraisal_value: propertyDetails.appraisal_value.toString(),
-      property_management_voting: propertyDetails.property_management_voting.toString()
+      property_address: propertyDetails.propertyAddress,
+      location_oracle: propertyDetails.locationOracle,
+      rental_yield: propertyDetails.rentalYieldRate.toString(),
+      insurance_status: propertyDetails.insuranceStatus.toString(),
+      appraisal_value: propertyDetails.appraisalValue.toString(),
+      property_management_voting: propertyDetails.propertyManagementVoting.toString()
     };
 
     const config: AssetConfig = {
       ...ownershipStructure,
-      asset_class: AssetClass.RealEstate,
+      assetClass: AssetClass.RealEstate,
       metadata
     };
 
+    this.logger.info('Deploying Real Estate token', { name: config.name, propertyAddress: propertyDetails.propertyAddress });
     const tx = await this.buildCreateAssetTransaction(signer, config);
     const result = await this.submitTransaction(tx, signer);
-    
+
+    this.logger.info('Real Estate token deployed', { address: result.returnValue?.address || '', txHash: result.hash });
     return {
       address: result.returnValue?.address || '',
       transactionId: result.hash
@@ -159,40 +211,52 @@ export class AssetFactory {
   }
 
   /**
-   * Deploy a Commodity token with specialized configuration
+   * Deploy a Commodity RWA token with vault and purity metadata.
+   *
+   * Validates the purity grade against the accepted set (`999`, `995`, `990`, `750`)
+   * before calling `create_asset` with `AssetClass.Commodity`.
+   *
+   * @param signer - Keypair that authorises and signs the transaction.
+   * @param commodityConfig - Commodity-specific configuration (vault location,
+   *   purity grade, physical redemption window, etc.).
+   * @param baseConfig - Base asset configuration (name, symbol, supply, etc.).
+   * @returns The deployed token contract address and the Stellar transaction ID.
+   * @throws {InvalidParametersError} If `purityGrade` is not one of the accepted values.
+   * @throws {RWASDKError} If the transaction fails on-chain.
    */
   async deployCommodityToken(
     signer: Keypair,
     commodityConfig: CommodityConfig,
     baseConfig: AssetConfig
   ): Promise<{ address: string; transactionId: string }> {
+    validateNonEmptyString(commodityConfig.commodityType, 'commodityType');
+    validateNonNegativeInteger(commodityConfig.physicalRedemptionWindow, 'physicalRedemptionWindow');
     const account = await this.server.getAccount(signer.publicKey());
-    
-    // Validate purity grade
-    const validGrades = ['999', '995', '990', '750'];
-    if (!validGrades.includes(commodityConfig.purity_grade)) {
-      throw new Error('Invalid purity grade. Must be one of: ' + validGrades.join(', '));
+
+    if (!VALID_PURITY_GRADES.includes(commodityConfig.purityGrade as any)) {
+      throw new InvalidParametersError('Invalid purity grade. Must be one of: ' + VALID_PURITY_GRADES.join(', '));
     }
 
-    // Create commodity specific metadata
     const metadata = {
       ...baseConfig.metadata,
-      commodity_type: commodityConfig.commodity_type,
-      vault_location: commodityConfig.vault_location,
-      purity_grade: commodityConfig.purity_grade,
-      redemption_window: commodityConfig.physical_redemption_window.toString(),
-      custody_vault: commodityConfig.custody_vault
+      commodity_type: commodityConfig.commodityType,
+      vault_location: commodityConfig.vaultLocation,
+      purity_grade: commodityConfig.purityGrade,
+      redemption_window: commodityConfig.physicalRedemptionWindow.toString(),
+      custody_vault: commodityConfig.custodyVault
     };
 
     const config: AssetConfig = {
       ...baseConfig,
-      asset_class: AssetClass.Commodity,
+      assetClass: AssetClass.Commodity,
       metadata
     };
 
+    this.logger.info('Deploying Commodity token', { name: baseConfig.name, purityGrade: commodityConfig.purityGrade });
     const tx = await this.buildCreateAssetTransaction(signer, config);
     const result = await this.submitTransaction(tx, signer);
-    
+
+    this.logger.info('Commodity token deployed', { address: result.returnValue?.address || '', txHash: result.hash });
     return {
       address: result.returnValue?.address || '',
       transactionId: result.hash
@@ -200,48 +264,62 @@ export class AssetFactory {
   }
 
   /**
-   * Deploy an Invoice token with specialized configuration
+   * Deploy an Invoice RWA token backed by a trade receivable.
+   *
+   * Validates that `dueDate` is in the future and that `creditRating` is one
+   * of the accepted values (`AAA`–`CCC`). Sets `totalSupply` to the invoice
+   * face value before calling `create_asset` with `AssetClass.Invoice`.
+   *
+   * @param signer - Keypair that authorises and signs the transaction.
+   * @param invoiceData - Invoice-specific configuration (invoice number, debtor,
+   *   due date, credit rating, face amount, etc.).
+   * @param baseConfig - Base asset configuration (name, symbol, compliance rules, etc.).
+   * @returns The deployed token contract address and the Stellar transaction ID.
+   * @throws {InvalidParametersError} If `dueDate` is in the past or `creditRating` is invalid.
+   * @throws {RWASDKError} If the transaction fails on-chain.
    */
   async deployInvoiceToken(
     signer: Keypair,
     invoiceData: InvoiceConfig,
     baseConfig: AssetConfig
   ): Promise<{ address: string; transactionId: string }> {
+    validateNonEmptyString(invoiceData.invoiceNumber, 'invoiceNumber');
+    if (invoiceData.invoiceAmount <= 0n) {
+      throw new InvalidParametersError('invoiceAmount must be greater than zero');
+    }
     const account = await this.server.getAccount(signer.publicKey());
-    
-    // Validate due date is in future
+
     const currentTime = Math.floor(Date.now() / 1000);
-    if (invoiceData.due_date <= currentTime) {
-      throw new Error('Due date must be in future');
+    if (invoiceData.dueDate <= currentTime) {
+      throw new InvalidParametersError('Due date must be in future');
     }
 
-    // Validate credit rating
-    const validRatings = ['AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC'];
-    if (!validRatings.includes(invoiceData.credit_rating)) {
-      throw new Error('Invalid credit rating. Must be one of: ' + validRatings.join(', '));
+    if (!VALID_CREDIT_RATINGS.includes(invoiceData.creditRating as any)) {
+      throw new InvalidParametersError('Invalid credit rating. Must be one of: ' + VALID_CREDIT_RATINGS.join(', '));
     }
 
-    // Create invoice specific metadata
     const metadata = {
       ...baseConfig.metadata,
-      invoice_number: invoiceData.invoice_number,
-      debtor_address: invoiceData.debtor_address,
-      due_date: invoiceData.due_date.toString(),
-      credit_rating: invoiceData.credit_rating,
-      invoice_amount: invoiceData.invoice_amount.toString(),
-      automatic_settlement: invoiceData.automatic_settlement.toString()
+      invoice_number: invoiceData.invoiceNumber,
+      debtor_address: invoiceData.debtorAddress,
+      due_date: invoiceData.dueDate.toString(),
+      credit_rating: invoiceData.creditRating,
+      invoice_amount: invoiceData.invoiceAmount.toString(),
+      automatic_settlement: invoiceData.automaticSettlement.toString()
     };
 
     const config: AssetConfig = {
       ...baseConfig,
-      asset_class: AssetClass.Invoice,
-      total_supply: invoiceData.invoice_amount,
+      assetClass: AssetClass.Invoice,
+      totalSupply: invoiceData.invoiceAmount,
       metadata
     };
 
+    this.logger.info('Deploying Invoice token', { invoiceNumber: invoiceData.invoiceNumber, amount: invoiceData.invoiceAmount.toString() });
     const tx = await this.buildCreateAssetTransaction(signer, config);
     const result = await this.submitTransaction(tx, signer);
-    
+
+    this.logger.info('Invoice token deployed', { address: result.returnValue?.address || '', txHash: result.hash });
     return {
       address: result.returnValue?.address || '',
       transactionId: result.hash
@@ -249,7 +327,19 @@ export class AssetFactory {
   }
 
   /**
-   * Deploy a Security token with specialized configuration
+   * Deploy a Security (equity) RWA token with regulatory compliance metadata.
+   *
+   * Validates `regulationFramework` against accepted values (`REG_D`, `REG_S`,
+   * `RULE_144`, `REG_A+`) and enforces accredited-investor-only compliance rules.
+   * Holding period is set to 365 days for `RULE_144`, 90 days otherwise.
+   *
+   * @param signer - Keypair that authorises and signs the transaction.
+   * @param equityType - Type of equity (e.g. `"common"`, `"preferred"`).
+   * @param regulationFramework - Applicable securities regulation framework.
+   * @param baseConfig - Base asset configuration (name, symbol, supply, etc.).
+   * @returns The deployed token contract address and the Stellar transaction ID.
+   * @throws {InvalidParametersError} If `regulationFramework` is not one of the accepted values.
+   * @throws {RWASDKError} If the transaction fails on-chain.
    */
   async deploySecurityToken(
     signer: Keypair,
@@ -257,22 +347,19 @@ export class AssetFactory {
     regulationFramework: string,
     baseConfig: AssetConfig
   ): Promise<{ address: string; transactionId: string }> {
+    validateNonEmptyString(equityType, 'equityType');
     const account = await this.server.getAccount(signer.publicKey());
-    
-    // Validate regulation framework
-    const validFrameworks = ['REG_D', 'REG_S', 'RULE_144', 'REG_A+'];
-    if (!validFrameworks.includes(regulationFramework)) {
-      throw new Error('Invalid regulation framework. Must be one of: ' + validFrameworks.join(', '));
+
+    if (!VALID_REGULATION_FRAMEWORKS.includes(regulationFramework as any)) {
+      throw new InvalidParametersError('Invalid regulation framework. Must be one of: ' + VALID_REGULATION_FRAMEWORKS.join(', '));
     }
 
-    // Update compliance rules for securities
     const complianceRules: ComplianceRules = {
-      ...baseConfig.compliance_rules,
-      accredited_investor_only: true,
-      holding_period_days: regulationFramework === 'RULE_144' ? 365 : 90
+      ...baseConfig.complianceRules,
+      accreditedInvestorOnly: true,
+      holdingPeriodDays: regulationFramework === 'RULE_144' ? HOLDING_PERIOD_RULE_144 : HOLDING_PERIOD_DEFAULT
     };
 
-    // Create security specific metadata
     const metadata = {
       ...baseConfig.metadata,
       equity_type: equityType,
@@ -282,14 +369,16 @@ export class AssetFactory {
 
     const config: AssetConfig = {
       ...baseConfig,
-      asset_class: AssetClass.Security,
-      compliance_rules,
+      assetClass: AssetClass.Security,
+      complianceRules: complianceRules,
       metadata
     };
 
+    this.logger.info('Deploying Security token', { equityType, regulationFramework });
     const tx = await this.buildCreateAssetTransaction(signer, config);
     const result = await this.submitTransaction(tx, signer);
-    
+
+    this.logger.info('Security token deployed', { address: result.returnValue?.address || '', txHash: result.hash });
     return {
       address: result.returnValue?.address || '',
       transactionId: result.hash
@@ -297,31 +386,42 @@ export class AssetFactory {
   }
 
   /**
-   * Get standard configuration template for an asset class
+   * Return a pre-populated `AssetConfig` template for the given asset class.
+   *
+   * The template includes sensible defaults for compliance rules and dividend
+   * schedule. Callers should fill in `name`, `symbol`, and `totalSupply`
+   * before passing the result to a deploy method.
+   *
+   * @param assetClass - The asset class to generate a template for.
+   * @returns A partially-populated `AssetConfig` with class-appropriate defaults.
    */
-  getAssetClassTemplate(assetClass: AssetClass): AssetConfig {
-    const baseTemplate: Omit<AssetConfig, 'name' | 'symbol' | 'total_supply'> = {
-      decimals: 18,
-      asset_class: assetClass,
-      compliance_rules: this.getDefaultComplianceRules(assetClass),
-      dividend_schedule: this.getDefaultDividendSchedule(assetClass),
+  getAssetClassTemplate(assetClass: AssetClass): Omit<AssetConfig, 'name' | 'symbol' | 'totalSupply'> {
+    return {
+      decimals: DEFAULT_DECIMALS,
+      assetClass: assetClass,
+      complianceRules: this.getDefaultComplianceRules(assetClass),
+      dividendSchedule: this.getDefaultDividendSchedule(assetClass),
       metadata: {}
     };
-
-    return baseTemplate as AssetConfig;
   }
 
   /**
-   * Estimate deployment costs for an asset class
+   * Estimate the on-chain deployment cost for a given asset class.
+   *
+   * Returns approximate gas cost (in XLM), storage footprint (in bytes), and
+   * expected confirmation time (in seconds). Values are based on empirical
+   * multipliers per asset class and should be treated as estimates only.
+   *
+   * @param assetClass - The asset class to estimate costs for.
+   * @returns An object containing `gasCostXlm`, `storageCostBytes`, and
+   *   `estimatedTimeSeconds`.
    */
   async estimateDeploymentCost(assetClass: AssetClass): Promise<DeploymentCost> {
-    // Base costs in XLM
     const baseGasCost = 0.1;
-    const baseStorageCost = 10000; // bytes
-    const baseTime = 5; // seconds
+    const baseStorageCost = 10000;
+    const baseTime = 5;
 
-    // Asset class specific adjustments
-    const multipliers = {
+    const multipliers: Record<AssetClass, { gas: number; storage: number; time: number }> = {
       [AssetClass.RealEstate]: { gas: 1.2, storage: 1.3, time: 1.5 },
       [AssetClass.Commodity]: { gas: 1.1, storage: 1.2, time: 1.2 },
       [AssetClass.Invoice]: { gas: 1.0, storage: 1.1, time: 1.0 },
@@ -331,16 +431,27 @@ export class AssetFactory {
     };
 
     const multiplier = multipliers[assetClass];
+    if (!multiplier) {
+      throw new InvalidParametersError('Invalid asset class');
+    }
 
     return {
-      gas_cost_xlm: baseGasCost * multiplier.gas,
-      storage_cost_bytes: Math.floor(baseStorageCost * multiplier.storage),
-      estimated_time_seconds: Math.floor(baseTime * multiplier.time)
+      gasCostXlm: baseGasCost * multiplier.gas,
+      storageCostBytes: Math.floor(baseStorageCost * multiplier.storage),
+      estimatedTimeSeconds: Math.floor(baseTime * multiplier.time)
     };
   }
 
   /**
-   * Get all deployed assets
+   * Fetch all assets currently registered in the on-chain registry.
+   *
+   * Reads the `registry` storage entry from the factory contract and maps
+   * each entry to a plain object. Returns an empty array if the registry is
+   * empty or the read fails.
+   *
+   * @returns An array of asset summary objects, each containing `symbol`,
+   *   `name`, `assetClass`, `totalSupply`, `tokenAddress`, `createdAt`,
+   *   and `isPaused`.
    */
   async getAllAssets(): Promise<any[]> {
     try {
@@ -348,42 +459,51 @@ export class AssetFactory {
         this.contract.getStellarAccountId(),
         xdr.ScVal.scvSymbol('registry')
       );
-      
+
       if (!result.val) {
         return [];
       }
 
       const registry = scValToNative(result.val);
-      return Object.values(registry).map((asset: any) => ({
+      if (!registry || typeof registry !== 'object') return [];
+      return Object.values(registry).map((asset: Record<string, any>) => ({
         symbol: asset.symbol,
         name: asset.name,
-        asset_class: asset.asset_class,
-        total_supply: asset.total_supply.toString(),
-        token_address: asset.token_address,
-        created_at: asset.created_at,
-        is_paused: asset.is_paused
+        assetClass: asset.asset_class,
+        totalSupply: asset.total_supply.toString(),
+        tokenAddress: asset.token_address,
+        createdAt: asset.created_at,
+        isPaused: asset.is_paused
       }));
     } catch (error) {
-      console.error('Error fetching assets:', error);
+      this.logger.error('Error fetching assets:', { error });
       return [];
     }
   }
 
   /**
-   * Emergency pause all assets
+   * Trigger an emergency pause on all registered assets.
+   *
+   * Calls `emergency_pause_all` on the factory contract. Only the contract
+   * admin is authorised to invoke this operation.
+   *
+   * @param signer - Admin keypair that authorises and signs the transaction.
+   * @returns The Stellar transaction hash of the submitted transaction.
+   * @throws {RWASDKError} If the transaction fails or the signer is not the admin.
    */
   async emergencyPauseAll(signer: Keypair): Promise<string> {
+    this.logger.warn('Emergency pause all triggered', { signer: signer.publicKey() });
     const account = await this.server.getAccount(signer.publicKey());
-    
+
     const tx = new TransactionBuilder(account, {
-      fee: '100',
+      fee: DEFAULT_FEE_RATE.toString(),
       networkPassphrase: this.networkPassphrase
     })
       .addOperation(this.contract.call(
         'emergency_pause_all',
         ...this.buildAuthArgs(signer)
       ))
-      .setTimeout(30)
+      .setTimeout(DEFAULT_TIMEOUT_SECONDS)
       .build();
 
     const result = await this.submitTransaction(tx, signer);
@@ -395,20 +515,25 @@ export class AssetFactory {
     config: AssetConfig
   ): Promise<any> {
     const account = await this.server.getAccount(signer.publicKey());
-    
-    const configScVal = nativeToScVal(config, {
-      type: {
-        [AssetClass.RealEstate]: 'AssetConfig',
-        [AssetClass.Commodity]: 'AssetConfig',
-        [AssetClass.Invoice]: 'AssetConfig',
-        [AssetClass.Security]: 'AssetConfig',
-        [AssetClass.Art]: 'AssetConfig',
-        [AssetClass.CarbonCredit]: 'AssetConfig'
-      }[config.asset_class]
-    });
+
+    const typeMap: Record<AssetClass, string> = {
+      [AssetClass.RealEstate]: 'AssetConfig',
+      [AssetClass.Commodity]: 'AssetConfig',
+      [AssetClass.Invoice]: 'AssetConfig',
+      [AssetClass.Security]: 'AssetConfig',
+      [AssetClass.Art]: 'AssetConfig',
+      [AssetClass.CarbonCredit]: 'AssetConfig'
+    };
+
+    const assetType = typeMap[config.assetClass];
+    if (!assetType) {
+      throw new Error(`Unknown asset class: ${config.assetClass}`);
+    }
+
+    const configScVal = nativeToScVal(config, { type: assetType });
 
     return new TransactionBuilder(account, {
-      fee: '100',
+      fee: DEFAULT_FEE_RATE.toString(),
       networkPassphrase: this.networkPassphrase
     })
       .addOperation(this.contract.call(
@@ -416,7 +541,7 @@ export class AssetFactory {
         ...this.buildAuthArgs(signer),
         configScVal
       ))
-      .setTimeout(30)
+      .setTimeout(DEFAULT_TIMEOUT_SECONDS)
       .build();
   }
 
@@ -431,20 +556,24 @@ export class AssetFactory {
     signer: Keypair
   ): Promise<any> {
     transaction.sign(signer);
-    
-    const result = await this.server.sendTransaction(transaction);
-    
-    if (result.status === 'ERROR') {
-      throw new Error(`Transaction failed: ${result.errorResult}`);
+
+    let result: any;
+    try {
+      result = await this.server.sendTransaction(transaction);
+    } catch (error: any) {
+      throw new NetworkError(`Failed to send transaction: ${error?.message ?? error}`);
     }
 
-    // Wait for transaction confirmation
+    if (result.status === 'ERROR') {
+      throw new TransactionError(`Transaction failed: ${result.errorResult}`);
+    }
+
     const txResult = await this.server.getTransaction(result.hash!);
-    
+
     if (txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
       return txResult;
     } else {
-      throw new Error(`Transaction not successful: ${txResult.status}`);
+      throw new TransactionError(`Transaction not successful: ${txResult.status}`);
     }
   }
 
@@ -452,79 +581,79 @@ export class AssetFactory {
     switch (assetClass) {
       case AssetClass.RealEstate:
         return {
-          kyc_required: true,
-          accredited_investor_only: false,
-          geographic_restrictions: [],
-          holding_period_days: 90,
-          transfer_limits: BigInt(1000000)
+          kycRequired: true,
+          accreditedInvestorOnly: false,
+          geographicRestrictions: [],
+          holdingPeriodDays: HOLDING_PERIOD_DEFAULT,
+          transferLimits: TRANSFER_LIMIT_REAL_ESTATE
         };
       case AssetClass.Commodity:
         return {
-          kyc_required: true,
-          accredited_investor_only: false,
-          geographic_restrictions: [],
-          holding_period_days: 0,
-          transfer_limits: BigInt(5000000)
+          kycRequired: true,
+          accreditedInvestorOnly: false,
+          geographicRestrictions: [],
+          holdingPeriodDays: 0,
+          transferLimits: TRANSFER_LIMIT_COMMODITY
         };
       case AssetClass.Invoice:
         return {
-          kyc_required: true,
-          accredited_investor_only: true,
-          geographic_restrictions: [],
-          holding_period_days: 30,
-          transfer_limits: BigInt(2500000)
+          kycRequired: true,
+          accreditedInvestorOnly: true,
+          geographicRestrictions: [],
+          holdingPeriodDays: HOLDING_PERIOD_INVOICE,
+          transferLimits: TRANSFER_LIMIT_INVOICE
         };
       case AssetClass.Security:
         return {
-          kyc_required: true,
-          accredited_investor_only: true,
-          geographic_restrictions: ['US', 'EU', 'UK'],
-          holding_period_days: 365,
-          transfer_limits: BigInt(100000)
+          kycRequired: true,
+          accreditedInvestorOnly: true,
+          geographicRestrictions: ['US', 'EU', 'UK'],
+          holdingPeriodDays: HOLDING_PERIOD_SECURITY,
+          transferLimits: TRANSFER_LIMIT_SECURITY
         };
       case AssetClass.Art:
         return {
-          kyc_required: true,
-          accredited_investor_only: false,
-          geographic_restrictions: [],
-          holding_period_days: 180,
-          transfer_limits: BigInt(500000)
+          kycRequired: true,
+          accreditedInvestorOnly: false,
+          geographicRestrictions: [],
+          holdingPeriodDays: HOLDING_PERIOD_ART,
+          transferLimits: TRANSFER_LIMIT_ART
         };
       case AssetClass.CarbonCredit:
         return {
-          kyc_required: true,
-          accredited_investor_only: false,
-          geographic_restrictions: [],
-          holding_period_days: 0,
-          transfer_limits: BigInt(10000000)
+          kycRequired: true,
+          accreditedInvestorOnly: false,
+          geographicRestrictions: [],
+          holdingPeriodDays: 0,
+          transferLimits: TRANSFER_LIMIT_CARBON_CREDIT
         };
     }
   }
 
   private getDefaultDividendSchedule(assetClass: AssetClass): DividendSchedule | undefined {
     const now = Math.floor(Date.now() / 1000);
-    
+
     switch (assetClass) {
       case AssetClass.RealEstate:
         return {
-          frequency_days: 90,
-          next_distribution_date: now + (90 * 86400),
-          total_distributed: BigInt(0),
-          is_active: true
+          frequencyDays: HOLDING_PERIOD_DEFAULT,
+          nextDistributionDate: now + (HOLDING_PERIOD_DEFAULT * DAY_IN_SECONDS),
+          totalDistributed: BigInt(0),
+          isActive: true
         };
       case AssetClass.Invoice:
         return {
-          frequency_days: 30,
-          next_distribution_date: now + (30 * 86400),
-          total_distributed: BigInt(0),
-          is_active: true
+          frequencyDays: HOLDING_PERIOD_INVOICE,
+          nextDistributionDate: now + (HOLDING_PERIOD_INVOICE * DAY_IN_SECONDS),
+          totalDistributed: BigInt(0),
+          isActive: true
         };
       case AssetClass.Security:
         return {
-          frequency_days: 90,
-          next_distribution_date: now + (90 * 86400),
-          total_distributed: BigInt(0),
-          is_active: true
+          frequencyDays: HOLDING_PERIOD_SECURITY,
+          nextDistributionDate: now + (HOLDING_PERIOD_SECURITY * DAY_IN_SECONDS),
+          totalDistributed: BigInt(0),
+          isActive: true
         };
       default:
         return undefined;

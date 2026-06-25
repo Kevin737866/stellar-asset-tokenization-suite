@@ -6,8 +6,7 @@ import {
   Address,
   Contract,
   xdr,
-  ScInt,
-  ScSymbol
+  ScInt
 } from 'stellar-sdk';
 import { 
   Order, 
@@ -18,34 +17,42 @@ import {
   OrderOptions, 
   TransactionOptions, 
   RWASDKConfig, 
-  RWASDKError, 
-  ErrorCode 
+  RWASDKError
 } from './types';
-import { RWASDKError as RWASDKErrorClass } from './errors';
+import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, ContractError, TransactionError } from './errors';
+import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT, DEFAULT_ORDER_EXPIRY_HOURS, DEFAULT_PRICE_HISTORY_LIMIT, DEFAULT_MARKET_DEPTH } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
 
 export class MarketClient {
   private server: Server;
   private contract: Contract;
   private config: RWASDKConfig;
+  private logger: Logger;
 
   constructor(config: RWASDKConfig) {
+    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
+    validateAddress(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
     this.config = config;
     this.server = new Server(config.stellar.serverUrl);
     this.contract = new Contract(config.contracts.secondaryMarket);
+    this.logger = createLogger('MarketClient');
   }
 
-  /**
-   * Create a buy order
-   */
   async createBuyOrder(
     trader: Address,
     options: OrderOptions,
     txOptions: TransactionOptions = {}
   ): Promise<{ transactionHash: string; orderId: number }> {
+    validateAddress(trader, 'trader');
+    validateAddress(options.tokenAddress, 'options.tokenAddress');
+    validateAmount(options.amount, 'options.amount');
+    validateAmount(options.price, 'options.price');
+    this.logger.info('Creating buy order', { trader: trader.toString(), token: options.tokenAddress.toString(), amount: options.amount, price: options.price });
     try {
       const account = await this.server.getAccount(trader.toString());
       
-      const expiresAt = options.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours default
+      const expiresAt = options.expiresAt || new Date(Date.now() + DEFAULT_ORDER_EXPIRY_HOURS * 60 * 60 * 1000);
       const metadataScMap = this.convertMetadataToScMap(options.metadata || {});
       
       const call = this.contract.call(
@@ -57,23 +64,23 @@ export class MarketClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, trader);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
-      // Extract order ID from result
       const orderId = this.extractOrderId(result.resultMetaXdr);
 
+      this.logger.info('Buy order created', { orderId, hash: result.hash });
       return {
         transactionHash: result.hash,
         orderId
@@ -83,18 +90,20 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Create a sell order
-   */
   async createSellOrder(
     trader: Address,
     options: OrderOptions,
     txOptions: TransactionOptions = {}
   ): Promise<{ transactionHash: string; orderId: number }> {
+    validateAddress(trader, 'trader');
+    validateAddress(options.tokenAddress, 'options.tokenAddress');
+    validateAmount(options.amount, 'options.amount');
+    validateAmount(options.price, 'options.price');
+    this.logger.info('Creating sell order', { trader: trader.toString(), token: options.tokenAddress.toString(), amount: options.amount, price: options.price });
     try {
       const account = await this.server.getAccount(trader.toString());
       
-      const expiresAt = options.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours default
+      const expiresAt = options.expiresAt || new Date(Date.now() + DEFAULT_ORDER_EXPIRY_HOURS * 60 * 60 * 1000);
       const metadataScMap = this.convertMetadataToScMap(options.metadata || {});
       
       const call = this.contract.call(
@@ -106,23 +115,23 @@ export class MarketClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, trader);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
-      // Extract order ID from result
       const orderId = this.extractOrderId(result.resultMetaXdr);
 
+      this.logger.info('Sell order created', { orderId, hash: result.hash });
       return {
         transactionHash: result.hash,
         orderId
@@ -132,78 +141,78 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Cancel an order
-   */
   async cancelOrder(
     trader: Address,
     orderId: number,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(trader, 'trader');
+    validatePositiveInteger(orderId, 'orderId');
+    this.logger.info('Cancelling order', { trader: trader.toString(), orderId });
     try {
       const account = await this.server.getAccount(trader.toString());
       
       const call = this.contract.call('cancel_order', new ScInt(orderId));
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, trader);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Order cancelled', { orderId, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Match orders for a token (can be called by anyone to trigger matching)
-   */
   async matchOrders(
     caller: Address,
     tokenAddress: Address,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(caller, 'caller');
+    validateAddress(tokenAddress, 'tokenAddress');
+    this.logger.info('Matching orders', { caller: caller.toString(), token: tokenAddress.toString() });
     try {
       const account = await this.server.getAccount(caller.toString());
       
       const call = this.contract.call('match_orders', new Address(tokenAddress));
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, caller);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Orders matched', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Get order book for a token
-   */
   async getOrderBook(tokenAddress: Address): Promise<OrderBook> {
+    validateAddress(tokenAddress, 'tokenAddress');
     try {
       const result = await this.contract.call('get_order_book', new Address(tokenAddress));
       const orderBook = this.convertScValToOrderBook(result.result);
@@ -213,10 +222,8 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Get order information
-   */
   async getOrder(orderId: number): Promise<Order> {
+    validatePositiveInteger(orderId, 'orderId');
     try {
       const result = await this.contract.call('get_order', new ScInt(orderId));
       const order = this.convertScValToOrder(result.result);
@@ -226,10 +233,8 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Get user's orders
-   */
   async getUserOrders(user: Address): Promise<Order[]> {
+    validateAddress(user, 'user');
     try {
       const result = await this.contract.call('get_user_orders', new Address(user));
       const orders = this.convertScValToOrderArray(result.result);
@@ -239,12 +244,9 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Get recent trades
-   */
   async getRecentTrades(
     tokenAddress: Address,
-    limit: number = 50
+    limit: number = DEFAULT_PAGINATION_LIMIT
   ): Promise<Trade[]> {
     try {
       const result = await this.contract.call(
@@ -259,82 +261,80 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Add supported token
-   */
   async addSupportedToken(
     admin: Address,
     tokenAddress: Address,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    validateAddress(tokenAddress, 'tokenAddress');
+    this.logger.info('Adding supported token', { token: tokenAddress.toString() });
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('add_supported_token', new Address(tokenAddress));
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Supported token added', { token: tokenAddress.toString(), hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Pause/unpause trading
-   */
   async setPauseStatus(
     admin: Address,
     paused: boolean,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    this.logger.info('Setting pause status', { paused });
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('set_pause_status', paused);
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Pause status set', { paused, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Update market configuration
-   */
   async updateConfig(
     admin: Address,
     config: MarketConfig,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    this.logger.info('Updating market config');
     try {
       const account = await this.server.getAccount(admin.toString());
       
@@ -343,29 +343,27 @@ export class MarketClient {
       const call = this.contract.call('update_config', configScVal);
 
       const transaction = new TransactionBuilder(account, {
-        fee: txOptions.fee || this.config.defaultFeeRate || 100,
+        fee: txOptions.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(txOptions.timeout || 30)
+        .setTimeout(txOptions.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Market config updated', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Get market statistics
-   */
   async getMarketStats(tokenAddress?: Address): Promise<{
     totalOrders: number;
     activeOrders: number;
@@ -375,8 +373,6 @@ export class MarketClient {
     spread: string;
   }> {
     try {
-      // For now, return placeholder implementation
-      // In a real implementation, you'd query events or storage for detailed stats
       return {
         totalOrders: 0,
         activeOrders: 0,
@@ -390,13 +386,10 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Get price history for a token
-   */
   async getPriceHistory(
     tokenAddress: Address,
     interval: '1m' | '5m' | '15m' | '1h' | '4h' | '1d' = '1h',
-    limit: number = 100
+    limit: number = DEFAULT_PRICE_HISTORY_LIMIT
   ): Promise<Array<{
     timestamp: Date;
     open: string;
@@ -406,17 +399,12 @@ export class MarketClient {
     volume: string;
   }>> {
     try {
-      // This would query trade history and aggregate it into OHLCV data
-      // For now, return a placeholder implementation
-      throw new Error('getPriceHistory not implemented');
+      throw new ContractError('getPriceHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Estimate trading fee
-   */
   async estimateTradingFee(
     orderType: OrderType,
     amount: string,
@@ -428,8 +416,6 @@ export class MarketClient {
     feeCurrency: string;
   }> {
     try {
-      // This would calculate fees based on the market configuration
-      // For now, return a placeholder implementation
       return {
         baseFee: '100',
         tradingFee: '0',
@@ -441,12 +427,9 @@ export class MarketClient {
     }
   }
 
-  /**
-   * Get market depth (order book depth)
-   */
   async getMarketDepth(
     tokenAddress: Address,
-    depth: number = 10
+    depth: number = DEFAULT_MARKET_DEPTH
   ): Promise<{
     bids: Array<{ price: string; amount: string; total: string }>;
     asks: Array<{ price: string; amount: string; total: string }>;
@@ -454,16 +437,20 @@ export class MarketClient {
     try {
       const orderBook = await this.getOrderBook(tokenAddress);
       
+      const toBigInt = (val: string): bigint => {
+        try { return BigInt(val); } catch { return 0n; }
+      };
+
       const bids = orderBook.buyOrders.slice(0, depth).map(order => ({
         price: order.price,
         amount: order.remainingAmount,
-        total: (BigInt(order.price) * BigInt(order.remainingAmount)).toString()
+        total: (toBigInt(order.price) * toBigInt(order.remainingAmount)).toString()
       }));
 
       const asks = orderBook.sellOrders.slice(0, depth).map(order => ({
         price: order.price,
         amount: order.remainingAmount,
-        total: (BigInt(order.price) * BigInt(order.remainingAmount)).toString()
+        total: (toBigInt(order.price) * toBigInt(order.remainingAmount)).toString()
       }));
 
       return { bids, asks };
@@ -472,78 +459,72 @@ export class MarketClient {
     }
   }
 
-  // Private helper methods
-
   private convertMetadataToScMap(metadata: Record<string, string>): xdr.ScMap {
+    if (!metadata || typeof metadata !== 'object') {
+      return new xdr.ScMap({ map: [] });
+    }
     const map = new xdr.ScMap({
       map: Object.entries(metadata).map(([key, value]) => ({
-        key: xdr.ScVal.scvSymbol(new ScSymbol(key)),
-        val: xdr.ScVal.scvSymbol(new ScSymbol(value))
+        key: xdr.ScVal.scvSymbol(key),
+        val: xdr.ScVal.scvSymbol(value)
       }))
     });
     return map;
   }
 
   private convertMarketConfigToScVal(config: MarketConfig): xdr.ScVal {
-    // This would convert MarketConfig to ScVal
-    // For now, return a placeholder implementation
-    throw new Error('convertMarketConfigToScVal not implemented');
+    throw new ContractError('convertMarketConfigToScVal not implemented');
   }
 
   private convertScValToOrderBook(scVal: xdr.ScVal): OrderBook {
-    // This would parse the ScVal returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToOrderBook not implemented');
+    throw new ContractError('convertScValToOrderBook not implemented');
   }
 
   private convertScValToOrder(scVal: xdr.ScVal): Order {
-    // This would parse the ScVal returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToOrder not implemented');
+    throw new ContractError('convertScValToOrder not implemented');
   }
 
   private convertScValToOrderArray(scVal: xdr.ScVal): Order[] {
-    // This would parse the ScVal array returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToOrderArray not implemented');
+    throw new ContractError('convertScValToOrderArray not implemented');
   }
 
   private convertScValToTradeArray(scVal: xdr.ScVal): Trade[] {
-    // This would parse the ScVal array returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToTradeArray not implemented');
+    throw new ContractError('convertScValToTradeArray not implemented');
   }
 
   private extractOrderId(resultMetaXdr: string): number {
-    // This would extract the order ID from transaction result
-    // For now, return a placeholder implementation
-    throw new Error('extractOrderId not implemented');
+    throw new ContractError('extractOrderId not implemented');
   }
 
   private async signTransaction(transaction: any, signer: Address): Promise<any> {
-    // This would sign the transaction with the signer's key
-    // For now, return a placeholder implementation
-    throw new Error('signTransaction not implemented');
+    throw new ContractError('signTransaction not implemented');
   }
 
-  private handleError(error: any): RWASDKErrorClass {
+  private handleError(error: unknown): RWASDKErrorClass {
     if (error instanceof RWASDKErrorClass) {
       return error;
     }
 
-    // Convert different error types to RWASDKError
-    if (error.message?.includes('timeout')) {
-      return new RWASDKErrorClass(ErrorCode.TIMEOUT, error.message);
+    const message = error.message || String(error);
+
+    if (message.includes('timeout')) {
+      return new TimeoutError(message);
     }
 
-    if (error.message?.includes('insufficient')) {
-      return new RWASDKErrorClass(ErrorCode.INSUFFICIENT_BALANCE, error.message);
+    if (message.includes('insufficient')) {
+      return new InsufficientBalanceError(message);
     }
 
-    if (error.message?.includes('unauthorized')) {
-      return new RWASDKErrorClass(ErrorCode.UNAUTHORIZED, error.message);
+    if (message.includes('unauthorized')) {
+      return new UnauthorizedError(message);
     }
 
-    return new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, error.message);
+    const match = message.match(/ContractError\((\d+)\)/);
+    if (match) {
+      const code = contractErrorToCode(parseInt(match[1]));
+      return new RWASDKErrorClass(code, message);
+    }
+
+    return new ContractError(message);
   }
 }

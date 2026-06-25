@@ -1,10 +1,11 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token::TokenClient, Address, Env, Map,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token::TokenClient, Address, Env, Map,
     Symbol, Vec,
 };
 
-use crate::auth::assert_admin;
 use crate::rwa_token::RWATokenClient;
+
+const STORAGE_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -16,6 +17,19 @@ pub enum DividendError {
     AlreadyClaimed = 5,
     UnsupportedCurrency = 6,
     DistributionNotActive = 7,
+    AlreadyInitialized = 8,
+    LengthMismatch = 9,
+    NotInitialized = 10,
+    ConfigNotFound = 11,
+    AutoDistributionDisabled = 12,
+    YieldCadenceNotReached = 13,
+    ZeroTotalSupply = 14,
+    NoTokensToClaim = 15,
+    NoDividendAvailable = 16,
+    StorageOutdated = 17,
+    DistributorNotInitialized = 18,
+    AlreadyAtLatestVersion = 19,
+    InvalidParameters = 20,
 }
 
 #[contracttype]
@@ -73,7 +87,7 @@ impl DividendDistributor {
             .instance()
             .has(&Symbol::new(&env, "initialized"))
         {
-            panic!("Distributor already initialized");
+            panic_with_error!(&env, DividendError::AlreadyInitialized);
         }
 
         let config = DividendConfig {
@@ -110,7 +124,47 @@ impl DividendDistributor {
             .set(&Symbol::new(&env, "last_auto_distribution_at"), &0u64);
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, "clm_tot"), &Map::<u64, i128>::new(&env));
+            .set(&Symbol::new(&env, "clm_tot"),             &Map::<u64, i128>::new(&env));
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
+    }
+
+    fn read_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "version"))
+            .unwrap_or(0)
+    }
+
+    fn check_version(env: &Env) {
+        if Self::read_version(env) < STORAGE_VERSION {
+            panic_with_error!(env, DividendError::StorageOutdated);
+        }
+    }
+
+    pub fn migrate(env: Env, auth: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "admin"))
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::DistributorNotInitialized); });
+
+        crate::auth::assert_admin(&env, &auth, &admin);
+
+        let ver = Self::read_version(&env);
+        if ver >= STORAGE_VERSION {
+            panic_with_error!(&env, DividendError::AlreadyAtLatestVersion);
+        }
+
+        let mut current = ver;
+        while current < STORAGE_VERSION {
+            current += 1;
+        }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
     }
 
     pub fn register_currency_token(
@@ -119,13 +173,16 @@ impl DividendDistributor {
         currency: Symbol,
         token_address: Address,
     ) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Distributor not initialized"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let mut map: Map<Symbol, Address> = env
             .storage()
@@ -149,7 +206,7 @@ impl DividendDistributor {
         metadata: Map<Symbol, Symbol>,
     ) -> Vec<u64> {
         if currencies.len() != amounts.len() {
-            panic!("currencies and amounts must have the same length");
+            panic_with_error!(&env, DividendError::LengthMismatch);
         }
 
         let mut ids = Vec::<u64>::new(&env);
@@ -181,22 +238,25 @@ impl DividendDistributor {
         claim_deadline: u64,
         metadata: Map<Symbol, Symbol>,
     ) -> Vec<u64> {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Distributor not initialized"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let config: DividendConfig = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "config"))
-            .unwrap_or_else(|| panic!("Config not found"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
 
         if !config.auto_distribute {
-            panic!("Auto distribution disabled");
+            panic_with_error!(&env, DividendError::AutoDistributionDisabled);
         }
 
         let now = env.ledger().timestamp();
@@ -207,7 +267,7 @@ impl DividendDistributor {
             .unwrap_or(0u64);
 
         if last > 0 && now.saturating_sub(last) < config.max_distribution_frequency {
-            panic!("Automated yield cadence not reached");
+            panic_with_error!(&env, DividendError::YieldCadenceNotReached);
         }
 
         let ids = Self::multi_ccy_distributions(
@@ -237,40 +297,47 @@ impl DividendDistributor {
         metadata: Map<Symbol, Symbol>,
     ) -> u64 {
         if amount <= 0 {
-            panic!("Invalid amount");
+            panic_with_error!(&env, DividendError::InvalidAmount);
         }
 
+        if claim_deadline <= env.ledger().timestamp() {
+            panic_with_error!(&env, DividendError::InvalidParameters);
+        }
+
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Distributor not initialized"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let config: DividendConfig = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "config"))
-            .unwrap_or_else(|| panic!("Config not found"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
 
         if !config
             .supported_currencies
             .iter()
             .any(|c| c.clone() == currency)
         {
-            panic!("Unsupported currency");
+            panic_with_error!(&env, DividendError::UnsupportedCurrency);
         }
 
         if amount < config.min_distribution_amount {
-            panic!("Amount below minimum distribution threshold");
+            panic_with_error!(&env, DividendError::InvalidAmount);
         }
 
         let rwa_client = RWATokenClient::new(&env, &token_address);
         let total_supply = rwa_client.get_token_info().total_supply;
 
         if total_supply == 0 {
-            panic!("Token has zero total supply");
+            panic_with_error!(&env, DividendError::ZeroTotalSupply);
         }
 
         let per_token_amount = (amount * 1000000000000000000i128) / total_supply;
@@ -318,13 +385,15 @@ impl DividendDistributor {
 
         env.events().publish(
             (Symbol::new(&env, "distribution_created"), token_address),
-            (distribution_id, amount, currency),
+            (distribution_id, amount, currency, env.ledger().timestamp()),
         );
 
         distribution_id
     }
 
     pub fn claim_dividend(env: Env, distribution_id: u64, claimer: Address) -> i128 {
+        Self::check_version(&env);
+
         let distributions: Vec<DividendDistribution> = env
             .storage()
             .instance()
@@ -338,15 +407,15 @@ impl DividendDistributor {
                 break;
             }
         }
-        let distribution = found_dist.unwrap_or_else(|| panic!("Distribution not found"));
+        let distribution = found_dist.unwrap_or_else(|| { panic_with_error!(&env, DividendError::DistributionNotFound); });
 
         if !distribution.is_active {
-            panic!("Distribution is not active");
+            panic_with_error!(&env, DividendError::DistributionNotActive);
         }
 
         let current_time = env.ledger().timestamp();
         if current_time > distribution.claim_deadline {
-            panic!("Claim deadline passed");
+            panic_with_error!(&env, DividendError::DistributionNotActive);
         }
 
         let ck = ClaimKey {
@@ -354,27 +423,27 @@ impl DividendDistributor {
             claimer: claimer.clone(),
         };
         if env.storage().instance().has(&ck) {
-            panic!("Already claimed");
+            panic_with_error!(&env, DividendError::AlreadyClaimed);
         }
 
         let rwa_client = RWATokenClient::new(&env, &distribution.token_address);
         let balance = rwa_client.get_balance(&claimer).amount;
 
         if balance == 0 {
-            panic!("No tokens to claim dividend for");
+            panic_with_error!(&env, DividendError::NoTokensToClaim);
         }
 
         let claimable_amount = (balance * distribution.per_token_amount) / 1000000000000000000i128;
 
         if claimable_amount <= 0 {
-            panic!("No dividend available");
+            panic_with_error!(&env, DividendError::NoDividendAvailable);
         }
 
         let config: DividendConfig = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "config"))
-            .unwrap_or_else(|| panic!("Config not found"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
 
         let fee_amount = (claimable_amount * config.fee_rate as i128) / 10000i128;
         let net_amount = claimable_amount - fee_amount;
@@ -416,7 +485,7 @@ impl DividendDistributor {
 
         env.events().publish(
             (Symbol::new(&env, "dividend_claimed"), claimer),
-            (distribution_id, net_amount, dist_currency),
+            (distribution_id, net_amount, dist_currency, current_time),
         );
 
         net_amount
@@ -471,7 +540,7 @@ impl DividendDistributor {
                 return d.clone();
             }
         }
-        panic!("Distribution not found")
+        panic_with_error!(&env, DividendError::DistributionNotFound)
     }
 
     pub fn get_active_distributions(env: Env, token_address: Address) -> Vec<DividendDistribution> {
@@ -520,7 +589,7 @@ impl DividendDistributor {
         }
         let distribution = match found_dist {
             Some(d) => d,
-            None => panic!("Distribution not found"),
+            None => panic_with_error!(&env, DividendError::DistributionNotFound),
         };
 
         if !distribution.is_active {
@@ -553,20 +622,23 @@ impl DividendDistributor {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "config"))
-            .unwrap_or_else(|| panic!("Config not found"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
 
         let fee_amount = (claimable_amount * config.fee_rate as i128) / 10000i128;
         claimable_amount - fee_amount
     }
 
     pub fn update_config(env: Env, auth: Address, config: DividendConfig) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Distributor not initialized"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         env.storage()
             .instance()
@@ -574,13 +646,16 @@ impl DividendDistributor {
     }
 
     pub fn deactivate_distribution(env: Env, auth: Address, distribution_id: u64) {
+        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| panic!("Distributor not initialized"));
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
 
-        assert_admin(&auth, &admin);
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
 
         let distributions: Vec<DividendDistribution> = env
             .storage()
@@ -617,6 +692,6 @@ impl DividendDistributor {
             .unwrap_or(Map::new(&env));
 
         map.get(currency)
-            .unwrap_or_else(|| panic!("Unknown currency"))
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::UnsupportedCurrency); })
     }
 }

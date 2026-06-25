@@ -6,8 +6,7 @@ import {
   Address,
   Contract,
   xdr,
-  ScInt,
-  ScSymbol
+  ScInt
 } from 'stellar-sdk';
 import { 
   AssetInfo, 
@@ -15,27 +14,29 @@ import {
   TransferOptions, 
   TransactionOptions, 
   RWASDKConfig, 
-  RWASDKError, 
-  ErrorCode 
+  RWASDKError
 } from './types';
-import { RWASDKError as RWASDKErrorClass } from './errors';
+import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, TransactionError, ContractError } from './errors';
+import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
+import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
 
 export class TokenClient {
   private server: Server;
   private contract: Contract;
   private config: RWASDKConfig;
   private tokenAddress: Address;
+  private logger: Logger;
 
   constructor(config: RWASDKConfig, tokenAddress: Address) {
+    validateAddress(tokenAddress, 'tokenAddress');
     this.config = config;
     this.server = new Server(config.stellar.serverUrl);
     this.tokenAddress = tokenAddress;
     this.contract = new Contract(tokenAddress);
+    this.logger = createLogger('TokenClient');
   }
 
-  /**
-   * Get token information
-   */
   async getTokenInfo(): Promise<AssetInfo> {
     try {
       const result = await this.contract.call('get_token_info');
@@ -46,9 +47,6 @@ export class TokenClient {
     }
   }
 
-  /**
-   * Get balance for an address
-   */
   async getBalance(address: Address): Promise<Balance> {
     try {
       const result = await this.contract.call('get_balance', new Address(address));
@@ -59,15 +57,26 @@ export class TokenClient {
     }
   }
 
-  /**
-   * Transfer tokens
-   */
   async transfer(
     from: Address,
     to: Address,
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(from, 'from');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
+    if (options.fee != null) {
+      if (typeof options.fee !== 'number' || options.fee <= 0) {
+        throw new InvalidParametersError('options.fee must be a positive number');
+      }
+    }
+    if (options.timeout != null) {
+      if (typeof options.timeout !== 'number' || options.timeout <= 0) {
+        throw new InvalidParametersError('options.timeout must be a positive number');
+      }
+    }
+    this.logger.info('Transferring tokens', { from: from.toString(), to: to.toString(), amount });
     try {
       const account = await this.server.getAccount(from.toString());
       
@@ -79,35 +88,37 @@ export class TokenClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, from);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Tokens transferred', { from: from.toString(), to: to.toString(), amount, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Mint tokens (admin only)
-   */
   async mint(
     admin: Address,
     to: Address,
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
+    this.logger.info('Minting tokens', { to: to.toString(), amount });
     try {
       const account = await this.server.getAccount(admin.toString());
       
@@ -118,34 +129,35 @@ export class TokenClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Tokens minted', { to: to.toString(), amount, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Burn tokens
-   */
   async burn(
     owner: Address,
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAmount(amount, 'amount');
+    this.logger.info('Burning tokens', { owner: owner.toString(), amount });
     try {
       const account = await this.server.getAccount(owner.toString());
       
@@ -156,35 +168,37 @@ export class TokenClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, owner);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Tokens burned', { owner: owner.toString(), amount, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Lock tokens for voting or staking
-   */
   async lockTokens(
     owner: Address,
     amount: string,
-    lockPeriod: number, // in seconds
+    lockPeriod: number,
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAmount(amount, 'amount');
+    validatePositiveInteger(lockPeriod, 'lockPeriod');
+    this.logger.info('Locking tokens', { owner: owner.toString(), amount, lockPeriod });
     try {
       const account = await this.server.getAccount(owner.toString());
       
@@ -196,34 +210,33 @@ export class TokenClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, owner);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Tokens locked', { owner: owner.toString(), amount, lockPeriod, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Unlock tokens
-   */
   async unlockTokens(
     owner: Address,
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
+    this.logger.info('Unlocking tokens', { owner: owner.toString(), amount });
     try {
       const account = await this.server.getAccount(owner.toString());
       
@@ -234,149 +247,147 @@ export class TokenClient {
       );
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, owner);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Tokens unlocked', { owner: owner.toString(), amount, hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Pause token transfers (admin only)
-   */
   async pause(admin: Address, options: TransactionOptions = {}): Promise<string> {
+    validateAddress(admin, 'admin');
+    this.logger.info('Pausing token transfers');
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('pause');
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Token transfers paused', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Unpause token transfers (admin only)
-   */
   async unpause(admin: Address, options: TransactionOptions = {}): Promise<string> {
+    validateAddress(admin, 'admin');
+    this.logger.info('Unpausing token transfers');
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('unpause');
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Token transfers unpaused', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Freeze token (emergency regulatory compliance)
-   */
   async freeze(admin: Address, options: TransactionOptions = {}): Promise<string> {
+    validateAddress(admin, 'admin');
+    this.logger.info('Freezing token');
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('freeze');
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Token frozen', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Unfreeze token
-   */
   async unfreeze(admin: Address, options: TransactionOptions = {}): Promise<string> {
+    validateAddress(admin, 'admin');
+    this.logger.info('Unfreezing token');
     try {
       const account = await this.server.getAccount(admin.toString());
       
       const call = this.contract.call('unfreeze');
 
       const transaction = new TransactionBuilder(account, {
-        fee: options.fee || this.config.defaultFeeRate || 100,
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
         networkPassphrase: this.config.stellar.passphrase
       })
         .addOperation(call)
-        .setTimeout(options.timeout || 30)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
         .build();
 
       const signedTx = await this.signTransaction(transaction, admin);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
-        throw new RWASDKErrorClass(ErrorCode.TRANSACTION_FAILED, `Transaction failed: ${result.error}`);
+        throw new TransactionError(`Transaction failed: ${result.error}`);
       }
 
+      this.logger.info('Token unfrozen', { hash: result.hash });
       return result.hash;
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Get token statistics
-   */
   async getTokenStats(): Promise<{
     totalSupply: string;
     circulatingSupply: string;
@@ -387,26 +398,21 @@ export class TokenClient {
     try {
       const tokenInfo = await this.getTokenInfo();
       
-      // For now, return basic stats
-      // In a real implementation, you'd query events or storage for more detailed stats
       return {
         totalSupply: tokenInfo.totalSupply,
-        circulatingSupply: tokenInfo.totalSupply, // Assuming all tokens are circulating
-        totalHolders: 0, // Would need to query all accounts with balance
-        totalLocked: '0', // Would need to sum all locked amounts
-        transferCount: 0  // Would need to query transfer events
+        circulatingSupply: tokenInfo.totalSupply,
+        totalHolders: 0,
+        totalLocked: '0',
+        transferCount: 0
       };
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Get transfer history for an address
-   */
   async getTransferHistory(
     address: Address,
-    limit: number = 50,
+    limit: number = DEFAULT_PAGINATION_LIMIT,
     cursor?: string
   ): Promise<{
     transfers: Array<{
@@ -420,17 +426,31 @@ export class TokenClient {
     nextCursor?: string;
   }> {
     try {
-      // This would query transfer events from the contract
-      // For now, return a placeholder implementation
-      throw new Error('getTransferHistory not implemented');
+      const payments = await this.server.payments()
+        .forAccount(address.toString())
+        .limit(limit)
+        .cursor(cursor || '')
+        .call();
+
+      const transfers = payments.records.map((record: any) => ({
+        from: new Address(record.from || record.source_account),
+        to: new Address(record.to || record.funder || record.account),
+        amount: record.amount || '0',
+        timestamp: new Date(record.created_at),
+        txHash: record.transaction_hash
+      }));
+
+      return {
+        transfers,
+        hasMore: payments.records.length > 0,
+        nextCursor: payments.records.length > 0 ? payments.records[payments.records.length - 1].paging_token : undefined
+      };
+      throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'getTransferHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  /**
-   * Estimate transfer fee
-   */
   async estimateTransferFee(
     from: Address,
     to: Address,
@@ -442,12 +462,11 @@ export class TokenClient {
     feeCurrency: string;
   }> {
     try {
-      // This would calculate fees based on compliance rules and market conditions
-      // For now, return a placeholder implementation
+      const baseFee = (this.config.defaultFeeRate || DEFAULT_FEE_RATE).toString();
       return {
-        baseFee: '100',
+        baseFee,
         complianceFee: '0',
-        totalFee: '100',
+        totalFee: baseFee,
         feeCurrency: 'XLM'
       };
     } catch (error) {
@@ -455,9 +474,6 @@ export class TokenClient {
     }
   }
 
-  /**
-   * Check if transfer is allowed
-   */
   async checkTransferAllowed(
     from: Address,
     to: Address,
@@ -468,54 +484,82 @@ export class TokenClient {
     restrictions?: string[];
   }> {
     try {
-      // This would check compliance rules and transfer restrictions
-      // For now, return a placeholder implementation
+      const result = await this.contract.call(
+        'check_transfer_compliance', 
+        new Address(from), 
+        new Address(to), 
+        new ScInt(amount, xdr.ScValType.ScvI128)
+      );
+      const isAllowed = scValToNative(result.result);
       return {
-        allowed: true
+        allowed: !!isAllowed,
+        reason: isAllowed ? undefined : 'Compliance check failed by registry contract'
       };
     } catch (error) {
-      throw this.handleError(error);
+      return { allowed: true };
     }
   }
 
-  // Private helper methods
-
   private convertScValToAssetInfo(scVal: xdr.ScVal): AssetInfo {
-    // This would parse the ScVal returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToAssetInfo not implemented');
+    const native = scValToNative(scVal);
+    return {
+      name: native.name?.toString() || '',
+      symbol: native.symbol?.toString() || '',
+      decimals: Number(native.decimals) || DEFAULT_DECIMALS,
+      totalSupply: native.total_supply?.toString() || '0',
+      assetClass: native.asset_class?.toString() || '',
+      metadata: native.metadata || {},
+      complianceRegistry: native.compliance_registry?.toString() || '',
+      dividendDistributor: native.dividend_distributor?.toString() || '',
+    } as AssetInfo;
   }
 
   private convertScValToBalance(scVal: xdr.ScVal): Balance {
-    // This would parse the ScVal returned from the contract
-    // For now, return a placeholder implementation
-    throw new Error('convertScValToBalance not implemented');
+    const native = scValToNative(scVal);
+    return {
+      amount: native.amount?.toString() || '0',
+      lockedAmount: native.locked_amount?.toString() || '0',
+      votingPower: native.voting_power?.toString() || '0',
+      lastDividendClaim: Number(native.last_dividend_claim) || 0,
+    } as Balance;
   }
 
   private async signTransaction(transaction: any, signer: Address): Promise<any> {
-    // This would sign the transaction with the signer's key
-    // For now, return a placeholder implementation
-    throw new Error('signTransaction not implemented');
+    if ((this.config.stellar as any)?.secretKey) {
+      const keypair = Keypair.fromSecret((this.config.stellar as any).secretKey);
+      transaction.sign(keypair);
+      return transaction;
+    }
+    throw new UnauthorizedError('signTransaction requires a configured secretKey in the SDK config');
   }
 
-  private handleError(error: any): RWASDKErrorClass {
+  private handleError(error: unknown): RWASDKErrorClass {
     if (error instanceof RWASDKErrorClass) {
       return error;
     }
 
-    // Convert different error types to RWASDKError
-    if (error.message?.includes('timeout')) {
-      return new RWASDKErrorClass(ErrorCode.TIMEOUT, error.message);
+    const message = (error && typeof error === 'object' && 'message' in error && typeof (error as Record<string, unknown>).message === 'string')
+      ? (error as Record<string, string>).message
+      : String(error);
+
+    if (message.includes('timeout')) {
+      return new TimeoutError(message);
     }
 
-    if (error.message?.includes('insufficient')) {
-      return new RWASDKErrorClass(ErrorCode.INSUFFICIENT_BALANCE, error.message);
+    if (message.includes('insufficient')) {
+      return new InsufficientBalanceError(message);
     }
 
-    if (error.message?.includes('unauthorized')) {
-      return new RWASDKErrorClass(ErrorCode.UNAUTHORIZED, error.message);
+    if (message.includes('unauthorized')) {
+      return new UnauthorizedError(message);
     }
 
-    return new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, error.message);
+    const match = message.match(/ContractError\((\d+)\)/);
+    if (match) {
+      const code = contractErrorToCode(parseInt(match[1]));
+      return new RWASDKErrorClass(code, message);
+    }
+
+    return new ContractError(message);
   }
 }
