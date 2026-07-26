@@ -6,11 +6,11 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Loader2, Building2, Package, FileText, DollarSign, Home } from 'lucide-react';
+import { Loader2, Building2, Package, FileText, DollarSign, Home, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
 import { AssetType, DeploymentOptions } from '@/lib/types';
+import { useToast, useErrorTranslator } from '@/components/Toast';
 
 interface AssetDeployerProps {
   onDeploy: (options: DeploymentOptions) => Promise<{ transactionHash: string; tokenAddress: string }>;
@@ -38,6 +38,9 @@ const assetTypeDescriptions = {
 };
 
 export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDeployerProps) {
+  const toast = useToast();
+  const translateError = useErrorTranslator();
+
   const [formData, setFormData] = useState({
     name: '',
     symbol: '',
@@ -51,6 +54,9 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
+  const [isNetworkError, setIsNetworkError] = useState(false);
+  const [lastDeploymentOptions, setLastDeploymentOptions] = useState<DeploymentOptions | null>(null);
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
@@ -96,28 +102,39 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     return Object.keys(newErrors).length === 0;
   }, [formData]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
+  const executeDeploy = useCallback(async () => {
+    // Clear previous error state
+    setDeployError(null);
+    setIsNetworkError(false);
+
     if (!validateForm()) {
+      toast.warning('Form Validation', 'Please fix the highlighted fields before submitting.');
       return;
     }
 
     setIsSubmitting(true);
-    try {
-      const deploymentOptions: DeploymentOptions = {
-        name: formData.name,
-        symbol: formData.symbol,
-        totalSupply: formData.totalSupply,
-        decimals: Number(formData.decimals),
-        assetType: formData.assetType,
-        metadata: formData.metadata,
-        complianceRegistry: formData.complianceRegistry,
-        dividendDistributor: formData.dividendDistributor,
-      };
+    const deploymentOptions: DeploymentOptions = {
+      name: formData.name,
+      symbol: formData.symbol,
+      totalSupply: formData.totalSupply,
+      decimals: Number(formData.decimals),
+      assetType: formData.assetType,
+      metadata: formData.metadata,
+      complianceRegistry: formData.complianceRegistry,
+      dividendDistributor: formData.dividendDistributor,
+    };
 
-      await onDeploy(deploymentOptions);
-      
+    // Store for retry
+    setLastDeploymentOptions(deploymentOptions);
+
+    try {
+      const result = await onDeploy(deploymentOptions);
+
+      toast.success(
+        'Token Deployed Successfully',
+        `Token ${formData.symbol} deployed at ${result.tokenAddress.slice(0, 8)}...`
+      );
+
       // Reset form on success
       setFormData({
         name: '',
@@ -129,11 +146,30 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
         complianceRegistry: '',
         dividendDistributor: '',
       });
-    } catch (error) {
-      console.error('Deployment failed:', error);
+      setLastDeploymentOptions(null);
+      setDeployError(null);
+    } catch (error: any) {
+      const { title, message } = translateError(error);
+
+      // Detect network errors for special UI
+      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
+        setIsNetworkError(true);
+      }
+
+      setDeployError(message);
+      toast.error(title, message, () => executeDeploy());
     } finally {
       setIsSubmitting(false);
     }
+  }, [formData, validateForm, onDeploy, toast, translateError]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    executeDeploy();
+  };
+
+  const handleRetry = () => {
+    executeDeploy();
   };
 
   const updateMetadata = (key: string, value: string) => {
@@ -174,6 +210,38 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
           </CardTitle>
         </CardHeader>
         <CardContent>
+          {/* Network Error Banner */}
+          {isNetworkError && (
+            <Alert variant="destructive" className="mb-4">
+              <WifiOff className="h-4 w-4" />
+              <AlertDescription className="flex items-center justify-between flex-1">
+                <span>Network connection error. Please check your connection to the Stellar network.</span>
+                {lastDeploymentOptions && (
+                  <Button variant="outline" size="sm" onClick={handleRetry} disabled={isSubmitting}>
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                    Retry
+                  </Button>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Deployment Error Banner */}
+          {deployError && !isNetworkError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription className="flex items-center justify-between flex-1">
+                <span>{deployError}</span>
+                {lastDeploymentOptions && (
+                  <Button variant="outline" size="sm" onClick={handleRetry} disabled={isSubmitting}>
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                    Retry
+                  </Button>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
@@ -181,7 +249,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 <Input
                   id="name"
                   value={formData.name}
-                  onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, name: e.target.value }));
+                    if (errors.name) setErrors(prev => ({ ...prev, name: '' }));
+                  }}
                   placeholder="e.g., Manhattan Office Tower"
                   className={errors.name ? 'border-red-500' : ''}
                 />
@@ -193,7 +264,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 <Input
                   id="symbol"
                   value={formData.symbol}
-                  onChange={(e) => setFormData(prev => ({ ...prev, symbol: e.target.value.toUpperCase() }))}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, symbol: e.target.value.toUpperCase() }));
+                    if (errors.symbol) setErrors(prev => ({ ...prev, symbol: '' }));
+                  }}
                   placeholder="e.g., MOT"
                   className={errors.symbol ? 'border-red-500' : ''}
                 />
@@ -205,7 +279,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 <Input
                   id="totalSupply"
                   value={formData.totalSupply}
-                  onChange={(e) => setFormData(prev => ({ ...prev, totalSupply: e.target.value }))}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, totalSupply: e.target.value }));
+                    if (errors.totalSupply) setErrors(prev => ({ ...prev, totalSupply: '' }));
+                  }}
                   placeholder="e.g., 1000000"
                   className={errors.totalSupply ? 'border-red-500' : ''}
                 />
@@ -216,7 +293,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 <Label htmlFor="decimals">Decimals</Label>
                 <Select
                   value={formData.decimals}
-                  onValueChange={(value) => setFormData(prev => ({ ...prev, decimals: value }))}
+                  onValueChange={(value) => {
+                    setFormData(prev => ({ ...prev, decimals: value }));
+                    if (errors.decimals) setErrors(prev => ({ ...prev, decimals: '' }));
+                  }}
                 >
                   <SelectTrigger className={errors.decimals ? 'border-red-500' : ''}>
                     <SelectValue placeholder="Select decimals" />
@@ -244,7 +324,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                         ? 'ring-2 ring-blue-500 bg-blue-50'
                         : 'hover:bg-gray-50'
                     }`}
-                    onClick={() => setFormData(prev => ({ ...prev, assetType: type as AssetType }))}
+                    onClick={() => {
+                      setFormData(prev => ({ ...prev, assetType: type as AssetType }));
+                      if (errors.assetType) setErrors(prev => ({ ...prev, assetType: '' }));
+                    }}
                   >
                     <CardContent className="p-4">
                       <div className="flex items-start space-x-3">
@@ -271,7 +354,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 <Input
                   id="complianceRegistry"
                   value={formData.complianceRegistry}
-                  onChange={(e) => setFormData(prev => ({ ...prev, complianceRegistry: e.target.value }))}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, complianceRegistry: e.target.value }));
+                    if (errors.complianceRegistry) setErrors(prev => ({ ...prev, complianceRegistry: '' }));
+                  }}
                   placeholder="0x..."
                   className={errors.complianceRegistry ? 'border-red-500' : ''}
                 />
@@ -283,7 +369,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 <Input
                   id="dividendDistributor"
                   value={formData.dividendDistributor}
-                  onChange={(e) => setFormData(prev => ({ ...prev, dividendDistributor: e.target.value }))}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, dividendDistributor: e.target.value }));
+                    if (errors.dividendDistributor) setErrors(prev => ({ ...prev, dividendDistributor: '' }));
+                  }}
                   placeholder="0x..."
                   className={errors.dividendDistributor ? 'border-red-500' : ''}
                 />
@@ -298,7 +387,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   Add Field
                 </Button>
               </div>
-              
+
               <div className="space-y-2">
                 {Object.entries(formData.metadata).map(([key, value]) => (
                   <div key={key} className="flex gap-2">
@@ -323,7 +412,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     </Button>
                   </div>
                 ))}
-                
+
                 {Object.keys(formData.metadata).length === 0 && (
                   <p className="text-sm text-gray-500 text-center py-4">
                     No metadata fields added. Add fields to provide additional asset information.
@@ -336,16 +425,22 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setFormData({
-                  name: '',
-                  symbol: '',
-                  totalSupply: '',
-                  decimals: '18',
-                  assetType: '' as AssetType,
-                  metadata: {},
-                  complianceRegistry: '',
-                  dividendDistributor: '',
-                })}
+                onClick={() => {
+                  setFormData({
+                    name: '',
+                    symbol: '',
+                    totalSupply: '',
+                    decimals: '18',
+                    assetType: '' as AssetType,
+                    metadata: {},
+                    complianceRegistry: '',
+                    dividendDistributor: '',
+                  });
+                  setErrors({});
+                  setDeployError(null);
+                  setIsNetworkError(false);
+                  setLastDeploymentOptions(null);
+                }}
               >
                 Clear Form
               </Button>

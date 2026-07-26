@@ -7,7 +7,7 @@ import { MarketClient } from './marketClient';
 import { ComplianceClient } from './complianceClient';
 import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
-import { InvalidParametersError, RWASDKError, NetworkError, ContractError } from './errors';
+import { InvalidParametersError, RWASDKError, NetworkError, ContractError, TransactionError, HorizonError, parseHorizonError, describeHorizonError } from './errors';
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
@@ -38,6 +38,12 @@ export {
 
 // Error exports - avoid re-exporting RWASDKError since it's already exported from types
 export * from './errors';
+export {
+  HorizonError,
+  parseHorizonError,
+  describeHorizonError,
+  type ParsedHorizonError
+} from './errors';
 
 // Configuration utilities
 export class StellarRWASDK {
@@ -318,6 +324,103 @@ export class StellarRWASDK {
       throw new ContractError(`Failed to get platform stats: ${error.message}`);
     }
   }
+
+  /**
+   * Simulate a transaction before submission to catch errors without spending gas.
+   * (Issue #208)
+   *
+   * @param tx - The Stellar transaction to simulate
+   * @param options - Optional simulation settings (skipSimulation, feeEstimation)
+   * @returns SimulationResult with success status, events, gasUsed, and storageChanges
+   */
+  async simulateTransaction(
+    tx: any,
+    options: SimulationOptions = {}
+  ): Promise<SimulationResult> {
+    if (options.skipSimulation) {
+      return {
+        success: true,
+        events: [],
+        gasUsed: '0',
+        storageChanges: [],
+      };
+    }
+
+    try {
+      const server = new (await import('stellar-sdk')).Server(this.config.stellar.serverUrl);
+      const simulation = await server.simulateTransaction(tx);
+
+      // Extract events from simulation
+      const events: SimulationEvent[] = (simulation.events || []).map((evt: any) => ({
+        contractId: evt.contractId || '',
+        topics: evt.topic || [],
+        data: evt.data || null,
+      }));
+
+      // Extract storage changes
+      const storageChanges: StorageChange[] = (simulation.stateChanges || [])
+        .filter((change: any) => change.type === 'contract_data')
+        .map((change: any) => ({
+          contractId: change.contractId || '',
+          key: change.key || '',
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+        }));
+
+      // Determine success from simulation result
+      const isSuccess = simulation.result !== undefined && !simulation.error;
+      const errorMessage = simulation.error || (isSuccess ? undefined : 'Simulation returned no result');
+
+      const result: SimulationResult = {
+        success: isSuccess,
+        events,
+        returnValue: simulation.result || null,
+        gasUsed: String(simulation.cost?.cpuInsns || 0),
+        storageChanges,
+        errorMessage,
+      };
+
+      if (!isSuccess) {
+        this.logger.warn('Transaction simulation failed', { errorMessage, gasUsed: result.gasUsed });
+      } else {
+        this.logger.info('Transaction simulation succeeded', { gasUsed: result.gasUsed });
+      }
+
+      return result;
+    } catch (error) {
+      this.logger.error('Transaction simulation error', { error: error.message });
+      throw new TransactionError(`Transaction simulation failed: ${error.message}`, error);
+    }
+  }
+
+  /**
+   * Validate a transaction via pre-flight simulation before submission.
+   * (Issue #208)
+   *
+   * This provides a pre-submission validation layer. The actual transaction
+   * submission is handled by individual client methods (assetFactory, marketClient,
+   * etc.), which should call simulateTransaction internally before submitting.
+   *
+   * Use skipSimulation: true for trusted/recurring transactions.
+   *
+   * @param tx - The Stellar transaction to validate
+   * @param txOptions - Options including skipSimulation
+   * @returns Simulation result if validation passed
+   * @throws TransactionError if simulation fails
+   */
+  async validateAndSimulate(
+    tx: any,
+    txOptions: TransactionOptions & SimulationOptions = {}
+  ): Promise<SimulationResult> {
+    const simulation = await this.simulateTransaction(tx, { feeEstimation: true, ...txOptions });
+    if (!simulation.success) {
+      throw new TransactionError(
+        `Transaction validation failed: ${simulation.errorMessage}`,
+        { simulation }
+      );
+    }
+    return simulation;
+  }
 }
 
 // Re-export types for convenience
@@ -335,7 +438,11 @@ import type {
   AssetType,
   Currency,
   OrderType,
-  VerificationLevel
+  VerificationLevel,
+  SimulationResult,
+  SimulationEvent,
+  StorageChange,
+  SimulationOptions
 } from './types';
 
 // Factory function to create SDK instance with common configurations

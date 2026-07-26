@@ -135,6 +135,43 @@ export class InsufficientBondError extends RWASDKError {
   }
 }
 
+// Horizon-specific error classes (Issue #209)
+export class HorizonError extends RWASDKError {
+  public failedOperationIndex?: number;
+  public rawXDR?: string;
+  public stellarResultCode?: string;
+
+  constructor(
+    code: ErrorCode,
+    message: string,
+    details?: {
+      failedOperationIndex?: number;
+      rawXDR?: string;
+      stellarResultCode?: string;
+      extras?: any;
+    }
+  ) {
+    super(code, message, details);
+    this.failedOperationIndex = details?.failedOperationIndex;
+    this.rawXDR = details?.rawXDR;
+    this.stellarResultCode = details?.stellarResultCode;
+  }
+
+  static fromHorizonResponse(
+    status: number,
+    responseBody: any,
+  ): HorizonError {
+    const parsed = parseHorizonError(responseBody);
+    const statusPrefix = status >= 500 ? '[Server Error] ' : status >= 400 ? '[Request Error] ' : '';
+    return new HorizonError(parsed.errorCode, `${statusPrefix}${parsed.message}`, {
+      failedOperationIndex: parsed.failedOperationIndex,
+      rawXDR: parsed.rawXDR,
+      stellarResultCode: parsed.stellarResultCode,
+      extras: responseBody,
+    });
+  }
+}
+
 /**
  * Map of ErrorCode to human-readable descriptions.
  */
@@ -242,6 +279,28 @@ export const ERROR_DESCRIPTIONS: Record<ErrorCode, string> = {
   // Oracle & Proof
   [ErrorCode.ORACLE_ERROR]: 'An oracle error occurred',
   [ErrorCode.PROOF_NOT_FOUND]: 'The requested proof was not found',
+
+  // Stellar Horizon errors (Issue #209)
+  [ErrorCode.OP_UNDERFUNDED]: 'The source account does not have sufficient funds to cover the operation',
+  [ErrorCode.OP_LOW_RESERVE]: 'The operation would cause the account to fall below the minimum reserve',
+  [ErrorCode.OP_ALREADY_EXISTS]: 'The operation would create a duplicate entry',
+  [ErrorCode.OP_NO_TRUST]: 'The destination account does not have a trust line for the asset',
+  [ErrorCode.OP_NOT_AUTHORIZED]: 'The operation is not authorized by the issuer',
+  [ErrorCode.OP_LINE_FULL]: 'The trust line credit limit has been reached',
+  [ErrorCode.OP_NO_ISSUER]: 'The issuer account does not exist',
+  [ErrorCode.TX_BAD_AUTH]: 'The transaction has invalid signatures or authorizations',
+  [ErrorCode.TX_INSUFFICIENT_FEE]: 'The transaction fee is insufficient',
+  [ErrorCode.TX_TOO_EARLY]: 'The transaction time bounds are too far in the future',
+  [ErrorCode.TX_TOO_LATE]: 'The transaction time bounds have expired',
+  [ErrorCode.TX_MALFORMED]: 'The transaction is malformed or contains invalid data',
+  [ErrorCode.TX_NO_SOURCE_ACCOUNT]: 'The transaction source account does not exist',
+  [ErrorCode.TX_NO_ACCOUNT]: 'The source account was not found on the network',
+  [ErrorCode.TX_INSUFFICIENT_BALANCE]: 'The account balance is insufficient for the transaction fee',
+  [ErrorCode.TX_BAD_SEQ]: 'The transaction sequence number is incorrect',
+  [ErrorCode.TX_MEMO_TOO_LONG]: 'The transaction memo is too long',
+
+  // Simulation errors (Issue #208)
+  [ErrorCode.SIMULATION_FAILED]: 'Transaction simulation failed',
 };
 
 /**
@@ -346,6 +405,111 @@ export function contractErrorToCode(errorNumber: number): ErrorCode {
 
     default: return ErrorCode.CONTRACT_ERROR;
   }
+}
+
+/**
+ * Horizon result code to ErrorCode mapping.
+ * (Issue #209)
+ */
+const HORIZON_RESULT_CODE_MAP: Record<string, ErrorCode> = {
+  // Operation-level codes
+  'op_underfunded': ErrorCode.OP_UNDERFUNDED,
+  'op_low_reserve': ErrorCode.OP_LOW_RESERVE,
+  'op_already_exists': ErrorCode.OP_ALREADY_EXISTS,
+  'op_no_trust': ErrorCode.OP_NO_TRUST,
+  'op_not_authorized': ErrorCode.OP_NOT_AUTHORIZED,
+  'op_line_full': ErrorCode.OP_LINE_FULL,
+  'op_no_issuer': ErrorCode.OP_NO_ISSUER,
+
+  // Transaction-level codes
+  'tx_bad_auth': ErrorCode.TX_BAD_AUTH,
+  'tx_insufficient_fee': ErrorCode.TX_INSUFFICIENT_FEE,
+  'tx_too_early': ErrorCode.TX_TOO_EARLY,
+  'tx_too_late': ErrorCode.TX_TOO_LATE,
+  'tx_malformed': ErrorCode.TX_MALFORMED,
+  'tx_no_source_account': ErrorCode.TX_NO_SOURCE_ACCOUNT,
+  'tx_no_account': ErrorCode.TX_NO_ACCOUNT,
+  'tx_insufficient_balance': ErrorCode.TX_INSUFFICIENT_BALANCE,
+  'tx_bad_seq': ErrorCode.TX_BAD_SEQ,
+  'tx_memo_too_long': ErrorCode.TX_MEMO_TOO_LONG,
+  'tx_bad_auth_extra': ErrorCode.TX_BAD_AUTH,
+  'tx_fee_bump_inner_failed': ErrorCode.TRANSACTION_FAILED,
+  'tx_not_supported': ErrorCode.TRANSACTION_FAILED,
+  'tx_failed': ErrorCode.TRANSACTION_FAILED,
+
+  // Common aliases
+};
+
+/**
+ * Parse a Horizon error response body into a typed ParsedHorizonError.
+ * Extracts result_codes, operation_results, and maps to ErrorCode.
+ * (Issue #209)
+ */
+export function parseHorizonError(responseBody: any): ParsedHorizonError {
+  const extras = responseBody?.extras || {};
+  const resultCodes = extras?.result_codes || responseBody?.result_codes || {};
+  const resultXDR = extras?.result_xdr || responseBody?.result_xdr;
+  const envelopeXDR = extras?.envelope_xdr;
+
+  let txResultCode: string | undefined;
+  let opResultCodes: string[] = [];
+
+  if (resultCodes.transaction) {
+    txResultCode = resultCodes.transaction;
+  }
+
+  if (Array.isArray(resultCodes.operations)) {
+    opResultCodes = resultCodes.operations;
+  }
+
+  // Determine the error code
+  let errorCode = ErrorCode.TRANSACTION_FAILED;
+  let failedOperationIndex: number | undefined;
+
+  // Check transaction-level codes first
+  if (txResultCode && HORIZON_RESULT_CODE_MAP[txResultCode]) {
+    errorCode = HORIZON_RESULT_CODE_MAP[txResultCode];
+  }
+
+  // Check operation-level codes (find first failing operation)
+  for (let i = 0; i < opResultCodes.length; i++) {
+    const opCode = opResultCodes[i];
+    if (opCode && opCode !== 'op_success' && opCode !== 'op_inner') {
+      const mapped = HORIZON_RESULT_CODE_MAP[opCode];
+      if (mapped) {
+        errorCode = mapped;
+        failedOperationIndex = i;
+        break;
+      }
+    }
+  }
+
+  // Build message
+  const title = responseBody?.title || '';
+  const detail = responseBody?.detail || '';
+  const message = `${title}${title && detail ? ': ' : ''}${detail}` || 'Horizon transaction error';
+
+  return {
+    errorCode,
+    message,
+    failedOperationIndex,
+    rawXDR: resultXDR || envelopeXDR,
+    stellarResultCode: txResultCode ?? (opResultCodes.length > 0 ? opResultCodes[0] : undefined),
+  };
+}
+
+/**
+ * Extract and parse result codes from a Horizon error response.
+ * Returns a human-readable error description.
+ */
+export function describeHorizonError(responseBody: any): string {
+  const parsed = parseHorizonError(responseBody);
+  const baseMessage = ERROR_DESCRIPTIONS[parsed.errorCode] || parsed.message;
+
+  if (parsed.failedOperationIndex !== undefined) {
+    return `${baseMessage} (operation #${parsed.failedOperationIndex})`;
+  }
+  return baseMessage;
 }
 
 /**

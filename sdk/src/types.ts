@@ -259,6 +259,34 @@ export interface DeploymentOptions {
   dividendDistributor: Address;
 }
 
+// Simulation Types (Issue #208)
+export interface SimulationResult {
+  success: boolean;
+  events: SimulationEvent[];
+  returnValue?: any;
+  gasUsed: string;
+  storageChanges: StorageChange[];
+  errorMessage?: string;
+}
+
+export interface SimulationEvent {
+  contractId: string;
+  topics: string[];
+  data: any;
+}
+
+export interface StorageChange {
+  contractId: string;
+  key: string;
+  oldValue?: string;
+  newValue?: string;
+}
+
+export interface SimulationOptions {
+  skipSimulation?: boolean;
+  feeEstimation?: boolean;
+}
+
 export interface TransferOptions {
   from?: Address;
   to?: Address;
@@ -355,6 +383,40 @@ export interface CustodyEvent {
   assetValue?: string;
   timestamp: Date;
   txHash: string;
+}
+
+// Horizon Error Types (Issue #209)
+export interface HorizonErrorResult {
+  result_codes: {
+    transaction?: string;
+    operations?: string[];
+  };
+  operation_results?: Array<{
+    code?: string;
+    type?: string;
+  }>;
+}
+
+export interface HorizonErrorDetails {
+  title?: string;
+  status?: number;
+  detail?: string;
+  extras?: {
+    result_codes?: {
+      transaction?: string;
+      operations?: string[];
+    };
+    result_xdr?: string;
+    envelope_xdr?: string;
+  };
+}
+
+export interface ParsedHorizonError {
+  errorCode: ErrorCode;
+  message: string;
+  failedOperationIndex?: number;
+  rawXDR?: string;
+  stellarResultCode?: string;
 }
 
 // Error Types
@@ -476,6 +538,28 @@ export enum ErrorCode {
 
   // Proof errors
   PROOF_NOT_FOUND = 'PROOF_NOT_FOUND',
+
+  // Stellar Horizon errors (Issue #209)
+  OP_UNDERFUNDED = 'OP_UNDERFUNDED',
+  OP_LOW_RESERVE = 'OP_LOW_RESERVE',
+  OP_ALREADY_EXISTS = 'OP_ALREADY_EXISTS',
+  OP_NO_TRUST = 'OP_NO_TRUST',
+  OP_NOT_AUTHORIZED = 'OP_NOT_AUTHORIZED',
+  OP_LINE_FULL = 'OP_LINE_FULL',
+  OP_NO_ISSUER = 'OP_NO_ISSUER',
+  TX_BAD_AUTH = 'TX_BAD_AUTH',
+  TX_INSUFFICIENT_FEE = 'TX_INSUFFICIENT_FEE',
+  TX_TOO_EARLY = 'TX_TOO_EARLY',
+  TX_TOO_LATE = 'TX_TOO_LATE',
+  TX_MALFORMED = 'TX_MALFORMED',
+  TX_NO_SOURCE_ACCOUNT = 'TX_NO_SOURCE_ACCOUNT',
+  TX_NO_ACCOUNT = 'TX_NO_ACCOUNT',
+  TX_INSUFFICIENT_BALANCE = 'TX_INSUFFICIENT_BALANCE',
+  TX_BAD_SEQ = 'TX_BAD_SEQ',
+  TX_MEMO_TOO_LONG = 'TX_MEMO_TOO_LONG',
+
+  // Simulation errors (Issue #208)
+  SIMULATION_FAILED = 'SIMULATION_FAILED',
 }
 
 // Utility Types
