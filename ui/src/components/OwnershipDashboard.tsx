@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -18,8 +18,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  LineChart,
-  Line
 } from 'recharts';
 import {
   Wallet,
@@ -28,11 +26,15 @@ import {
   Vote,
   Lock,
   DollarSign,
-  Calendar,
   Building2,
-  Package
+  Package,
+  Loader2,
+  RefreshCw,
+  AlertCircle,
+  WifiOff,
 } from 'lucide-react';
 import { AssetInfo, Balance, AssetHolding, Portfolio } from '@/lib/types';
+import { useToast, useErrorTranslator } from '@/components/Toast';
 
 interface OwnershipDashboardProps {
   userAddress: string;
@@ -51,21 +53,35 @@ export default function OwnershipDashboard({
   onLockTokens,
   onUnlockTokens,
   onClaimDividends,
-  isLoading = false
+  isLoading = false,
 }: OwnershipDashboardProps) {
+  const toast = useToast();
+  const translateError = useErrorTranslator();
+
   const [selectedAsset, setSelectedAsset] = useState<AssetHolding | null>(null);
   const [lockAmount, setLockAmount] = useState('');
   const [lockPeriod, setLockPeriod] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  // Loading states for operations
+  const [isLocking, setIsLocking] = useState(false);
+  const [isUnlocking, setIsUnlocking] = useState<string | null>(null);
+  const [isClaiming, setIsClaiming] = useState<string | null>(null);
+
+  // Error states
+  const [lockError, setLockError] = useState<string | null>(null);
+  const [unlockError, setUnlockError] = useState<Record<string, string>>({});
+  const [claimError, setClaimError] = useState<Record<string, string>>({});
+  const [isNetworkError, setIsNetworkError] = useState(false);
+
   // Prepare data for charts
-  const pieChartData = portfolio.assets.map(holding => ({
+  const pieChartData = portfolio.assets.map((holding) => ({
     name: holding.asset.name,
     value: parseFloat(holding.value),
     percentage: holding.percentage,
   }));
 
-  const barChartData = portfolio.assets.map(holding => ({
+  const barChartData = portfolio.assets.map((holding) => ({
     name: holding.asset.symbol,
     balance: parseFloat(holding.balance.amount),
     value: parseFloat(holding.value),
@@ -77,68 +93,147 @@ export default function OwnershipDashboard({
   const totalVotingPower = parseFloat(portfolio.votingPower);
 
   const handleLockTokens = async () => {
-    if (!selectedAsset || !lockAmount || !lockPeriod) {
-      setStatusMessage('Please provide both amount and lock period');
+    if (!selectedAsset || !lockAmount || !lockPeriod) return;
+
+    // Inline validation
+    const amount = parseFloat(lockAmount);
+    const maxAmount = parseFloat(selectedAsset.balance.amount);
+    if (isNaN(amount) || amount <= 0) {
+      setLockError('Amount must be a positive number');
+      return;
+    }
+    if (amount > maxAmount) {
+      setLockError(`Cannot lock more than your available balance (${maxAmount.toLocaleString()})`);
+      return;
+    }
+    const period = parseInt(lockPeriod);
+    if (isNaN(period) || period <= 0) {
+      setLockError('Lock period must be a positive number of days');
       return;
     }
 
+    const assetAddress = selectedAsset.asset.tokenAddress;
+    setLockError(null);
+    setIsLocking(true);
+    setIsNetworkError(false);
+
     try {
-      await onLockTokens?.(selectedAsset.asset.tokenAddress, lockAmount, parseInt(lockPeriod));
-      setStatusMessage('Tokens locked successfully');
+      await onLockTokens?.(assetAddress, lockAmount, period);
+
+      toast.success(
+        'Tokens Locked',
+        `Successfully locked ${parseFloat(lockAmount).toLocaleString()} tokens for ${period} days.`
+      );
       setLockAmount('');
       setLockPeriod('');
-    } catch (error) {
-      console.error('Failed to lock tokens:', error);
-      setStatusMessage('Failed to lock tokens');
+      setLockError(null);
+    } catch (error: any) {
+      const { title, message } = translateError(error);
+
+      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
+        setIsNetworkError(true);
+      }
+
+      setLockError(message);
+      toast.error(title, message, () => handleLockTokens());
+    } finally {
+      setIsLocking(false);
     }
   };
 
   const handleUnlockTokens = async (assetAddress: string, amount: string) => {
+    setIsUnlocking(assetAddress);
+    setUnlockError((prev) => ({ ...prev, [assetAddress]: '' }));
+    setIsNetworkError(false);
+
     try {
       await onUnlockTokens?.(assetAddress, amount);
-      setStatusMessage('Tokens unlocked successfully');
-    } catch (error) {
-      console.error('Failed to unlock tokens:', error);
-      setStatusMessage('Failed to unlock tokens');
+
+      toast.success(
+        'Tokens Unlocked',
+        `Successfully unlocked ${parseFloat(amount).toLocaleString()} tokens.`
+      );
+      setUnlockError((prev) => {
+        const next = { ...prev };
+        delete next[assetAddress];
+        return next;
+      });
+    } catch (error: any) {
+      const { title, message } = translateError(error);
+
+      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
+        setIsNetworkError(true);
+      }
+
+      setUnlockError((prev) => ({ ...prev, [assetAddress]: message }));
+      toast.error(title, message, () => handleUnlockTokens(assetAddress, amount));
+    } finally {
+      setIsUnlocking(null);
     }
   };
 
   const handleClaimDividends = async (assetAddress: string, distributionId: number) => {
+    setIsClaiming(assetAddress);
+    setClaimError((prev) => ({ ...prev, [assetAddress]: '' }));
+    setIsNetworkError(false);
+
     try {
       await onClaimDividends?.(assetAddress, distributionId);
-      setStatusMessage('Dividends claimed successfully');
-    } catch (error) {
-      console.error('Failed to claim dividends:', error);
-      setStatusMessage('Failed to claim dividends');
+
+      toast.success(
+        'Dividends Claimed',
+        'Your dividend rewards have been successfully claimed!'
+      );
+      setClaimError((prev) => {
+        const next = { ...prev };
+        delete next[assetAddress];
+        return next;
+      });
+    } catch (error: any) {
+      const { title, message } = translateError(error);
+
+      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
+        setIsNetworkError(true);
+      }
+
+      setClaimError((prev) => ({ ...prev, [assetAddress]: message }));
+      toast.error(title, message, () => handleClaimDividends(assetAddress, distributionId));
+    } finally {
+      setIsClaiming(null);
     }
   };
 
-  // Handle Escape key to close modals / deselect
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && selectedAsset) {
-        setSelectedAsset(null);
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [selectedAsset]);
+  // Initial loading state
+  if (isLoading) {
+    return (
+      <div className="max-w-6xl mx-auto space-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i}>
+              <CardContent className="p-6">
+                <div className="h-16 bg-gray-200 animate-pulse rounded" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="h-80 bg-gray-100 animate-pulse rounded-lg" />
+          <div className="h-80 bg-gray-100 animate-pulse rounded-lg" />
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className="max-w-6xl mx-auto space-y-6"
-      role="region"
-      aria-label="Ownership dashboard"
-    >
-      {/* Screen reader status */}
-      {statusMessage && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="sr-only"
-        >
-          {statusMessage}
-        </div>
+    <div className="max-w-6xl mx-auto space-y-6">
+      {/* Network Error Banner */}
+      {isNetworkError && (
+        <Alert variant="destructive">
+          <WifiOff className="h-4 w-4" />
+          <AlertDescription>
+            Network connection error. Please check your connection to the Stellar network and try again.
+          </AlertDescription>
+        </Alert>
       )}
 
       {/* Overview Cards */}
@@ -298,17 +393,8 @@ export default function OwnershipDashboard({
             {portfolio.assets.map((holding, index) => (
               <Card
                 key={index}
-                role="listitem"
-                tabIndex={0}
-                className="cursor-pointer hover:shadow-lg transition-shadow focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                className="cursor-pointer hover:shadow-lg transition-shadow"
                 onClick={() => setSelectedAsset(holding)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    setSelectedAsset(holding);
-                  }
-                }}
-                aria-label={`${holding.asset.name}, balance: ${parseFloat(holding.balance.amount).toLocaleString()}, value: $${parseFloat(holding.value).toLocaleString()}`}
               >
                 <CardContent className="p-6">
                   <div className="flex items-start justify-between">
@@ -317,8 +403,9 @@ export default function OwnershipDashboard({
                         <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center" aria-hidden="true">
                           {holding.asset.assetType === 'real_estate' && <Building2 className="h-5 w-5" />}
                           {holding.asset.assetType === 'commodity' && <Package className="h-5 w-5" />}
-                          {(holding.asset.assetType === 'invoice' || holding.asset.assetType === 'security') &&
-                           <DollarSign className="h-5 w-5" />}
+                          {(holding.asset.assetType === 'invoice' || holding.asset.assetType === 'security') && (
+                            <DollarSign className="h-5 w-5" />
+                          )}
                         </div>
                         <div>
                           <h3 className="font-semibold text-lg">{holding.asset.name}</h3>
@@ -329,15 +416,21 @@ export default function OwnershipDashboard({
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
                         <div>
                           <p className="text-sm text-gray-600">Balance</p>
-                          <p className="font-medium">{parseFloat(holding.balance.amount).toLocaleString()}</p>
+                          <p className="font-medium">
+                            {parseFloat(holding.balance.amount).toLocaleString()}
+                          </p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600">Value</p>
-                          <p className="font-medium">${parseFloat(holding.value).toLocaleString()}</p>
+                          <p className="font-medium">
+                            ${parseFloat(holding.value).toLocaleString()}
+                          </p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600">Dividends</p>
-                          <p className="font-medium">${parseFloat(holding.dividends).toLocaleString()}</p>
+                          <p className="font-medium">
+                            ${parseFloat(holding.dividends).toLocaleString()}
+                          </p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600">Percentage</p>
@@ -346,7 +439,9 @@ export default function OwnershipDashboard({
                       </div>
 
                       <div className="flex items-center gap-2 mt-4">
-                        <Badge variant={holding.balance.lockedAmount === '0' ? 'secondary' : 'default'}>
+                        <Badge
+                          variant={holding.balance.lockedAmount === '0' ? 'secondary' : 'default'}
+                        >
                           {holding.balance.lockedAmount === '0'
                             ? 'Unlocked'
                             : `${parseFloat(holding.balance.lockedAmount).toLocaleString()} Locked`}
@@ -381,26 +476,48 @@ export default function OwnershipDashboard({
                   </span>
                 </div>
 
-                <div className="space-y-2" role="list" aria-label="Dividend holdings">
-                  {portfolio.assets.map((holding, index) => (
-                    <div key={index} className="flex justify-between items-center p-3 border rounded" role="listitem">
-                      <div>
-                        <p className="font-medium">{holding.asset.name}</p>
-                        <p className="text-sm text-gray-600">{holding.asset.symbol}</p>
+                <div className="space-y-2">
+                  {portfolio.assets.map((holding, index) => {
+                    const addr = holding.asset.tokenAddress;
+                    const isClaimInProgress = isClaiming === addr;
+                    const errorMsg = claimError[addr];
+                    return (
+                      <div key={index}>
+                        <div className="flex justify-between items-center p-3 border rounded">
+                          <div>
+                            <p className="font-medium">{holding.asset.name}</p>
+                            <p className="text-sm text-gray-600">{holding.asset.symbol}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-medium">
+                              ${parseFloat(holding.dividends).toLocaleString()}
+                            </p>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={isClaimInProgress}
+                              onClick={() => handleClaimDividends(addr, 0)}
+                            >
+                              {isClaimInProgress ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  Claiming...
+                                </>
+                              ) : (
+                                'Claim All'
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                        {errorMsg && (
+                          <p className="text-sm text-red-500 mt-1 flex items-center gap-1">
+                            <AlertCircle className="h-3 w-3" />
+                            {errorMsg}
+                          </p>
+                        )}
                       </div>
-                      <div className="text-right">
-                        <p className="font-medium">${parseFloat(holding.dividends).toLocaleString()}</p>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {/* Handle claim all dividends */}}
-                          aria-label={`Claim all dividends for ${holding.asset.name}`}
-                        >
-                          Claim All
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </CardContent>
@@ -420,9 +537,13 @@ export default function OwnershipDashboard({
               <div className="space-y-6">
                 <div className="text-center p-6 bg-gray-50 rounded-lg">
                   <p className="text-sm text-gray-600 mb-2">Total Voting Power</p>
-                  <p className="text-3xl font-bold text-purple-600">{totalVotingPower.toLocaleString()}</p>
+                  <p className="text-3xl font-bold text-purple-600">
+                    {totalVotingPower.toLocaleString()}
+                  </p>
                   <p className="text-sm text-gray-600 mt-1">
-                    {totalValue > 0 ? ((totalVotingPower / totalValue) * 100).toFixed(2) : 0}% of portfolio
+                    {totalValue > 0
+                      ? ((totalVotingPower / totalValue) * 100).toFixed(2)
+                      : 0}% of portfolio
                   </p>
                 </div>
 
@@ -441,7 +562,10 @@ export default function OwnershipDashboard({
                           id="lock-amount"
                           type="number"
                           value={lockAmount}
-                          onChange={(e) => setLockAmount(e.target.value)}
+                          onChange={(e) => {
+                            setLockAmount(e.target.value);
+                            if (lockError) setLockError(null);
+                          }}
                           placeholder="Amount to lock"
                           className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
                           aria-required="true"
@@ -453,55 +577,89 @@ export default function OwnershipDashboard({
                           id="lock-period"
                           type="number"
                           value={lockPeriod}
-                          onChange={(e) => setLockPeriod(e.target.value)}
+                          onChange={(e) => {
+                            setLockPeriod(e.target.value);
+                            if (lockError) setLockError(null);
+                          }}
                           placeholder="Lock period"
                           className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
                           aria-required="true"
                         />
                       </div>
                       <div className="flex items-end">
-                        <Button
-                          onClick={handleLockTokens}
-                          disabled={!lockAmount || !lockPeriod}
-                          aria-label="Lock tokens"
-                        >
-                          <Lock className="mr-2 h-4 w-4" aria-hidden="true" />
-                          Lock Tokens
+                        <Button onClick={handleLockTokens} disabled={isLocking || !lockAmount || !lockPeriod}>
+                          {isLocking ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                              Locking...
+                            </>
+                          ) : (
+                            'Lock Tokens'
+                          )}
                         </Button>
                       </div>
                     </div>
 
+                    {lockError && (
+                      <p className="text-sm text-red-500 flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" />
+                        {lockError}
+                      </p>
+                    )}
+
                     <div className="text-sm text-gray-600">
-                      Available: {selectedAsset.balance.amount} |
-                      Locked: {selectedAsset.balance.lockedAmount} |
-                      Voting Power: {selectedAsset.balance.votingPower}
+                      Available: {selectedAsset.balance.amount} | Locked:{' '}
+                      {selectedAsset.balance.lockedAmount} | Voting Power:{' '}
+                      {selectedAsset.balance.votingPower}
                     </div>
                   </div>
                 )}
 
-                <div className="space-y-2" role="list" aria-label="Token voting power">
-                  {portfolio.assets.map((holding, index) => (
-                    <div key={index} className="flex justify-between items-center p-3 border rounded" role="listitem">
-                      <div>
-                        <p className="font-medium">{holding.asset.name}</p>
-                        <p className="text-sm text-gray-600">
-                          Locked: {holding.balance.lockedAmount} | Voting: {holding.balance.votingPower}
-                        </p>
-                      </div>
-                      <div className="flex gap-2">
-                        {parseFloat(holding.balance.lockedAmount) > 0 && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleUnlockTokens(holding.asset.tokenAddress, holding.balance.lockedAmount)}
-                            aria-label={`Unlock tokens for ${holding.asset.name}`}
-                          >
-                            Unlock
-                          </Button>
+                <div className="space-y-2">
+                  {portfolio.assets.map((holding, index) => {
+                    const addr = holding.asset.tokenAddress;
+                    const isUnlockInProgress = isUnlocking === addr;
+                    const errorMsg = unlockError[addr];
+                    return (
+                      <div key={index}>
+                        <div className="flex justify-between items-center p-3 border rounded">
+                          <div>
+                            <p className="font-medium">{holding.asset.name}</p>
+                            <p className="text-sm text-gray-600">
+                              Locked: {holding.balance.lockedAmount} | Voting: {holding.balance.votingPower}
+                            </p>
+                          </div>
+                          <div className="flex gap-2">
+                            {parseFloat(holding.balance.lockedAmount) > 0 && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={isUnlockInProgress}
+                                onClick={() =>
+                                  handleUnlockTokens(addr, holding.balance.lockedAmount)
+                                }
+                              >
+                                {isUnlockInProgress ? (
+                                  <>
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                    Unlocking...
+                                  </>
+                                ) : (
+                                  'Unlock'
+                                )}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                        {errorMsg && (
+                          <p className="text-sm text-red-500 mt-1 flex items-center gap-1">
+                            <AlertCircle className="h-3 w-3" />
+                            {errorMsg}
+                          </p>
                         )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </CardContent>
