@@ -15,6 +15,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [userOrders, setUserOrders] = useState<Order[]>([]);
   const [kycStatus, setKycStatus] = useState<boolean>(false);
   const [dividendHalt, setDividendHalt] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Form State
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
@@ -43,11 +44,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!kycStatus) {
-      alert("KYC verification required to trade.");
+      setStatusMessage('KYC verification required to trade.');
       return;
     }
     if (dividendHalt) {
-      alert("Trading is halted during dividend record dates.");
+      setStatusMessage('Trading is halted during dividend record dates.');
       return;
     }
 
@@ -60,106 +61,214 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
         amount,
         Math.floor(Date.now() / 1000) + 86400 * 7 // 7 days expiry
       );
+      setStatusMessage(`${side === 'buy' ? 'Buy' : 'Sell'} order placed successfully`);
       fetchMarketData();
+      setPrice('');
+      setAmount('');
     } catch (err: any) {
-      alert("Failed to place order: " + err.message);
+      setStatusMessage('Failed to place order: ' + err.message);
+    }
+  };
+
+  const handleSideKeyDown = (newSide: 'buy' | 'sell') => (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setSide(newSide);
     }
   };
 
   return (
-    <div className="secondary-market-container">
+    <div
+      className="secondary-market-container"
+      role="region"
+      aria-label={`Secondary market for ${asset.symbol}`}
+    >
+      {/* Screen reader status announcements */}
+      {statusMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="sr-only"
+        >
+          {statusMessage}
+        </div>
+      )}
+
       <header className="market-header">
         <h1>{asset.symbol} - Secondary Market</h1>
-        <div className="token-stats">
-          <span>VWAP: {vwap}</span>
-          <span className={`status ${kycStatus ? 'verified' : 'unverified'}`}>
+        <div className="token-stats" aria-label="Market statistics">
+          <span aria-label={`Volume-weighted average price: ${vwap}`}>VWAP: {vwap}</span>
+          <span
+            className={`status ${kycStatus ? 'verified' : 'unverified'}`}
+            aria-label={`KYC status: ${kycStatus ? 'Verified' : 'Required'}`}
+            role="status"
+          >
             KYC: {kycStatus ? 'Verified' : 'Required'}
           </span>
-          {dividendHalt && <span className="halt-badge">DIVIDEND HALT</span>}
+          {dividendHalt && (
+            <span className="halt-badge" role="alert" aria-label="Trading halted for dividend record date">
+              DIVIDEND HALT
+            </span>
+          )}
         </div>
       </header>
 
       <main className="market-grid">
-        {/* TradingView-style Chart Placeholder */}
-        <section className="price-chart">
+        {/* Price Chart */}
+        <section className="price-chart" aria-label="Price chart">
           <h2>Price Chart</h2>
-          <div className="chart-placeholder">
-            {/* Real TradingView widget would go here */}
+          <div className="chart-placeholder" role="img" aria-label={`Price chart visualization for ${asset.symbol}. VWAP is at ${vwap}`}>
             <div className="vwap-line" style={{ top: '50%' }}>VWAP: {vwap}</div>
           </div>
         </section>
 
-        {/* Order Book Depth */}
-        <section className="order-book">
+        {/* Order Book */}
+        <section className="order-book" aria-label="Order book depth">
           <h2>Order Book</h2>
           <div className="depth-visualization">
-            <div className="asks">
+            <div className="asks" role="list" aria-label="Ask orders">
               {orderBook?.asks.map((ask, i) => (
-                <div key={i} className="book-row ask" style={{ width: `${(ask.amount / 1000) * 100}%` }}>
+                <div
+                  key={i}
+                  className="book-row ask"
+                  style={{ width: `${(ask.amount / 1000) * 100}%` }}
+                  role="listitem"
+                  aria-label={`Ask order: ${ask.amount} at ${ask.price}`}
+                >
                   <span>{ask.price}</span>
                   <span>{ask.amount}</span>
                 </div>
-              ))}
+              )) || (
+                <div className="book-row" role="listitem" aria-label="No ask orders">
+                  <span>--</span>
+                  <span>--</span>
+                </div>
+              )}
             </div>
-            <div className="bids">
+            <div className="bids" role="list" aria-label="Bid orders">
               {orderBook?.bids.map((bid, i) => (
-                <div key={i} className="book-row bid" style={{ width: `${(bid.amount / 1000) * 100}%` }}>
+                <div
+                  key={i}
+                  className="book-row bid"
+                  style={{ width: `${(bid.amount / 1000) * 100}%` }}
+                  role="listitem"
+                  aria-label={`Bid order: ${bid.amount} at ${bid.price}`}
+                >
                   <span>{bid.price}</span>
                   <span>{bid.amount}</span>
                 </div>
-              ))}
+              )) || (
+                <div className="book-row" role="listitem" aria-label="No bid orders">
+                  <span>--</span>
+                  <span>--</span>
+                </div>
+              )}
             </div>
           </div>
         </section>
 
         {/* Order Entry */}
-        <section className="order-entry">
+        <section className="order-entry" aria-label="Place a new order">
           <h2>Place Order</h2>
-          <form onSubmit={handlePlaceOrder}>
-            <div className="side-toggle">
-              <button type="button" className={side === 'buy' ? 'active buy' : ''} onClick={() => setSide('buy')}>BUY</button>
-              <button type="button" className={side === 'sell' ? 'active sell' : ''} onClick={() => setSide('sell')}>SELL</button>
+          <form onSubmit={handlePlaceOrder} aria-label={`Place a ${side} limit order`} noValidate>
+            <div className="side-toggle" role="radiogroup" aria-label="Order side">
+              <button
+                type="button"
+                className={side === 'buy' ? 'active buy' : ''}
+                onClick={() => setSide('buy')}
+                onKeyDown={handleSideKeyDown('buy')}
+                role="radio"
+                aria-checked={side === 'buy'}
+                aria-label="Buy order"
+                tabIndex={0}
+              >
+                BUY
+              </button>
+              <button
+                type="button"
+                className={side === 'sell' ? 'active sell' : ''}
+                onClick={() => setSide('sell')}
+                onKeyDown={handleSideKeyDown('sell')}
+                role="radio"
+                aria-checked={side === 'sell'}
+                aria-label="Sell order"
+                tabIndex={0}
+              >
+                SELL
+              </button>
             </div>
-            <input type="number" step="any" placeholder="Price" value={price} onChange={e => setPrice(e.target.value)} />
-            <input type="number" step="any" placeholder="Amount" value={amount} onChange={e => setAmount(e.target.value)} />
-            <button type="submit" className="submit-order">Place {side} Limit Order</button>
+            <label htmlFor="order-price" className="sr-only">Price</label>
+            <input
+              id="order-price"
+              type="number"
+              step="any"
+              placeholder="Price"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              aria-required="true"
+              aria-label="Order price"
+            />
+            <label htmlFor="order-amount" className="sr-only">Amount</label>
+            <input
+              id="order-amount"
+              type="number"
+              step="any"
+              placeholder="Amount"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              aria-required="true"
+              aria-label="Order amount"
+            />
+            <button type="submit" className="submit-order" aria-label={`Place ${side} limit order`}>
+              Place {side} Limit Order
+            </button>
           </form>
         </section>
 
         {/* Trade History */}
-        <section className="trade-history">
+        <section className="trade-history" aria-label="Recent trades">
           <h2>Recent Trades</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Price</th>
-                <th>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.map((trade, i) => (
-                <tr key={i} className={trade.side}>
-                  <td>{new Date(trade.timestamp * 1000).toLocaleTimeString()}</td>
-                  <td>{trade.fill_price}</td>
-                  <td>{trade.fill_amount}</td>
+          <div className="overflow-x-auto" role="region" aria-label="Trade history table" tabIndex={0}>
+            <table role="table" aria-label="Recent trade history">
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col">Price</th>
+                  <th scope="col">Amount</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {trades.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="text-center text-gray-500 py-4">
+                      No recent trades
+                    </td>
+                  </tr>
+                ) : (
+                  trades.map((trade, i) => (
+                    <tr key={i} className={trade.side}>
+                      <td>{new Date(trade.timestamp * 1000).toLocaleTimeString()}</td>
+                      <td>{trade.fill_price}</td>
+                      <td>{trade.fill_amount}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
 
-        {/* Portfolio & P&L */}
-        <section className="portfolio-overview">
+        {/* Portfolio Overview */}
+        <section className="portfolio-overview" aria-label="Your portfolio">
           <h2>Your Portfolio</h2>
           <div className="portfolio-stats">
             <div className="stat">
               <label>Holdings</label>
-              <span>{vwap} {asset.symbol}</span>
+              <span aria-label={`Holdings: ${vwap} ${asset.symbol}`}>{vwap} {asset.symbol}</span>
             </div>
             <div className="stat">
               <label>Unrealized P&L</label>
-              <span className="pnl positive">+12.4%</span>
+              <span className="pnl positive" aria-label="Unrealized profit and loss: +12.4%">+12.4%</span>
             </div>
           </div>
         </section>
@@ -179,12 +288,21 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
         .order-entry form { display: flex; flex-direction: column; gap: 10px; }
         .side-toggle { display: flex; gap: 10px; }
         .side-toggle button { flex: 1; padding: 10px; border: none; background: #333; color: #fff; cursor: pointer; border-radius: 4px; }
+        .side-toggle button:focus-visible { outline: 2px solid #2962ff; outline-offset: 2px; }
         .side-toggle button.active.buy { background: #00c853; }
         .side-toggle button.active.sell { background: #ff4444; }
         input { background: #222; border: 1px solid #444; color: #fff; padding: 10px; border-radius: 4px; }
+        input:focus { outline: 2px solid #2962ff; outline-offset: 1px; }
         .submit-order { background: #2962ff; color: #fff; padding: 12px; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        .submit-order:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
         .halt-badge { background: #ffea00; color: #000; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
         .pnl.positive { color: #00c853; font-weight: bold; }
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border-width: 0; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 8px; border-bottom: 1px solid #333; }
+        td { padding: 8px; border-bottom: 1px solid #222; }
+        h2 { font-size: 16px; font-weight: 600; margin-bottom: 10px; color: #ccc; }
+        button:focus-visible, a:focus-visible { outline: 2px solid #2962ff; outline-offset: 2px; }
       `}</style>
     </div>
   );
