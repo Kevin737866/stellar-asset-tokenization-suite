@@ -19,6 +19,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [userOrders, setUserOrders] = useState<Order[]>([]);
   const [kycStatus, setKycStatus] = useState<boolean>(false);
   const [dividendHalt, setDividendHalt] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Loading states
   const [isLoadingData, setIsLoadingData] = useState(true);
@@ -187,15 +188,38 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   }
 
   return (
-    <div className="secondary-market-container">
+    <div
+      className="secondary-market-container"
+      role="region"
+      aria-label={`Secondary market for ${asset.symbol}`}
+    >
+      {/* Screen reader status announcements */}
+      {statusMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="sr-only"
+        >
+          {statusMessage}
+        </div>
+      )}
+
       <header className="market-header">
         <h1>{asset.symbol} - Secondary Market</h1>
-        <div className="token-stats">
-          <span>VWAP: {vwap}</span>
-          <span className={`status ${kycStatus ? 'verified' : 'unverified'}`}>
+        <div className="token-stats" aria-label="Market statistics">
+          <span aria-label={`Volume-weighted average price: ${vwap}`}>VWAP: {vwap}</span>
+          <span
+            className={`status ${kycStatus ? 'verified' : 'unverified'}`}
+            aria-label={`KYC status: ${kycStatus ? 'Verified' : 'Required'}`}
+            role="status"
+          >
             KYC: {kycStatus ? 'Verified' : 'Required'}
           </span>
-          {dividendHalt && <span className="halt-badge">DIVIDEND HALT</span>}
+          {dividendHalt && (
+            <span className="halt-badge" role="alert" aria-label="Trading halted for dividend record date">
+              DIVIDEND HALT
+            </span>
+          )}
         </div>
       </header>
 
@@ -213,17 +237,16 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       )}
 
       <main className="market-grid">
-        {/* TradingView-style Chart Placeholder */}
-        <section className="price-chart">
+        {/* Price Chart */}
+        <section className="price-chart" aria-label="Price chart">
           <h2>Price Chart</h2>
-          <div className="chart-placeholder">
-            {/* Real TradingView widget would go here */}
+          <div className="chart-placeholder" role="img" aria-label={`Price chart visualization for ${asset.symbol}. VWAP is at ${vwap}`}>
             <div className="vwap-line" style={{ top: '50%' }}>VWAP: {vwap}</div>
           </div>
         </section>
 
-        {/* Order Book Depth */}
-        <section className="order-book">
+        {/* Order Book */}
+        <section className="order-book" aria-label="Order book depth">
           <h2>Order Book</h2>
           <div className="depth-visualization">
             <div className="asks">
@@ -250,12 +273,34 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
         </section>
 
         {/* Order Entry */}
-        <section className="order-entry">
+        <section className="order-entry" aria-label="Place a new order">
           <h2>Place Order</h2>
-          <form onSubmit={handlePlaceOrder}>
-            <div className="side-toggle">
-              <button type="button" className={side === 'buy' ? 'active buy' : ''} onClick={() => setSide('buy')}>BUY</button>
-              <button type="button" className={side === 'sell' ? 'active sell' : ''} onClick={() => setSide('sell')}>SELL</button>
+          <form onSubmit={handlePlaceOrder} aria-label={`Place a ${side} limit order`} noValidate>
+            <div className="side-toggle" role="radiogroup" aria-label="Order side">
+              <button
+                type="button"
+                className={side === 'buy' ? 'active buy' : ''}
+                onClick={() => setSide('buy')}
+                onKeyDown={handleSideKeyDown('buy')}
+                role="radio"
+                aria-checked={side === 'buy'}
+                aria-label="Buy order"
+                tabIndex={0}
+              >
+                BUY
+              </button>
+              <button
+                type="button"
+                className={side === 'sell' ? 'active sell' : ''}
+                onClick={() => setSide('sell')}
+                onKeyDown={handleSideKeyDown('sell')}
+                role="radio"
+                aria-checked={side === 'sell'}
+                aria-label="Sell order"
+                tabIndex={0}
+              >
+                SELL
+              </button>
             </div>
             <input
               type="number"
@@ -289,7 +334,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
         </section>
 
         {/* Trade History */}
-        <section className="trade-history">
+        <section className="trade-history" aria-label="Recent trades">
           <h2>Recent Trades</h2>
           {trades.length > 0 ? (
             <table>
@@ -315,17 +360,17 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
           )}
         </section>
 
-        {/* Portfolio & P&L */}
-        <section className="portfolio-overview">
+        {/* Portfolio Overview */}
+        <section className="portfolio-overview" aria-label="Your portfolio">
           <h2>Your Portfolio</h2>
           <div className="portfolio-stats">
             <div className="stat">
               <label>Holdings</label>
-              <span>{vwap} {asset.symbol}</span>
+              <span aria-label={`Holdings: ${vwap} ${asset.symbol}`}>{vwap} {asset.symbol}</span>
             </div>
             <div className="stat">
               <label>Unrealized P&L</label>
-              <span className="pnl positive">+12.4%</span>
+              <span className="pnl positive" aria-label="Unrealized profit and loss: +12.4%">+12.4%</span>
             </div>
           </div>
         </section>

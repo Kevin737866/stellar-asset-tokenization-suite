@@ -201,11 +201,26 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div
+      className="max-w-4xl mx-auto space-y-6"
+      role="region"
+      aria-label="Asset deployment form"
+    >
+      {/* Status message for screen readers */}
+      {statusMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="sr-only"
+        >
+          {statusMessage}
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Package className="h-5 w-5" />
+            <Package className="h-5 w-5" aria-hidden="true" />
             Deploy New RWA Token
           </CardTitle>
         </CardHeader>
@@ -244,53 +259,78 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
 
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Asset Name */}
               <div className="space-y-2">
-                <Label htmlFor="name">Asset Name</Label>
+                <Label htmlFor="asset-name">Asset Name</Label>
                 <Input
-                  id="name"
+                  id="asset-name"
                   value={formData.name}
                   onChange={(e) => {
                     setFormData(prev => ({ ...prev, name: e.target.value }));
                     if (errors.name) setErrors(prev => ({ ...prev, name: '' }));
                   }}
                   placeholder="e.g., Manhattan Office Tower"
-                  className={errors.name ? 'border-red-500' : ''}
+                  aria-required="true"
+                  aria-invalid={!!errors.name}
+                  aria-describedby={errors.name ? errorId('name') : undefined}
+                  className={errors.name ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
-                {errors.name && <p className="text-sm text-red-500">{errors.name}</p>}
+                {errors.name && (
+                  <p id={errorId('name')} className="text-sm text-red-500" role="alert">
+                    {errors.name}
+                  </p>
+                )}
               </div>
 
+              {/* Asset Symbol */}
               <div className="space-y-2">
-                <Label htmlFor="symbol">Asset Symbol</Label>
+                <Label htmlFor="asset-symbol">Asset Symbol</Label>
                 <Input
-                  id="symbol"
+                  id="asset-symbol"
                   value={formData.symbol}
                   onChange={(e) => {
                     setFormData(prev => ({ ...prev, symbol: e.target.value.toUpperCase() }));
                     if (errors.symbol) setErrors(prev => ({ ...prev, symbol: '' }));
                   }}
                   placeholder="e.g., MOT"
-                  className={errors.symbol ? 'border-red-500' : ''}
+                  aria-required="true"
+                  aria-invalid={!!errors.symbol}
+                  aria-describedby={errors.symbol ? errorId('symbol') : undefined}
+                  className={errors.symbol ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
-                {errors.symbol && <p className="text-sm text-red-500">{errors.symbol}</p>}
+                {errors.symbol && (
+                  <p id={errorId('symbol')} className="text-sm text-red-500" role="alert">
+                    {errors.symbol}
+                  </p>
+                )}
               </div>
 
+              {/* Total Supply */}
               <div className="space-y-2">
-                <Label htmlFor="totalSupply">Total Supply</Label>
+                <Label htmlFor="asset-total-supply">Total Supply</Label>
                 <Input
-                  id="totalSupply"
+                  id="asset-total-supply"
                   value={formData.totalSupply}
                   onChange={(e) => {
                     setFormData(prev => ({ ...prev, totalSupply: e.target.value }));
                     if (errors.totalSupply) setErrors(prev => ({ ...prev, totalSupply: '' }));
                   }}
                   placeholder="e.g., 1000000"
-                  className={errors.totalSupply ? 'border-red-500' : ''}
+                  aria-required="true"
+                  aria-invalid={!!errors.totalSupply}
+                  aria-describedby={errors.totalSupply ? errorId('totalsupply') : undefined}
+                  className={errors.totalSupply ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
-                {errors.totalSupply && <p className="text-sm text-red-500">{errors.totalSupply}</p>}
+                {errors.totalSupply && (
+                  <p id={errorId('totalsupply')} className="text-sm text-red-500" role="alert">
+                    {errors.totalSupply}
+                  </p>
+                )}
               </div>
 
+              {/* Decimals */}
               <div className="space-y-2">
-                <Label htmlFor="decimals">Decimals</Label>
+                <Label htmlFor="asset-decimals">Decimals</Label>
                 <Select
                   value={formData.decimals}
                   onValueChange={(value) => {
@@ -298,7 +338,12 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     if (errors.decimals) setErrors(prev => ({ ...prev, decimals: '' }));
                   }}
                 >
-                  <SelectTrigger className={errors.decimals ? 'border-red-500' : ''}>
+                  <SelectTrigger
+                    id="asset-decimals"
+                    aria-invalid={!!errors.decimals}
+                    aria-describedby={errors.decimals ? errorId('decimals') : undefined}
+                    className={`focus:ring-blue-500 ${errors.decimals ? 'border-red-500' : ''}`}
+                  >
                     <SelectValue placeholder="Select decimals" />
                   </SelectTrigger>
                   <SelectContent>
@@ -309,17 +354,31 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     ))}
                   </SelectContent>
                 </Select>
-                {errors.decimals && <p className="text-sm text-red-500">{errors.decimals}</p>}
+                {errors.decimals && (
+                  <p id={errorId('decimals')} className="text-sm text-red-500" role="alert">
+                    {errors.decimals}
+                  </p>
+                )}
               </div>
             </div>
 
-            <div className="space-y-4">
-              <Label>Asset Type</Label>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {/* Asset Type Selection */}
+            <fieldset className="space-y-4">
+              <legend className="text-sm font-medium">Asset Type</legend>
+              <div
+                className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+                role="radiogroup"
+                aria-label="Select asset type"
+                aria-required="true"
+              >
                 {Object.entries(assetTypeIcons).map(([type, Icon]) => (
                   <Card
                     key={type}
-                    className={`cursor-pointer transition-all ${
+                    role="radio"
+                    tabIndex={0}
+                    aria-checked={formData.assetType === type}
+                    aria-label={`${type.replace('_', ' ')} - ${assetTypeDescriptions[type as AssetType]}`}
+                    className={`cursor-pointer transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
                       formData.assetType === type
                         ? 'ring-2 ring-blue-500 bg-blue-50'
                         : 'hover:bg-gray-50'
@@ -331,7 +390,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   >
                     <CardContent className="p-4">
                       <div className="flex items-start space-x-3">
-                        <Icon className="h-6 w-6 text-gray-600 mt-1" />
+                        <Icon className="h-6 w-6 text-gray-600 mt-1" aria-hidden="true" />
                         <div className="flex-1">
                           <h3 className="font-medium capitalize">
                             {type.replace('_', ' ')}
@@ -345,45 +404,71 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   </Card>
                 ))}
               </div>
-              {errors.assetType && <p className="text-sm text-red-500">{errors.assetType}</p>}
-            </div>
+              {errors.assetType && (
+                <p id={errorId('assettype')} className="text-sm text-red-500" role="alert">
+                  {errors.assetType}
+                </p>
+              )}
+            </fieldset>
 
+            {/* Contract Addresses */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <Label htmlFor="complianceRegistry">Compliance Registry Address</Label>
+                <Label htmlFor="asset-compliance-registry">Compliance Registry Address</Label>
                 <Input
-                  id="complianceRegistry"
+                  id="asset-compliance-registry"
                   value={formData.complianceRegistry}
                   onChange={(e) => {
                     setFormData(prev => ({ ...prev, complianceRegistry: e.target.value }));
                     if (errors.complianceRegistry) setErrors(prev => ({ ...prev, complianceRegistry: '' }));
                   }}
                   placeholder="0x..."
-                  className={errors.complianceRegistry ? 'border-red-500' : ''}
+                  aria-required="true"
+                  aria-invalid={!!errors.complianceRegistry}
+                  aria-describedby={errors.complianceRegistry ? errorId('complianceregistry') : undefined}
+                  className={errors.complianceRegistry ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
-                {errors.complianceRegistry && <p className="text-sm text-red-500">{errors.complianceRegistry}</p>}
+                {errors.complianceRegistry && (
+                  <p id={errorId('complianceregistry')} className="text-sm text-red-500" role="alert">
+                    {errors.complianceRegistry}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="dividendDistributor">Dividend Distributor Address</Label>
+                <Label htmlFor="asset-dividend-distributor">Dividend Distributor Address</Label>
                 <Input
-                  id="dividendDistributor"
+                  id="asset-dividend-distributor"
                   value={formData.dividendDistributor}
                   onChange={(e) => {
                     setFormData(prev => ({ ...prev, dividendDistributor: e.target.value }));
                     if (errors.dividendDistributor) setErrors(prev => ({ ...prev, dividendDistributor: '' }));
                   }}
                   placeholder="0x..."
-                  className={errors.dividendDistributor ? 'border-red-500' : ''}
+                  aria-required="true"
+                  aria-invalid={!!errors.dividendDistributor}
+                  aria-describedby={errors.dividendDistributor ? errorId('dividenddistributor') : undefined}
+                  className={errors.dividendDistributor ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
-                {errors.dividendDistributor && <p className="text-sm text-red-500">{errors.dividendDistributor}</p>}
+                {errors.dividendDistributor && (
+                  <p id={errorId('dividenddistributor')} className="text-sm text-red-500" role="alert">
+                    {errors.dividendDistributor}
+                  </p>
+                )}
               </div>
             </div>
 
-            <div className="space-y-4">
+            {/* Metadata Section */}
+            <fieldset className="space-y-4">
               <div className="flex items-center justify-between">
-                <Label>Asset Metadata</Label>
-                <Button type="button" variant="outline" size="sm" onClick={addMetadataField}>
+                <legend className="text-sm font-medium">Asset Metadata</legend>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addMetadataField}
+                  aria-label="Add metadata field"
+                >
                   Add Field
                 </Button>
               </div>
@@ -396,17 +481,20 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                       disabled
                       className="bg-gray-50"
                       placeholder="Key"
+                      aria-label={`Metadata key: ${key}`}
                     />
                     <Input
                       value={value}
                       onChange={(e) => updateMetadata(key, e.target.value)}
                       placeholder="Value"
+                      aria-label={`Metadata value for ${key}`}
                     />
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       onClick={() => removeMetadata(key)}
+                      aria-label={`Remove metadata field ${key}`}
                     >
                       Remove
                     </Button>
@@ -419,8 +507,9 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   </p>
                 )}
               </div>
-            </div>
+            </fieldset>
 
+            {/* Form Actions */}
             <div className="flex justify-end space-x-4">
               <Button
                 type="button"
@@ -447,10 +536,12 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
               <Button
                 type="submit"
                 disabled={isSubmitting || isLoading}
+                aria-label={isSubmitting || isLoading ? 'Deploying token, please wait' : 'Deploy token'}
+                aria-busy={isSubmitting || isLoading}
               >
                 {isSubmitting || isLoading ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
                     Deploying...
                   </>
                 ) : (
@@ -462,10 +553,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
         </CardContent>
       </Card>
 
-      <Alert>
-        <Building2 className="h-4 w-4" />
+      <Alert role="complementary" aria-label="Deployment information">
+        <Building2 className="h-4 w-4" aria-hidden="true" />
         <AlertDescription>
-          Deploying a new RWA token creates a smart contract on the Stellar blockchain. 
+          Deploying a new RWA token creates a smart contract on the Stellar blockchain.
           Make sure you have sufficient XLM for deployment fees and that all addresses are correct.
         </AlertDescription>
       </Alert>
