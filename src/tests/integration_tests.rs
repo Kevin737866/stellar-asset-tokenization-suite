@@ -8,6 +8,7 @@ use soroban_sdk::{
 use crate::{
     asset_factory::{AssetClass, AssetConfig, AssetFactory, AssetFactoryClient, AssetTemplate, ComplianceRules},
     compliance_registry::{ComplianceRegistry, ComplianceRegistryClient, KYCStatus},
+    custody_validator::{CustodyValidator, CustodyValidatorClient, CustodyAttestation},
     dividend_distributor::{DividendDistributor, DividendDistributorClient},
     rwa_token::{RWAToken, RWATokenClient},
     secondary_market::{SecondaryMarket, SecondaryMarketClient},
@@ -26,6 +27,7 @@ struct IntegrationTestEnv {
     dividend_distributor: DividendDistributorClient<'static>,
     secondary_market: SecondaryMarketClient<'static>,
     rwa_token: RWATokenClient<'static>,
+    custody_validator: CustodyValidatorClient<'static>,
     base_currency: Address,
 }
 
@@ -70,6 +72,11 @@ fn setup_integration_test() -> IntegrationTestEnv {
         &2000i64, // 20% max price deviation
     );
 
+    // Deploy Custody Validator
+    let custody_id = env.register_contract(None, CustodyValidator);
+    let custody_validator = CustodyValidatorClient::new(&env, &custody_id);
+    custody_validator.initialize(&admin, &admin, &Vec::from_array(&env, [Address::generate(&env)]));
+
     // Deploy RWA Token
     let token_id = env.register_contract(None, RWAToken);
     let rwa_token = RWATokenClient::new(&env, &token_id);
@@ -83,6 +90,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
     let dividend_distributor: DividendDistributorClient<'static> = unsafe { core::mem::transmute(dividend_distributor) };
     let secondary_market: SecondaryMarketClient<'static> = unsafe { core::mem::transmute(secondary_market) };
     let rwa_token: RWATokenClient<'static> = unsafe { core::mem::transmute(rwa_token) };
+    let custody_validator: CustodyValidatorClient<'static> = unsafe { core::mem::transmute(custody_validator) };
 
     IntegrationTestEnv {
         env,
@@ -94,6 +102,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
         dividend_distributor,
         secondary_market,
         rwa_token,
+        custody_validator,
         base_currency,
     }
 }
@@ -662,6 +671,9 @@ fn test_transfer_limits_enforcement() {
 fn test_full_workflow_end_to_end() {
     let t = setup_integration_test();
 
+    // Reset budget before workflow for gas tracking
+    t.env.budget().reset_default();
+
     // Step 1: Initialize RWA Token
     t.rwa_token.initialize(
         &t.admin,
@@ -746,4 +758,169 @@ fn test_full_workflow_end_to_end() {
     
     assert!(claim_info1.is_some());
     assert!(claim_info2.is_some());
+
+    // Gas tracking: verify the full workflow stays within budget
+    let gas_used = t.env.budget().cpu_insns_consumed().unwrap_or(0);
+    let mem_bytes = t.env.budget().mem_bytes_consumed().unwrap_or(0);
+    
+    // Full workflow should complete well within Soroban transaction limits
+    // (max ~100M CPU instructions, ~40MB memory per transaction)
+    assert!(gas_used > 0, "Gas should be consumed during full workflow");
+    assert!(gas_used < 100_000_000, "Full workflow should stay within CPU budget");
+    assert!(mem_bytes < 40_000_000, "Full workflow should stay within memory budget");
+
+    eprintln!("Full workflow gas used: {} CPU insns, {} mem bytes", gas_used, mem_bytes);
+
+    // Step 11: Verify custody attestation
+    let attestation = CustodyAttestation {
+        asset_id: t.rwa_token.address.clone(),
+        custodian: t.admin.clone(),
+        location: Symbol::new(&t.env, "NYC Vault"),
+        condition: Symbol::new(&t.env, "excellent"),
+        value: 1_000_000i128,
+        timestamp: t.env.ledger().timestamp(),
+        proof_hash: BytesN::from_array(&t.env, &[2u8; 32]),
+        verification_type: Symbol::new(&t.env, "real_estate"),
+        insurance_status: Symbol::new(&t.env, "insured"),
+        legal_title_hash: BytesN::from_array(&t.env, &[3u8; 32]),
+        audit_report_hash: BytesN::from_array(&t.env, &[4u8; 32]),
+        multi_sig_signatures: Vec::from_array(&t.env, [BytesN::from_array(&t.env, &[5u8; 64]), BytesN::from_array(&t.env, &[6u8; 64]), BytesN::from_array(&t.env, &[7u8; 64])]),
+        metadata: Map::new(&t.env),
+        is_valid: false,
+        expires_at: t.env.ledger().timestamp() + 86400 * 60,
+    };
+
+    let attestation_id = t.custody_validator.submit_attestation(&attestation);
+    assert_eq!(attestation_id, 1);
+
+    let retrieved = t.custody_validator.get_attestation(&attestation_id);
+    assert!(retrieved.is_valid);
+    assert_eq!(retrieved.asset_id, t.rwa_token.address);
+    assert_eq!(retrieved.value, 1_000_000);
+}
+
+// ── Integration Test 11: Unauthorized Access Rejection ─────────────────────────
+
+#[test]
+fn test_unauthorized_access_rejection() {
+    let t = setup_integration_test();
+
+    // Initialize RWA Token
+    t.rwa_token.initialize(
+        &t.admin,
+        &Symbol::new(&t.env, "UnauthToken"),
+        &Symbol::new(&t.env, "UNAT"),
+        &1_000_000i128,
+        &6u32,
+        &Symbol::new(&t.env, "security"),
+        &Map::new(&t.env),
+        &t.compliance_registry.address.clone(),
+        &t.dividend_distributor.address.clone(),
+    );
+
+    // Attempt to pause from non-admin should fail
+    let result = std::panic::catch_unwind(|| {
+        t.rwa_token.pause(&t.user1);
+    });
+    assert!(result.is_err(), "Non-admin should not be able to pause");
+
+    // Attempt to mint from non-admin should fail
+    let result = std::panic::catch_unwind(|| {
+        t.rwa_token.mint(&t.user1, &t.user1, 1000i128);
+    });
+    assert!(result.is_err(), "Non-admin should not be able to mint");
+
+    // Attempt to create distribution from non-admin should fail
+    let result = std::panic::catch_unwind(|| {
+        t.dividend_distributor.create_distribution(
+            &t.user1,
+            &t.rwa_token.address.clone(),
+            &Symbol::new(&t.env, "USDC"),
+            &10_000i128,
+            &t.env.ledger().timestamp() + 86400,
+            Map::new(&t.env),
+        );
+    });
+    assert!(result.is_err(), "Non-admin should not be able to create distributions");
+}
+
+// ── Integration Test 12: Deploy → KYC → Dividend → Custody Workflow ───────────
+
+#[test]
+fn test_deploy_kyc_dividend_custody_workflow() {
+    let t = setup_integration_test();
+
+    // Step 1: Deploy/Initialize RWA Token
+    t.rwa_token.initialize(
+        &t.admin,
+        &Symbol::new(&t.env, "CustodyAsset"),
+        &Symbol::new(&t.env, "CUST"),
+        &1_000_000i128,
+        &6u32,
+        &Symbol::new(&t.env, "commodity"),
+        &Map::new(&t.env),
+        &t.compliance_registry.address.clone(),
+        &t.dividend_distributor.address.clone(),
+    );
+
+    // Step 2: KYC for user1
+    let kyc_status = KYCStatus {
+        is_verified: true,
+        verification_level: 2,
+        expiry_date: t.env.ledger().timestamp() + 86400 * 365,
+        jurisdiction: Symbol::new(&t.env, "US"),
+        is_accredited: true,
+        risk_score: 3,
+        aml_flags: Vec::new(&t.env),
+    };
+    t.compliance_registry.update_kyc_status(&t.admin, &t.user1, kyc_status);
+
+    // Step 3: Transfer tokens
+    t.rwa_token.transfer(&t.admin, &t.user1, &100_000i128);
+
+    // Step 4: Create dividend distribution
+    let distribution_id = t.dividend_distributor.create_distribution(
+        &t.admin,
+        &t.rwa_token.address.clone(),
+        &Symbol::new(&t.env, "USDC"),
+        &10_000i128,
+        &t.env.ledger().timestamp() + 86400 * 30,
+        Map::new(&t.env),
+    );
+
+    // Step 5: Claim dividend
+    let claimed = t.dividend_distributor.claim_dividend(distribution_id, t.user1.clone());
+    assert!(claimed > 0);
+
+    // Step 6: Verify custody via attestation
+    let attestation = CustodyAttestation {
+        asset_id: t.rwa_token.address.clone(),
+        custodian: t.admin.clone(),
+        location: Symbol::new(&t.env, "Vault London"),
+        condition: Symbol::new(&t.env, "good"),
+        value: 500_000i128,
+        timestamp: t.env.ledger().timestamp(),
+        proof_hash: BytesN::from_array(&t.env, &[8u8; 32]),
+        verification_type: Symbol::new(&t.env, "commodities"),
+        insurance_status: Symbol::new(&t.env, "insured"),
+        legal_title_hash: BytesN::from_array(&t.env, &[9u8; 32]),
+        audit_report_hash: BytesN::from_array(&t.env, &[10u8; 32]),
+        multi_sig_signatures: Vec::from_array(&t.env, [BytesN::from_array(&t.env, &[11u8; 64])]),
+        metadata: Map::new(&t.env),
+        is_valid: false,
+        expires_at: t.env.ledger().timestamp() + 86400 * 90,
+    };
+
+    let attestation_id = t.custody_validator.submit_attestation(&attestation);
+    assert_eq!(attestation_id, 1);
+
+    let retrieved = t.custody_validator.get_attestation(&attestation_id);
+    assert!(retrieved.is_valid);
+
+    // Step 7: Verify final state - token balances intact
+    let user1_balance = t.rwa_token.get_balance(&t.user1);
+    assert_eq!(user1_balance.amount, 100_000);
+
+    let admin_balance = t.rwa_token.get_balance(&t.admin);
+    assert_eq!(admin_balance.amount, 900_000);
 }
