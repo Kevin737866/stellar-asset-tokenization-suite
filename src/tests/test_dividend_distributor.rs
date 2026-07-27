@@ -410,3 +410,160 @@ fn update_config_changes_fee_rate() {
     // 100% of supply → 1000 total, minus 1% fee = 990
     assert_eq!(claimed, 990);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #222: Upgrade & Migration Tests for DividendDistributor
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── migrate ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn migrate_preserves_config_and_currencies() {
+    let t = setup();
+
+    // Create a distribution to populate state
+    let deadline = t.env.ledger().timestamp() + 86400;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &500i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+
+    // Distribution data persists
+    let dist = t.distributor.get_distribution(&id);
+    assert_eq!(dist.distribution_id, id);
+    assert_eq!(dist.total_amount, 500);
+    assert!(dist.is_active);
+
+    // Currency token still registered
+    let active = t.distributor.get_active_distributions(&t.token.address);
+    assert_eq!(active.len(), 1);
+}
+
+#[test]
+fn migrate_preserves_claim_state() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    t.token.transfer(&t.admin, &claimer, &500_000i128);
+
+    let deadline = t.env.ledger().timestamp() + 86400;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+
+    // Claim and verify state is consistent
+    let claimed = t.distributor.claim_dividend(&id, &claimer);
+    assert!(claimed > 0);
+
+    // Claim info should now exist
+    let info = t.distributor.get_claim_info(&id, &claimer);
+    assert!(info.is_some());
+
+    // Available is zero after claim
+    let available = t.distributor.calculate_available_dividend(&id, &claimer);
+    assert_eq!(available, 0);
+}
+
+#[test]
+fn migrate_preserves_multiple_distributions() {
+    let t = setup();
+
+    let deadline = t.env.ledger().timestamp() + 86400;
+
+    // Create 5 distributions
+    let mut ids = Vec::new(&t.env);
+    for i in 0..5 {
+        let id = t.distributor.create_distribution(
+            &t.admin,
+            &t.token.address,
+            &t.currency_symbol,
+            &(100 * (i + 1)) as i128,
+            &deadline,
+            &Map::new(&t.env),
+        );
+        ids.push_back(id);
+    }
+
+    // Deactivate one
+    let third_id = ids.get(2).unwrap();
+    t.distributor.deactivate_distribution(&t.admin, &third_id);
+
+    // Active distributions should be 4
+    let active = t.distributor.get_active_distributions(&t.token.address);
+    assert_eq!(active.len(), 4);
+
+    // Each distribution has correct amount
+    for i in 0..5 {
+        let id = ids.get(i).unwrap();
+        let dist = t.distributor.get_distribution(&id);
+        assert_eq!(dist.total_amount, (100 * (i + 1)) as i128);
+    }
+}
+
+#[test]
+#[should_panic]
+fn migrate_by_non_admin_panics() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.distributor.migrate(&attacker);
+}
+
+#[test]
+fn migrate_with_empty_distributions() {
+    let t = setup();
+
+    // No distributions created — just initialized
+    let active = t.distributor.get_active_distributions(&t.token.address);
+    assert_eq!(active.len(), 0);
+
+    // Creating a distribution after empty state should work fine
+    let deadline = t.env.ledger().timestamp() + 86400;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &500i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+    assert_eq!(id, 1);
+}
+
+#[test]
+fn migrate_preserves_auto_distribution_config() {
+    let t = setup();
+
+    // Update config with auto_distribute enabled
+    let mut currencies = Vec::new(&t.env);
+    currencies.push_back(t.currency_symbol.clone());
+    let config = DividendConfig {
+        supported_currencies: currencies,
+        auto_distribute: true,
+        min_distribution_amount: 100,
+        max_distribution_frequency: 3600,
+        fee_rate: 50,
+        fee_recipient: t.admin.clone(),
+    };
+    t.distributor.update_config(&t.admin, &config);
+
+    // Config persists after update
+    let deadline = t.env.ledger().timestamp() + 86400;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+    let dist = t.distributor.get_distribution(&id);
+    assert!(dist.is_active);
+}

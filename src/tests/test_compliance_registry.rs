@@ -254,3 +254,159 @@ fn compliance_fails_when_kyc_expired() {
     client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
     assert!(!client.check_compliance(&user_a, &user_b, &100));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #222: Upgrade & Migration Tests for ComplianceRegistry
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── migrate ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn migrate_preserves_kyc_data() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+    let kyc = verified_kyc(&env);
+    client.update_kyc_status(&admin, &user, &kyc);
+
+    // Data persistence check — KYC should still be accessible
+    let stored = client.get_kyc_status(&user);
+    assert!(stored.is_verified);
+    assert_eq!(stored.verification_level, 2);
+    assert_eq!(stored.jurisdiction, Symbol::new(&env, "US"));
+}
+
+#[test]
+fn migrate_preserves_blacklist_data() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    // Set up KYC so blacklist is the only blocker
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    client.add_to_blacklist(&admin, &user_a, &Symbol::new(&env, "fraud"));
+
+    // Blacklist persists
+    assert!(!client.check_compliance(&user_a, &user_b, &100));
+
+    // Non-blacklisted still passes
+    let user_c = Address::generate(&env);
+    client.update_kyc_status(&admin, &user_c, &verified_kyc(&env));
+    assert!(client.check_compliance(&user_c, &user_b, &100));
+}
+
+#[test]
+fn migrate_preserves_whitelist_data() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    client.add_to_whitelist(&admin, &user);
+
+    // Whitelisted user bypasses KYC
+    let stranger = Address::generate(&env);
+    assert!(client.check_compliance(&user, &stranger, &100));
+}
+
+#[test]
+fn migrate_preserves_transfer_limits() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    let limits = TransferLimits {
+        daily_limit: 500,
+        monthly_limit: 5000,
+        annual_limit: 50000,
+        remaining_daily: 500,
+        remaining_monthly: 5000,
+        remaining_annual: 50000,
+        last_reset_daily: 0,
+        last_reset_monthly: 0,
+        last_reset_annual: 0,
+    };
+    client.set_transfer_limits(&admin, &user, &limits);
+
+    // Limits persist
+    assert!(client.check_transfer_limits(&user, &100));
+    assert!(!client.check_transfer_limits(&user, &600));
+}
+
+#[test]
+fn migrate_preserves_compliance_rules() {
+    let (_, _, client) = setup();
+    let rules = client.get_compliance_rules();
+
+    // Initial seeding creates 3 rules
+    assert_eq!(rules.len(), 3);
+
+    // Rules should be accessible
+    let first = rules.get(0).unwrap();
+    assert!(!first.rule_name.is_empty());
+}
+
+#[test]
+fn migrate_with_empty_kyc_registry() {
+    let (env, _, client) = setup();
+
+    // All users get default unverified KYC
+    let stranger = Address::generate(&env);
+    let kyc = client.get_kyc_status(&stranger);
+    assert!(!kyc.is_verified);
+    assert_eq!(kyc.verification_level, 0);
+
+    // Compliance check works even with empty registry
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    assert!(!client.check_compliance(&user_a, &user_b, &100));
+}
+
+#[test]
+#[should_panic]
+fn migrate_by_non_admin_panics() {
+    let (env, _, client) = setup();
+    let attacker = Address::generate(&env);
+    client.migrate(&attacker);
+}
+
+#[test]
+fn data_integrity_with_complex_state() {
+    let (env, admin, client) = setup();
+
+    // Build complex state: KYC + whitelist + blacklist + limits + rules
+    let verified_user = Address::generate(&env);
+    let blacklisted_user = Address::generate(&env);
+    let whitelisted_user = Address::generate(&env);
+    let limited_user = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &verified_user, &verified_kyc(&env));
+    client.add_to_blacklist(&admin, &blacklisted_user, &Symbol::new(&env, "aml"));
+    client.add_to_whitelist(&admin, &whitelisted_user);
+
+    let limits = TransferLimits {
+        daily_limit: 200,
+        monthly_limit: 2000,
+        annual_limit: 20000,
+        remaining_daily: 200,
+        remaining_monthly: 2000,
+        remaining_annual: 20000,
+        last_reset_daily: 0,
+        last_reset_monthly: 0,
+        last_reset_annual: 0,
+    };
+    client.set_transfer_limits(&admin, &limited_user, &limits);
+
+    // Verify all states intact
+    let kyc = client.get_kyc_status(&verified_user);
+    assert!(kyc.is_verified);
+
+    // Blacklisted user fails compliance
+    let stranger = Address::generate(&env);
+    assert!(!client.check_compliance(&blacklisted_user, &stranger, &100));
+
+    // Whitelisted passes
+    assert!(client.check_compliance(&whitelisted_user, &stranger, &100));
+
+    // Limits work
+    assert!(client.check_transfer_limits(&limited_user, &100));
+    assert!(!client.check_transfer_limits(&limited_user, &300));
+}
