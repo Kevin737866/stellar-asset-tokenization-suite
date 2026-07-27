@@ -57,6 +57,8 @@ export class StellarRWASDK {
   public marketClient: MarketClient;
   public custodyClient: CustodyClient;
 
+  private _portfolioCache: Map<string, { data: Portfolio; expiry: number }> = new Map();
+
   constructor(config: RWASDKConfig) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
@@ -282,25 +284,82 @@ export class StellarRWASDK {
   /**
    * Get comprehensive portfolio overview for a user
    */
-  async getUserPortfolio(user: Address): Promise<{
-    totalValue: string;
-    totalDividends: string;
-    votingPower: string;
-    assets: Array<{
-      asset: AssetInfo;
-      balance: Balance;
-      value: string;
-      percentage: number;
-      dividends: string;
-    }>;
-  }> {
+  async getUserPortfolio(user: Address): Promise<Portfolio> {
+    validateAddress(user, 'user');
+
+    const cacheKey = user.toString();
+    const cached = this._portfolioCache.get(cacheKey);
+    if (cached && cached.expiry > Date.now()) {
+      return cached.data;
+    }
+
     try {
-      // This would aggregate data from all contracts
-      // For now, return a placeholder implementation
-      throw new ContractError('getUserPortfolio not implemented');
+      const assets = await this.assetFactory.getAllAssets();
+      if (!assets || assets.length === 0) {
+        return { assets: [], totalValue: '0', totalDividends: '0', votingPower: '0' };
+      }
+
+      const tokenClients = assets.map((asset: any) => {
+        const addr = asset.token_address || asset.address;
+        return addr ? this.createTokenClient(new Address(addr)) : null;
+      }).filter(Boolean) as TokenClient[];
+
+      const balances = await Promise.allSettled(
+        tokenClients.map((tc) => tc.getBalance(user))
+      );
+
+      const holdings: Portfolio['assets'] = [];
+      let totalValue = 0n;
+      let totalDividends = 0n;
+      let totalVotingPower = 0n;
+
+      for (let i = 0; i < balances.length; i++) {
+        const result = balances[i];
+        if (result.status !== 'fulfilled') continue;
+        const bal = result.value;
+        const assetVal = BigInt(bal.amount || '0');
+        const locked = BigInt(bal.lockedAmount || '0');
+        const value = assetVal + locked;
+        totalValue += value;
+        totalDividends += BigInt(bal.votingPower || '0');
+        totalVotingPower += BigInt(bal.votingPower || '0');
+
+        const info = await tokenClients[i].getTokenInfo().catch(() => null);
+        holdings.push({
+          asset: info as any,
+          balance: bal,
+          value: value.toString(),
+          percentage: 0,
+          dividends: bal.votingPower || '0',
+        });
+      }
+
+      const totalValueBN = totalValue;
+      for (const h of holdings) {
+        h.percentage = totalValueBN > 0n
+          ? Number((BigInt(h.value) * 10000n) / totalValueBN) / 100
+          : 0;
+      }
+
+      const portfolio: Portfolio = {
+        assets: holdings,
+        totalValue: totalValue.toString(),
+        totalDividends: totalDividends.toString(),
+        votingPower: totalVotingPower.toString(),
+      };
+
+      this._portfolioCache.set(cacheKey, { data: portfolio, expiry: Date.now() + 60_000 });
+      return portfolio;
     } catch (error) {
       throw new ContractError(`Failed to get user portfolio: ${error.message}`);
     }
+  }
+
+  /**
+   * Alias for getUserPortfolio
+   */
+  async getPortfolio(user: Address): Promise<Portfolio> {
+    return this.getUserPortfolio(user);
   }
 
   /**
@@ -442,7 +501,9 @@ import type {
   SimulationResult,
   SimulationEvent,
   StorageChange,
-  SimulationOptions
+  SimulationOptions,
+  Portfolio,
+  AssetHolding
 } from './types';
 
 // Factory function to create SDK instance with common configurations
@@ -545,6 +606,8 @@ export {
   type Currency,
   type OrderType,
   type VerificationLevel,
+  type Portfolio,
+  type AssetHolding,
   
   // Classes
   StellarRWASDK as default
