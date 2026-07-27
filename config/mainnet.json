@@ -1,0 +1,38 @@
+{
+  "network": "mainnet",
+  "description": "Stellar Mainnet configuration for RWA Tokenization Suite",
+  "stellar": {
+    "network": "mainnet",
+    "horizonUrl": "https://horizon.stellar.org",
+    "rpcUrl": "https://soroban-mainnet.stellar.org",
+    "passphrase": "Public Global Stellar Network ; September 2015"
+  },
+  "contracts": {
+    "buildDir": "target/wasm32-unknown-unknown/release",
+    "wasmFiles": {
+      "assetFactory": "stellar_asset_tokenization_suite.wasm",
+      "rwaToken": "stellar_asset_tokenization_suite.wasm",
+      "complianceRegistry": "stellar_asset_tokenization_suite.wasm",
+      "dividendDistributor": "stellar_asset_tokenization_suite.wasm",
+      "secondaryMarket": "stellar_asset_tokenization_suite.wasm",
+      "custodyValidator": "stellar_asset_tokenization_suite.wasm"
+    }
+  },
+  "deployment": {
+    "outputFile": ".env.mainnet",
+    "verifyAfterDeploy": true,
+    "idempotent": true,
+    "gasEstimateBeforeDeploy": true,
+    "maxRetries": 5,
+    "retryDelayMs": 10000,
+    "requireConfirmation": true
+  },
+  "accounts": {
+    "deployerSecretEnv": "MAINNET_DEPLOYER_SECRET",
+    "adminSecretEnv": "MAINNET_ADMIN_SECRET"
+  },
+  "fee": {
+    "baseFee": 100,
+    "maxFee": 1000000
+  }
+}

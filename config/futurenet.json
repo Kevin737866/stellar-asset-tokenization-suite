@@ -1,0 +1,37 @@
+{
+  "network": "futurenet",
+  "description": "Stellar Futurenet configuration for RWA Tokenization Suite",
+  "stellar": {
+    "network": "futurenet",
+    "horizonUrl": "https://horizon-futurenet.stellar.org",
+    "rpcUrl": "https://rpc-futurenet.stellar.org",
+    "passphrase": "Test SDF Future Network ; October 2022"
+  },
+  "contracts": {
+    "buildDir": "target/wasm32-unknown-unknown/release",
+    "wasmFiles": {
+      "assetFactory": "stellar_asset_tokenization_suite.wasm",
+      "rwaToken": "stellar_asset_tokenization_suite.wasm",
+      "complianceRegistry": "stellar_asset_tokenization_suite.wasm",
+      "dividendDistributor": "stellar_asset_tokenization_suite.wasm",
+      "secondaryMarket": "stellar_asset_tokenization_suite.wasm",
+      "custodyValidator": "stellar_asset_tokenization_suite.wasm"
+    }
+  },
+  "deployment": {
+    "outputFile": ".env.futurenet",
+    "verifyAfterDeploy": true,
+    "idempotent": true,
+    "gasEstimateBeforeDeploy": true,
+    "maxRetries": 3,
+    "retryDelayMs": 5000
+  },
+  "accounts": {
+    "deployerSecretEnv": "FUTURENET_DEPLOYER_SECRET",
+    "adminSecretEnv": "FUTURENET_ADMIN_SECRET"
+  },
+  "fee": {
+    "baseFee": 100,
+    "maxFee": 100000
+  }
+}

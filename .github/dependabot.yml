@@ -1,0 +1,115 @@
+version: 2
+updates:
+  # Rust / Cargo dependencies (Soroban contracts)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+      include: "scope"
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    versioning-strategy: "auto"
+    reviewers:
+      - "Kevin737866"
+    assignees:
+      - "simonfrvr"
+    # Auto-merge patch and minor updates that pass CI
+    # (requires enabling auto-merge in repo settings)
+
+  # npm dependencies (SDK + UI)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+      include: "scope"
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    versioning-strategy: "auto"
+    reviewers:
+      - "Kevin737866"
+    assignees:
+      - "simonfrvr"
+    # Group minor and patch updates for non-breaking changes
+    groups:
+      minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # npm dependencies (SDK subdirectory)
+  - package-ecosystem: "npm"
+    directory: "/sdk"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "sdk"
+    commit-message:
+      prefix: "chore(deps-sdk)"
+      prefix-development: "chore(dev-deps-sdk)"
+      include: "scope"
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    versioning-strategy: "auto"
+
+  # npm dependencies (UI subdirectory)
+  - package-ecosystem: "npm"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "ui"
+    commit-message:
+      prefix: "chore(deps-ui)"
+      prefix-development: "chore(dev-deps-ui)"
+      include: "scope"
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    versioning-strategy: "auto"
+
+  # GitHub Actions (if any workflows exist)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci-deps)"
+      include: "scope"
+    open-pull-requests-limit: 3

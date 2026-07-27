@@ -4,6 +4,8 @@ We welcome contributions to the Stellar Real-World Asset Tokenization Suite! Thi
 
 ## 🚀 Getting Started
 
+> **New contributor?** See the [Developer Onboarding Guide](docs/developer-guide.md) for a comprehensive step-by-step walkthrough including: prerequisites, local setup, architecture overview, first contribution workflow, and troubleshooting.
+
 ### Prerequisites
 
 - Rust 1.70+ (for Soroban contracts)
@@ -43,6 +45,8 @@ We welcome contributions to the Stellar Real-World Asset Tokenization Suite! Thi
    # Run UI tests
    npm run test:ui
    ```
+
+> For detailed troubleshooting, deployment scripts, and architecture diagrams, see [docs/developer-guide.md](docs/developer-guide.md).
 
 ## 📁 Project Structure
 
