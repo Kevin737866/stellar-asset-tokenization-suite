@@ -1,5 +1,12 @@
 import { ErrorCode } from './types';
 
+export interface ErrorInfo {
+  code: ErrorCode;
+  message: string;
+  suggestion: string;
+  contractErrorNumber?: number;
+}
+
 export class RWASDKError extends Error {
   public code: ErrorCode;
   public details?: any;
@@ -18,6 +25,10 @@ export class RWASDKError extends Error {
       message: this.message,
       details: this.details
     };
+  }
+
+  toErrorInfo(contractErrorNumber?: number): ErrorInfo {
+    return getErrorInfo(this.code, contractErrorNumber);
   }
 }
 
@@ -302,6 +313,149 @@ export const ERROR_DESCRIPTIONS: Record<ErrorCode, string> = {
   // Simulation errors (Issue #208)
   [ErrorCode.SIMULATION_FAILED]: 'Transaction simulation failed',
 };
+
+/**
+ * Map of ErrorCode to user-friendly suggested actions.
+ */
+export const SUGGESTED_ACTIONS: Record<ErrorCode, string> = {
+  [ErrorCode.NETWORK_ERROR]: 'Check your internet connection and try again.',
+  [ErrorCode.TIMEOUT]: 'The request took too long. Try again or reduce the request size.',
+  [ErrorCode.TRANSACTION_FAILED]: 'Verify the transaction details and try again.',
+  [ErrorCode.CONTRACT_ERROR]: 'Contact support if this persists.',
+  [ErrorCode.INSUFFICIENT_BALANCE]: 'Check your account balance and fund it if needed.',
+  [ErrorCode.UNAUTHORIZED]: 'Verify you have the required permissions or signers.',
+  [ErrorCode.INVALID_PARAMETERS]: 'Review the input values and correct any invalid fields.',
+
+  // Factory errors
+  [ErrorCode.FACTORY_ALREADY_INITIALIZED]: 'The factory is already set up. No action needed.',
+  [ErrorCode.FACTORY_NOT_INITIALIZED]: 'Initialize the asset factory before deploying tokens.',
+  [ErrorCode.ASSET_ALREADY_EXISTS]: 'Use a unique asset identifier.',
+  [ErrorCode.ASSET_NOT_FOUND]: 'Check the asset address and ensure it is deployed.',
+  [ErrorCode.TEMPLATE_NOT_FOUND]: 'Verify the asset class and ensure the template exists.',
+  [ErrorCode.TEMPLATE_NOT_ACTIVE]: 'The template has been deactivated. Select a different template.',
+  [ErrorCode.COMPLIANCE_CHECK_FAILED]: 'Ensure the recipient passes compliance checks.',
+  [ErrorCode.UPGRADE_NOT_APPROVED]: 'Submit an upgrade proposal and wait for governance approval.',
+  [ErrorCode.GOVERNANCE_THRESHOLD_NOT_MET]: 'Collect more votes to meet the governance threshold.',
+
+  // Token errors
+  [ErrorCode.TOKEN_ALREADY_INITIALIZED]: 'Token is already initialized. No action needed.',
+  [ErrorCode.TOKEN_NOT_INITIALIZED]: 'Initialize the token contract first.',
+  [ErrorCode.TOKEN_INFO_NOT_FOUND]: 'Verify the token contract address.',
+  [ErrorCode.TRANSFER_PAUSED]: 'Wait for an admin to unpause transfers.',
+  [ErrorCode.ASSET_FROZEN]: 'Contact the asset administrator to unfreeze.',
+  [ErrorCode.KYC_REQUIRED]: 'Complete KYC verification before performing this operation.',
+  [ErrorCode.TRANSFER_RESTRICTION]: 'Review transfer restrictions and ensure compliance.',
+
+  // Compliance errors
+  [ErrorCode.COMPLIANCE_FAILED]: 'Contact support if this persists.',
+  [ErrorCode.REGISTRY_ALREADY_INITIALIZED]: 'Registry is already set up. No action needed.',
+  [ErrorCode.REGISTRY_NOT_INITIALIZED]: 'Initialize the compliance registry first.',
+  [ErrorCode.USER_NOT_FOUND]: 'Register the user in the compliance registry.',
+  [ErrorCode.KYC_NOT_VERIFIED]: 'Complete KYC verification with a supported provider.',
+  [ErrorCode.BLACKLISTED]: 'Contact admin to review the blacklist status.',
+  [ErrorCode.INVALID_JURISDICTION]: 'This jurisdiction is not supported. Contact support.',
+  [ErrorCode.ACCREDITATION_REQUIRED]: 'Provide proof of accreditation to proceed.',
+  [ErrorCode.TRANSFER_LIMIT_EXCEEDED]: 'Wait for the transfer limit to reset or request a limit increase.',
+
+  // Dividend errors
+  [ErrorCode.DIVIDEND_ALREADY_INITIALIZED]: 'Dividend distributor is already set up.',
+  [ErrorCode.DIVIDEND_NOT_INITIALIZED]: 'Initialize the dividend distributor first.',
+  [ErrorCode.CONFIG_NOT_FOUND]: 'Set up the dividend configuration.',
+  [ErrorCode.INSUFFICIENT_FUNDS]: 'Fund the dividend distributor account.',
+  [ErrorCode.INVALID_AMOUNT]: 'Enter a valid dividend amount greater than zero.',
+  [ErrorCode.DISTRIBUTION_NOT_FOUND]: 'Check the distribution ID.',
+  [ErrorCode.ALREADY_CLAIMED]: 'You have already claimed this dividend.',
+  [ErrorCode.UNSUPPORTED_CURRENCY]: 'Use a supported currency for distribution.',
+  [ErrorCode.DISTRIBUTION_NOT_ACTIVE]: 'Wait for the distribution to become active.',
+  [ErrorCode.AUTO_DISTRIBUTION_DISABLED]: 'Enable auto-distribution or distribute manually.',
+  [ErrorCode.YIELD_CADENCE_NOT_REACHED]: 'Wait for the next yield cadence period.',
+  [ErrorCode.ZERO_TOTAL_SUPPLY]: 'Ensure there is circulating supply before distributing.',
+  [ErrorCode.NO_TOKENS_TO_CLAIM]: 'You have no tokens eligible for claiming.',
+  [ErrorCode.NO_DIVIDEND_AVAILABLE]: 'No dividend is currently available.',
+
+  // Market errors
+  [ErrorCode.MARKET_ALREADY_INITIALIZED]: 'Market is already set up. No action needed.',
+  [ErrorCode.INVALID_ORDER]: 'Review order parameters (price, amount, expiry).',
+  [ErrorCode.ORDER_NOT_FOUND]: 'The order may have been filled or cancelled.',
+  [ErrorCode.ORDER_EXPIRED]: 'Place a new order with a valid expiry.',
+  [ErrorCode.INSUFFICIENT_LIQUIDITY]: 'Reduce the order size or wait for liquidity.',
+  [ErrorCode.TRADING_PAUSED]: 'Wait for an admin to resume trading.',
+  [ErrorCode.CIRCUIT_BREAKER_TRIPPED]: 'Wait for the circuit breaker cooldown to expire.',
+  [ErrorCode.DIVIDEND_HALT]: 'Trading resumes automatically after the record date.',
+  [ErrorCode.MIN_ORDER_SIZE_NOT_MET]: 'Increase the order to meet the minimum size.',
+
+  // Custody errors
+  [ErrorCode.CUSTODY_ALREADY_INITIALIZED]: 'Custody validator is already set up.',
+  [ErrorCode.CUSTODY_NOT_INITIALIZED]: 'Initialize the custody validator first.',
+  [ErrorCode.INVALID_PROOF]: 'Submit a valid custody proof.',
+  [ErrorCode.ORACLE_OFFLINE]: 'Wait for the oracle to come back online.',
+  [ErrorCode.VERIFICATION_FAILED]: 'Resubmit the proof with correct data.',
+  [ErrorCode.ASSET_NOT_REGISTERED]: 'Register the asset with the custody module.',
+  [ErrorCode.STALE_DATA]: 'Refresh the data and resubmit.',
+  [ErrorCode.INVALID_SIGNATURE]: 'Ensure the correct private key was used.',
+  [ErrorCode.DISPUTE_ALREADY_EXISTS]: 'Check the existing dispute status.',
+  [ErrorCode.INSUFFICIENT_BOND]: 'Increase the custodian bond amount.',
+  [ErrorCode.INVALID_DISPUTE_STATUS]: 'The dispute cannot be modified in its current state.',
+  [ErrorCode.BOND_NOT_REFUNDABLE]: 'The bond lock period has not elapsed.',
+  [ErrorCode.CUSTODIAN_NOT_WHITELISTED]: 'Request to be added to the custodian whitelist.',
+  [ErrorCode.INVALID_VERIFICATION_TYPE]: 'Use a supported verification type.',
+  [ErrorCode.PROOF_HASH_MISMATCH]: 'Ensure the proof hash matches the submitted data.',
+  [ErrorCode.ATTESTATION_EXPIRED]: 'Resubmit a fresh attestation.',
+  [ErrorCode.MULTI_SIG_THRESHOLD_NOT_MET]: 'Collect additional signatures to meet the threshold.',
+  [ErrorCode.INVALID_MERKLE_PROOF]: 'Regenerate the Merkle proof from the correct data.',
+  [ErrorCode.ZK_VERIFICATION_FAILED]: 'Regenerate the zero-knowledge proof.',
+  [ErrorCode.INSURANCE_CLAIM_FAILED]: 'Contact support to resolve the insurance claim.',
+  [ErrorCode.ATTESTATION_NOT_FOUND]: 'Verify the attestation ID.',
+  [ErrorCode.ORACLE_NOT_FOUND]: 'Verify the oracle address.',
+
+  // Asset class errors
+  [ErrorCode.INVALID_LOCATION]: 'Provide a supported asset location.',
+  [ErrorCode.INVALID_PURITY_GRADE]: 'Use a valid purity grade classification.',
+  [ErrorCode.INVALID_DUE_DATE]: 'Provide a future due date.',
+  [ErrorCode.INVALID_CREDIT_RATING]: 'Provide a recognized credit rating.',
+  [ErrorCode.INVALID_PROVENANCE]: 'Provide valid provenance documentation.',
+  [ErrorCode.INVALID_VINTAGE]: 'Provide a valid vintage year.',
+  [ErrorCode.INVALID_REGULATION_FRAMEWORK]: 'Use a recognized regulation framework.',
+  [ErrorCode.INVALID_VERIFICATION_STANDARD]: 'Use a recognized verification standard.',
+
+  // Oracle errors
+  [ErrorCode.ORACLE_ERROR]: 'Check oracle status and try again.',
+  [ErrorCode.PROOF_NOT_FOUND]: 'Verify the proof ID.',
+
+  // Stellar Horizon errors
+  [ErrorCode.OP_UNDERFUNDED]: 'Fund the source account before retrying.',
+  [ErrorCode.OP_LOW_RESERVE]: 'Maintain the minimum XLM reserve for the account.',
+  [ErrorCode.OP_ALREADY_EXISTS]: 'The entry already exists. Check your data.',
+  [ErrorCode.OP_NO_TRUST]: 'Establish a trust line for this asset first.',
+  [ErrorCode.OP_NOT_AUTHORIZED]: 'Request authorization from the asset issuer.',
+  [ErrorCode.OP_LINE_FULL]: 'Increase the trust line limit.',
+  [ErrorCode.OP_NO_ISSUER]: 'Verify the issuer account exists.',
+  [ErrorCode.TX_BAD_AUTH]: 'Sign the transaction with all required keys.',
+  [ErrorCode.TX_INSUFFICIENT_FEE]: 'Increase the transaction fee.',
+  [ErrorCode.TX_TOO_EARLY]: 'Adjust the transaction time bounds.',
+  [ErrorCode.TX_TOO_LATE]: 'The time bounds have expired. Submit a new transaction.',
+  [ErrorCode.TX_MALFORMED]: 'Fix the malformed transaction fields.',
+  [ErrorCode.TX_NO_SOURCE_ACCOUNT]: 'Verify the source account exists.',
+  [ErrorCode.TX_NO_ACCOUNT]: 'The account does not exist on this network.',
+  [ErrorCode.TX_INSUFFICIENT_BALANCE]: 'Fund the account for fees and reserves.',
+  [ErrorCode.TX_BAD_SEQ': 'Refresh the account sequence number and try again.',
+  [ErrorCode.TX_MEMO_TOO_LONG]: 'Shorten the transaction memo.',
+
+  // Simulation errors
+  [ErrorCode.SIMULATION_FAILED]: 'Review the transaction before resubmitting.',
+};
+
+/**
+ * Get full error information including suggestion for a given ErrorCode.
+ */
+export function getErrorInfo(code: ErrorCode, contractErrorNumber?: number): ErrorInfo {
+  return {
+    code,
+    message: ERROR_DESCRIPTIONS[code] ?? 'Unknown error',
+    suggestion: SUGGESTED_ACTIONS[code] ?? 'Contact support.',
+    contractErrorNumber,
+  };
+}
 
 /**
  * Parse a Soroban contract error number into its corresponding ErrorCode.
