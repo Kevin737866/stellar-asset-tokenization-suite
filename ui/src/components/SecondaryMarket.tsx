@@ -377,43 +377,44 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       </main>
 
       <style jsx>{`
-        .secondary-market-container { color: #f0f0f0; background: #121212; padding: 20px; font-family: 'Inter', sans-serif; }
-        .market-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 20px; margin-bottom: 20px; }
+        .secondary-market-container { color: var(--color-text-primary); background: var(--color-surface-primary); padding: 20px; font-family: 'Inter', sans-serif; transition: var(--theme-transition); }
+        .market-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--color-border-primary); padding-bottom: 20px; margin-bottom: 20px; }
         .market-header h1 { font-size: 1.5rem; font-weight: 600; }
         .token-stats span { margin-left: 15px; font-size: 14px; }
         .market-grid { display: grid; grid-template-columns: 2fr 1fr; grid-template-rows: 400px 300px; gap: 20px; }
-        .price-chart { border: 1px solid #333; border-radius: 8px; overflow: hidden; position: relative; }
-        .price-chart h2 { padding: 10px; font-size: 14px; background: #1a1a1a; color: #999; }
-        .chart-placeholder { height: calc(100% - 40px); background: #1a1a1a; display: flex; align-items: center; justify-content: center; }
-        .order-book { border: 1px solid #333; padding: 10px; border-radius: 8px; }
-        .order-book h2 { font-size: 14px; color: #999; margin-bottom: 10px; }
+        .price-chart { border: 1px solid var(--color-border-primary); border-radius: 8px; overflow: hidden; position: relative; }
+        .price-chart h2 { padding: 10px; font-size: 14px; background: var(--color-surface-secondary); color: var(--color-text-secondary); }
+        .chart-placeholder { height: calc(100% - 40px); background: var(--color-surface-secondary); display: flex; align-items: center; justify-content: center; }
+        .order-book { border: 1px solid var(--color-border-primary); padding: 10px; border-radius: 8px; }
+        .order-book h2 { font-size: 14px; color: var(--color-text-secondary); margin-bottom: 10px; }
         .book-row { display: flex; justify-content: space-between; padding: 4px; font-size: 12px; margin-bottom: 2px; border-radius: 2px; }
         .book-row.ask { background: rgba(255, 0, 0, 0.1); border-right: 2px solid #ff4444; }
         .book-row.bid { background: rgba(0, 255, 0, 0.1); border-right: 2px solid #00c853; }
-        .order-entry { border: 1px solid #333; padding: 15px; border-radius: 8px; }
-        .order-entry h2 { font-size: 14px; color: #999; margin-bottom: 10px; }
+        .order-entry { border: 1px solid var(--color-border-primary); padding: 15px; border-radius: 8px; }
+        .order-entry h2 { font-size: 14px; color: var(--color-text-secondary); margin-bottom: 10px; }
         .order-entry form { display: flex; flex-direction: column; gap: 10px; }
         .side-toggle { display: flex; gap: 10px; }
-        .side-toggle button { flex: 1; padding: 10px; border: none; background: #333; color: #fff; cursor: pointer; border-radius: 4px; transition: background 0.2s; }
-        .side-toggle button:hover:not(.active) { background: #444; }
-        .side-toggle button.active.buy { background: #00c853; }
-        .side-toggle button.active.sell { background: #ff4444; }
-        input { background: #222; border: 1px solid #444; color: #fff; padding: 10px; border-radius: 4px; }
+        .side-toggle button { flex: 1; padding: 10px; border: none; background: var(--color-surface-tertiary); color: var(--color-text-primary); cursor: pointer; border-radius: 4px; transition: background 0.2s; }
+        .side-toggle button:hover:not(.active) { background: var(--color-surface-hover); }
+        .side-toggle button.active.buy { background: #00c853; color: #fff; }
+        .side-toggle button.active.sell { background: #ff4444; color: #fff; }
+        input { background: var(--color-input-bg); border: 1px solid var(--color-input-border); color: var(--color-text-primary); padding: 10px; border-radius: 4px; }
         input:focus { outline: none; border-color: #2962ff; }
+        input::placeholder { color: var(--color-input-placeholder); }
         .submit-order { background: #2962ff; color: #fff; padding: 12px; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; transition: background 0.2s; }
         .submit-order:hover:not(:disabled) { background: #1a4fd6; }
         .submit-order:disabled { opacity: 0.6; cursor: not-allowed; }
-        .trade-history { border: 1px solid #333; padding: 15px; border-radius: 8px; }
-        .trade-history h2 { font-size: 14px; color: #999; margin-bottom: 10px; }
+        .trade-history { border: 1px solid var(--color-border-primary); padding: 15px; border-radius: 8px; }
+        .trade-history h2 { font-size: 14px; color: var(--color-text-secondary); margin-bottom: 10px; }
         .trade-history table { width: 100%; font-size: 12px; }
-        .trade-history th { color: #999; text-align: left; padding: 4px 0; }
-        .trade-history td { padding: 4px 0; border-bottom: 1px solid #222; }
+        .trade-history th { color: var(--color-text-secondary); text-align: left; padding: 4px 0; }
+        .trade-history td { padding: 4px 0; border-bottom: 1px solid var(--color-border-primary); }
         .halt-badge { background: #ffea00; color: #000; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-        .portfolio-overview { border: 1px solid #333; padding: 15px; border-radius: 8px; }
-        .portfolio-overview h2 { font-size: 14px; color: #999; margin-bottom: 10px; }
+        .portfolio-overview { border: 1px solid var(--color-border-primary); padding: 15px; border-radius: 8px; }
+        .portfolio-overview h2 { font-size: 14px; color: var(--color-text-secondary); margin-bottom: 10px; }
         .portfolio-stats { display: flex; justify-content: space-between; }
         .stat { text-align: center; }
-        .stat label { display: block; color: #999; font-size: 12px; margin-bottom: 4px; }
+        .stat label { display: block; color: var(--color-text-secondary); font-size: 12px; margin-bottom: 4px; }
         .stat span { font-size: 16px; font-weight: 600; }
         .pnl.positive { color: #00c853; font-weight: bold; }
         .status.verified { color: #00c853; }

@@ -237,7 +237,7 @@ export default function DividendPanel({
           <CardContent className="p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-600" id="total-earned-label">
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="total-earned-label">
                   Total Earned
                 </p>
                 <p className="text-2xl font-bold" aria-labelledby="total-earned-label">
@@ -253,7 +253,7 @@ export default function DividendPanel({
           <CardContent className="p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-600" id="pending-label">
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="pending-label">
                   Pending
                 </p>
                 <p className="text-2xl font-bold" aria-labelledby="pending-label">
@@ -269,7 +269,7 @@ export default function DividendPanel({
           <CardContent className="p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-600" id="apy-label">
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="apy-label">
                   Annualized Yield
                 </p>
                 <p className="text-2xl font-bold" aria-labelledby="apy-label">
@@ -325,10 +325,10 @@ export default function DividendPanel({
               type="checkbox"
               checked={autoClaim}
               onChange={(e) => setAutoClaim(e.target.checked)}
-              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
               aria-label="Auto-claim dividends when deadline approaches"
             />
-            <span className="text-sm text-gray-600">Auto-claim</span>
+            <span className="text-sm text-gray-600 dark:text-gray-300">Auto-claim</span>
           </label>
         </div>
 
@@ -443,9 +443,9 @@ export default function DividendPanel({
           {activeDistributions.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center">
-                <DollarSign className="h-12 w-12 mx-auto text-gray-300 mb-4" aria-hidden="true" />
-                <p className="text-gray-500">No active distributions</p>
-                <p className="text-sm text-gray-400 mt-1">
+                <DollarSign className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
+                <p className="text-gray-500 dark:text-gray-400">No active distributions</p>
+                <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                   Active dividend distributions will appear here
                 </p>
               </CardContent>
@@ -457,8 +457,8 @@ export default function DividendPanel({
                 <Card
                   key={dist.distributionId}
                   className={`transition-all ${
-                    urgency === 'critical' ? 'border-red-300 bg-red-50' :
-                    urgency === 'warning' ? 'border-yellow-300 bg-yellow-50' : ''
+                    urgency === 'critical' ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30' :
+                    urgency === 'warning' ? 'border-yellow-300 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-950/30' : ''
                   }`}
                   role="article"
                   aria-label={`Distribution ${dist.distributionId}: ${dist.currency} ${dist.totalAmount}`}
@@ -479,21 +479,21 @@ export default function DividendPanel({
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                           <div>
-                            <p className="text-sm text-gray-600">Currency</p>
+                            <p className="text-sm text-gray-600 dark:text-gray-400">Currency</p>
                             <p className="font-medium">{dist.currency}</p>
                           </div>
                           <div>
-                            <p className="text-sm text-gray-600">Total Amount</p>
+                            <p className="text-sm text-gray-600 dark:text-gray-400">Total Amount</p>
                             <p className="font-medium">
                               {parseFloat(dist.totalAmount).toLocaleString()}
                             </p>
                           </div>
                           <div>
-                            <p className="text-sm text-gray-600">Per Token</p>
+                            <p className="text-sm text-gray-600 dark:text-gray-400">Per Token</p>
                             <p className="font-medium">{parseFloat(dist.perTokenAmount).toFixed(6)}</p>
                           </div>
                           <div>
-                            <p className="text-sm text-gray-600">Deadline</p>
+                            <p className="text-sm text-gray-600 dark:text-gray-400">Deadline</p>
                             <p className="font-medium">
                               {new Date(dist.claimDeadline).toLocaleDateString()}
                             </p>
@@ -502,7 +502,7 @@ export default function DividendPanel({
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         {gasEstimates[dist.distributionId] && (
-                          <span className="text-xs text-gray-500" aria-label={`Estimated gas fee: ${gasEstimates[dist.distributionId].totalFee} stroops`}>
+                          <span className="text-xs text-gray-500 dark:text-gray-400" aria-label={`Estimated gas fee: ${gasEstimates[dist.distributionId].totalFee} stroops`}>
                             Gas: ~{gasEstimates[dist.distributionId].totalFee} stroops
                           </span>
                         )}
@@ -537,9 +537,9 @@ export default function DividendPanel({
           {claimHistory.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center">
-                <History className="h-12 w-12 mx-auto text-gray-300 mb-4" aria-hidden="true" />
-                <p className="text-gray-500">No claim history</p>
-                <p className="text-sm text-gray-400 mt-1">
+                <History className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
+                <p className="text-gray-500 dark:text-gray-400">No claim history</p>
+                <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                   Your dividend claim history will appear here
                 </p>
               </CardContent>
@@ -550,7 +550,7 @@ export default function DividendPanel({
                 <div className="overflow-x-auto">
                   <table className="w-full" role="table" aria-label="Dividend claim history">
                     <thead>
-                      <tr className="text-left text-sm text-gray-600 border-b">
+                      <tr className="text-left text-sm text-gray-600 dark:text-gray-300 border-b dark:border-gray-700">
                         <th className="pb-2 font-medium" scope="col">Date</th>
                         <th className="pb-2 font-medium" scope="col">Distribution</th>
                         <th className="pb-2 font-medium" scope="col">Amount</th>
@@ -562,7 +562,7 @@ export default function DividendPanel({
                       {claimHistory.map((claim, index) => (
                         <tr
                           key={`${claim.distributionId}-${index}`}
-                          className="border-b last:border-0 hover:bg-gray-50 transition-colors"
+                          className="border-b dark:border-gray-700 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
                         >
                           <td className="py-3">
                             {new Date(claim.date).toLocaleDateString()}
@@ -575,7 +575,7 @@ export default function DividendPanel({
                           </td>
                           <td className="py-3">{claim.currency}</td>
                           <td className="py-3">
-                            <code className="text-xs bg-gray-100 px-2 py-1 rounded" title={claim.txHash}>
+                            <code className="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded" title={claim.txHash}>
                               {claim.txHash.slice(0, 8)}...
                             </code>
                           </td>
@@ -594,7 +594,7 @@ export default function DividendPanel({
           {pastDistributions.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center">
-                <History className="h-12 w-12 mx-auto text-gray-300 mb-4" aria-hidden="true" />
+                <History className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
                 <p className="text-gray-500">No past distributions</p>
               </CardContent>
             </Card>
@@ -617,11 +617,11 @@ export default function DividendPanel({
                       </div>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                         <div>
-                          <p className="text-sm text-gray-600">Currency</p>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">Currency</p>
                           <p className="font-medium">{dist.currency}</p>
                         </div>
                         <div>
-                          <p className="text-sm text-gray-600">Total Amount</p>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">Total Amount</p>
                           <p className="font-medium">
                             {parseFloat(dist.totalAmount).toLocaleString()}
                           </p>

@@ -196,12 +196,12 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
       <div className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-10 bg-gray-200 animate-pulse rounded-lg" />
+            <div key={i} className="h-10 bg-gray-200 dark:bg-gray-700 animate-pulse rounded-lg" />
           ))}
         </div>
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-16 bg-gray-100 animate-pulse rounded-lg" />
+            <div key={i} className="h-16 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
           ))}
         </div>
       </div>
@@ -310,9 +310,9 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
 
       {/* Empty State */}
       {sortedTransactions.length === 0 && !isLoading && (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
-          <Inbox className="h-16 w-16 mb-4" />
-          <p className="text-lg font-medium text-gray-500">No transactions found</p>
+        <div className="flex flex-col items-center justify-center py-16 text-gray-400 dark:text-gray-500">
+          <Inbox className="h-16 w-16 mb-4 text-gray-300 dark:text-gray-600" />
+          <p className="text-lg font-medium text-gray-500 dark:text-gray-400">No transactions found</p>
           <p className="text-sm mt-1">
             {transactions.length === 0
               ? 'Your transaction history will appear here once you start transacting.'
@@ -326,7 +326,7 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
         <>
           <div className="hidden md:block overflow-x-auto rounded-lg border">
             <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b">
+              <thead className="bg-gray-50 dark:bg-gray-800 border-b dark:border-gray-700">
                 <tr>
                   <th
                     className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
@@ -377,10 +377,10 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
                       <td className="px-4 py-3 text-right font-mono text-sm">
                         {parseFloat(tx.amount).toLocaleString(undefined, { maximumFractionDigits: 6 })}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-600">
+                      <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">
                         {tx.counterpartyLabel || `${tx.counterparty.slice(0, 6)}...${tx.counterparty.slice(-4)}`}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-500">{formatDate(tx.date)}</td>
+                      <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{formatDate(tx.date)}</td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-1">
                           <StatusIcon className={`h-3.5 w-3.5 ${tx.status === 'processing' ? 'animate-spin' : ''}`} />
@@ -427,7 +427,7 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
                     <span>{tx.counterpartyLabel || `${tx.counterparty.slice(0, 4)}...${tx.counterparty.slice(-4)}`}</span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-xs text-gray-400">{formatDate(tx.date)}</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">{formatDate(tx.date)}</span>
                     <button
                       onClick={() => onOpenExplorer?.(tx.txHash)}
                       className="text-xs text-blue-600 hover:underline flex items-center gap-1"
@@ -446,7 +446,7 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between pt-4 border-t">
-          <p className="text-sm text-gray-500">
+          <p className="text-sm text-gray-500 dark:text-gray-400">
             Page {currentPage} of {totalPages} ({sortedTransactions.length} results)
           </p>
           <div className="flex items-center gap-2">
