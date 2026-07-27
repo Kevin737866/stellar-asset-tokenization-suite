@@ -276,7 +276,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   className={errors.name ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
                 {errors.name && (
-                  <p id={errorId('name')} className="text-sm text-red-500" role="alert">
+                  <p id={errorId('name')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                     {errors.name}
                   </p>
                 )}
@@ -299,7 +299,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   className={errors.symbol ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
                 {errors.symbol && (
-                  <p id={errorId('symbol')} className="text-sm text-red-500" role="alert">
+                  <p id={errorId('symbol')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                     {errors.symbol}
                   </p>
                 )}
@@ -322,7 +322,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   className={errors.totalSupply ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
                 {errors.totalSupply && (
-                  <p id={errorId('totalsupply')} className="text-sm text-red-500" role="alert">
+                  <p id={errorId('totalsupply')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                     {errors.totalSupply}
                   </p>
                 )}
@@ -355,7 +355,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   </SelectContent>
                 </Select>
                 {errors.decimals && (
-                  <p id={errorId('decimals')} className="text-sm text-red-500" role="alert">
+                  <p id={errorId('decimals')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                     {errors.decimals}
                   </p>
                 )}
@@ -380,8 +380,8 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     aria-label={`${type.replace('_', ' ')} - ${assetTypeDescriptions[type as AssetType]}`}
                     className={`cursor-pointer transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
                       formData.assetType === type
-                        ? 'ring-2 ring-blue-500 bg-blue-50'
-                        : 'hover:bg-gray-50'
+                        ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-950'
+                        : 'hover:bg-gray-50 dark:hover:bg-gray-800'
                     }`}
                     onClick={() => {
                       setFormData(prev => ({ ...prev, assetType: type as AssetType }));
@@ -390,12 +390,12 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   >
                     <CardContent className="p-4">
                       <div className="flex items-start space-x-3">
-                        <Icon className="h-6 w-6 text-gray-600 mt-1" aria-hidden="true" />
+                        <Icon className="h-6 w-6 text-gray-600 dark:text-gray-300 mt-1" aria-hidden="true" />
                         <div className="flex-1">
                           <h3 className="font-medium capitalize">
                             {type.replace('_', ' ')}
                           </h3>
-                          <p className="text-sm text-gray-600 mt-1">
+                          <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
                             {assetTypeDescriptions[type as AssetType]}
                           </p>
                         </div>
@@ -405,7 +405,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 ))}
               </div>
               {errors.assetType && (
-                <p id={errorId('assettype')} className="text-sm text-red-500" role="alert">
+                <p id={errorId('assettype')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                   {errors.assetType}
                 </p>
               )}
@@ -429,7 +429,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   className={errors.complianceRegistry ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
                 {errors.complianceRegistry && (
-                  <p id={errorId('complianceregistry')} className="text-sm text-red-500" role="alert">
+                  <p id={errorId('complianceregistry')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                     {errors.complianceRegistry}
                   </p>
                 )}
@@ -451,7 +451,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   className={errors.dividendDistributor ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'}
                 />
                 {errors.dividendDistributor && (
-                  <p id={errorId('dividenddistributor')} className="text-sm text-red-500" role="alert">
+                  <p id={errorId('dividenddistributor')} className="text-sm text-red-500 dark:text-red-400" role="alert">
                     {errors.dividendDistributor}
                   </p>
                 )}
@@ -479,7 +479,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     <Input
                       value={key}
                       disabled
-                      className="bg-gray-50"
+                      className="bg-gray-50 dark:bg-gray-800"
                       placeholder="Key"
                       aria-label={`Metadata key: ${key}`}
                     />
@@ -502,7 +502,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                 ))}
 
                 {Object.keys(formData.metadata).length === 0 && (
-                  <p className="text-sm text-gray-500 text-center py-4">
+                  <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
                     No metadata fields added. Add fields to provide additional asset information.
                   </p>
                 )}

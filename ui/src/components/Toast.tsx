@@ -60,10 +60,10 @@ const ToastIcon: React.FC<{ type: ToastType }> = ({ type }) => {
 
 // Color styles per type
 const STYLES: Record<ToastType, { border: string; bg: string }> = {
-  success: { border: 'border-green-400', bg: 'bg-green-50' },
-  error: { border: 'border-red-400', bg: 'bg-red-50' },
-  warning: { border: 'border-yellow-400', bg: 'bg-yellow-50' },
-  info: { border: 'border-blue-400', bg: 'bg-blue-50' },
+  success: { border: 'border-green-400 dark:border-green-600', bg: 'bg-green-50 dark:bg-green-950' },
+  error: { border: 'border-red-400 dark:border-red-600', bg: 'bg-red-50 dark:bg-red-950' },
+  warning: { border: 'border-yellow-400 dark:border-yellow-600', bg: 'bg-yellow-50 dark:bg-yellow-950' },
+  info: { border: 'border-blue-400 dark:border-blue-600', bg: 'bg-blue-50 dark:bg-blue-950' },
 };
 
 // Individual Toast Item with auto-dismiss and retry
@@ -92,9 +92,9 @@ const ToastItem: React.FC<{
     >
       <ToastIcon type={toast.type} />
       <div className="flex-1 min-w-0">
-        <p className="font-semibold text-gray-900 text-sm">{toast.title}</p>
+        <p className="font-semibold text-gray-900 dark:text-gray-100 text-sm">{toast.title}</p>
         {toast.message && (
-          <p className="text-sm text-gray-600 mt-0.5">{toast.message}</p>
+          <p className="text-sm text-gray-600 dark:text-gray-300 mt-0.5">{toast.message}</p>
         )}
         {toast.retryAction && toast.type === 'error' && (
           <button
@@ -107,10 +107,9 @@ const ToastItem: React.FC<{
             Retry
           </button>
         )}
-      </div>
-      <button
-        onClick={() => onRemove(toast.id)}
-        className="shrink-0 p-1 rounded-full hover:bg-black/5 transition-colors"
+      </div><button
+            onClick={() => onRemove(toast.id)}
+            className="shrink-0 p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
         aria-label="Dismiss"
       >
         <X className="h-4 w-4 text-gray-400" />
