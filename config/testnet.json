@@ -1,0 +1,37 @@
+{
+  "network": "testnet",
+  "description": "Stellar Testnet configuration for RWA Tokenization Suite",
+  "stellar": {
+    "network": "testnet",
+    "horizonUrl": "https://horizon-testnet.stellar.org",
+    "rpcUrl": "https://soroban-testnet.stellar.org",
+    "passphrase": "Test SDF Network ; September 2015"
+  },
+  "contracts": {
+    "buildDir": "target/wasm32-unknown-unknown/release",
+    "wasmFiles": {
+      "assetFactory": "stellar_asset_tokenization_suite.wasm",
+      "rwaToken": "stellar_asset_tokenization_suite.wasm",
+      "complianceRegistry": "stellar_asset_tokenization_suite.wasm",
+      "dividendDistributor": "stellar_asset_tokenization_suite.wasm",
+      "secondaryMarket": "stellar_asset_tokenization_suite.wasm",
+      "custodyValidator": "stellar_asset_tokenization_suite.wasm"
+    }
+  },
+  "deployment": {
+    "outputFile": ".env.testnet",
+    "verifyAfterDeploy": true,
+    "idempotent": true,
+    "gasEstimateBeforeDeploy": true,
+    "maxRetries": 3,
+    "retryDelayMs": 5000
+  },
+  "accounts": {
+    "deployerSecretEnv": "TESTNET_DEPLOYER_SECRET",
+    "adminSecretEnv": "TESTNET_ADMIN_SECRET"
+  },
+  "fee": {
+    "baseFee": 100,
+    "maxFee": 100000
+  }
+}
