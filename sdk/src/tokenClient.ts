@@ -1,28 +1,36 @@
 import { 
-  Server, 
   TransactionBuilder, 
   Networks, 
   Account, 
   Address,
   Contract,
   xdr,
-  ScInt
+  ScInt,
+  Keypair,
+  scValToNative,
+  rpc as SorobanRpc
 } from 'stellar-sdk';
+
+/** Server is the Soroban RPC server client (stellar-sdk v12+). */
+const Server = SorobanRpc.Server;
 import { 
   AssetInfo, 
   Balance, 
   TransferOptions, 
   TransactionOptions, 
   RWASDKConfig, 
-  RWASDKError
+  RWASDKError,
+  AllowanceInfo,
+  ApproveOptions,
+  ErrorCode
 } from './types';
-import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, TransactionError, ContractError } from './errors';
+import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, TransactionError, ContractError, InvalidParametersError } from './errors';
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
 
 export class TokenClient {
-  private server: Server;
+  private server: InstanceType<typeof Server>;
   private contract: Contract;
   private config: RWASDKConfig;
   private tokenAddress: Address;
@@ -387,6 +395,285 @@ export class TokenClient {
       throw this.handleError(error);
     }
   }
+
+  // ─── Allowance Management (Issue #204) ─────────────────────────────────────
+
+  /**
+   * Approve a spender to transfer up to `amount` tokens on behalf of `owner`.
+   *
+   * Calls the Soroban SEP-41 `approve(owner, spender, amount, expiration_ledger)` entry point.
+   * Returns the transaction hash of the submitted approval transaction.
+   */
+  async approve(
+    owner: Address,
+    spender: Address,
+    amount: string,
+    options: ApproveOptions = {}
+  ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAddress(spender, 'spender');
+    // Allow '0' as a valid amount for approve — it revokes the allowance (SEP-41 compliant)
+    if (amount !== '0') {
+      validateAmount(amount, 'amount');
+    } else if (typeof amount !== 'string') {
+      throw new RWASDKErrorClass(ErrorCode.INVALID_PARAMETERS, 'amount must be a string');
+    }
+    this.logger.info('Approving allowance', {
+      owner: owner.toString(),
+      spender: spender.toString(),
+      amount,
+    });
+    try {
+      const account = await this.server.getAccount(owner.toString());
+
+      // expiration_ledger: 0 means no expiry in this contract implementation
+      const expirationLedger = options.expirationLedger != null
+        ? new ScInt(options.expirationLedger)
+        : new ScInt(0);
+
+      const call = this.contract.call(
+        'approve',
+        new Address(owner),
+        new Address(spender),
+        new ScInt(amount, xdr.ScValType.ScvI128),
+        expirationLedger
+      );
+
+      const transaction = new TransactionBuilder(account, {
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
+        networkPassphrase: this.config.stellar.passphrase,
+      })
+        .addOperation(call)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
+        .build();
+
+      const signedTx = await this.signTransaction(transaction, owner);
+      const result = await this.server.sendTransaction(signedTx);
+
+      if (result.status === 'ERROR') {
+        throw new TransactionError(`Transaction failed: ${result.error}`);
+      }
+
+      this.logger.info('Allowance approved', {
+        owner: owner.toString(),
+        spender: spender.toString(),
+        amount,
+        hash: result.hash,
+      });
+      return result.hash;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query how many tokens `spender` is still allowed to transfer on behalf of `owner`.
+   *
+   * Calls the read-only Soroban `allowance(owner, spender)` entry point and returns
+   * the current approved amount as a string.
+   */
+  async allowance(owner: Address, spender: Address): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAddress(spender, 'spender');
+    this.logger.info('Querying allowance', {
+      owner: owner.toString(),
+      spender: spender.toString(),
+    });
+    try {
+      const result = await this.contract.call(
+        'allowance',
+        new Address(owner),
+        new Address(spender)
+      );
+      const native = scValToNative(result.result);
+      return native?.toString() ?? '0';
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Transfer tokens from `from` to `to` using an existing allowance granted to `spender`.
+   *
+   * Calls the Soroban SEP-41 `transfer_from(spender, from, to, amount)` entry point.
+   * Throws an INSUFFICIENT_ALLOWANCE error when the spender's allowance is too low.
+   * Returns the transaction hash.
+   */
+  async transferFrom(
+    spender: Address,
+    from: Address,
+    to: Address,
+    amount: string,
+    options: TransactionOptions = {}
+  ): Promise<string> {
+    validateAddress(spender, 'spender');
+    validateAddress(from, 'from');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
+    this.logger.info('Transferring tokens via allowance', {
+      spender: spender.toString(),
+      from: from.toString(),
+      to: to.toString(),
+      amount,
+    });
+    try {
+      // Pre-check allowance to give a meaningful SDK-level error before the TX fails
+      const currentAllowance = await this.allowance(from, spender);
+      if (BigInt(currentAllowance) < BigInt(amount)) {
+        throw new RWASDKErrorClass(
+          ErrorCode.INSUFFICIENT_ALLOWANCE,
+          `Insufficient allowance: spender ${spender.toString()} has allowance of ${currentAllowance} but requested ${amount}`
+        );
+      }
+
+      const account = await this.server.getAccount(spender.toString());
+
+      const call = this.contract.call(
+        'transfer_from',
+        new Address(spender),
+        new Address(from),
+        new Address(to),
+        new ScInt(amount, xdr.ScValType.ScvI128)
+      );
+
+      const transaction = new TransactionBuilder(account, {
+        fee: options.fee || this.config.defaultFeeRate || DEFAULT_FEE_RATE,
+        networkPassphrase: this.config.stellar.passphrase,
+      })
+        .addOperation(call)
+        .setTimeout(options.timeout || DEFAULT_TIMEOUT_SECONDS)
+        .build();
+
+      const signedTx = await this.signTransaction(transaction, spender);
+      const result = await this.server.sendTransaction(signedTx);
+
+      if (result.status === 'ERROR') {
+        throw new TransactionError(`Transaction failed: ${result.error}`);
+      }
+
+      this.logger.info('transferFrom completed', {
+        spender: spender.toString(),
+        from: from.toString(),
+        to: to.toString(),
+        amount,
+        hash: result.hash,
+      });
+      return result.hash;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Increase the spending allowance granted to `spender` by `addedAmount`.
+   *
+   * Convenience wrapper: reads the current allowance then calls `approve` with
+   * `current + addedAmount`, avoiding the two-step approve(0)/approve(new) race condition.
+   * Returns the transaction hash.
+   */
+  async increaseAllowance(
+    owner: Address,
+    spender: Address,
+    addedAmount: string,
+    options: ApproveOptions = {}
+  ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAddress(spender, 'spender');
+    validateAmount(addedAmount, 'addedAmount');
+    this.logger.info('Increasing allowance', {
+      owner: owner.toString(),
+      spender: spender.toString(),
+      addedAmount,
+    });
+
+    const current = await this.allowance(owner, spender);
+    const newAmount = (BigInt(current) + BigInt(addedAmount)).toString();
+    return this.approve(owner, spender, newAmount, options);
+  }
+
+  /**
+   * Decrease the spending allowance granted to `spender` by `subtractedAmount`.
+   *
+   * Convenience wrapper: reads the current allowance then calls `approve` with
+   * `current - subtractedAmount`. Throws `INVALID_ALLOWANCE_AMOUNT` if
+   * `subtractedAmount` exceeds the current allowance.
+   * Returns the transaction hash.
+   */
+  async decreaseAllowance(
+    owner: Address,
+    spender: Address,
+    subtractedAmount: string,
+    options: ApproveOptions = {}
+  ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAddress(spender, 'spender');
+    validateAmount(subtractedAmount, 'subtractedAmount');
+    this.logger.info('Decreasing allowance', {
+      owner: owner.toString(),
+      spender: spender.toString(),
+      subtractedAmount,
+    });
+
+    const current = await this.allowance(owner, spender);
+    if (BigInt(subtractedAmount) > BigInt(current)) {
+      throw new RWASDKErrorClass(
+        ErrorCode.INVALID_ALLOWANCE_AMOUNT,
+        `Cannot decrease allowance by ${subtractedAmount}: current allowance is only ${current}`
+      );
+    }
+    const newAmount = (BigInt(current) - BigInt(subtractedAmount)).toString();
+    return this.approve(owner, spender, newAmount, options);
+  }
+
+  /**
+   * Parse a raw Stellar contract event into a structured allowance event object.
+   *
+   * Recognises events emitted by `approve` and `transfer_from` contract calls.
+   * Returns `null` for unrecognised event types.
+   */
+  parseAllowanceEvent(rawEvent: {
+    type: string;
+    contractId?: string;
+    topics: string[];
+    data: any;
+  }): {
+    eventType: 'approve' | 'transfer_from';
+    owner?: string;
+    spender?: string;
+    from?: string;
+    to?: string;
+    amount: string;
+    txHash?: string;
+  } | null {
+    try {
+      const [topic0, topic1, topic2, topic3] = rawEvent.topics ?? [];
+
+      if (topic0 === 'approve') {
+        return {
+          eventType: 'approve',
+          owner: topic1,
+          spender: topic2,
+          amount: rawEvent.data?.toString() ?? '0',
+        };
+      }
+
+      if (topic0 === 'transfer_from') {
+        return {
+          eventType: 'transfer_from',
+          spender: topic1,
+          from: topic2,
+          to: topic3,
+          amount: rawEvent.data?.toString() ?? '0',
+        };
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ─── End Allowance Management ──────────────────────────────────────────────
 
   async getTokenStats(): Promise<{
     totalSupply: string;

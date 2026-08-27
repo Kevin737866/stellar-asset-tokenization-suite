@@ -317,12 +317,29 @@ export interface ComplianceOptions {
   transferLimits?: TransferLimits;
 }
 
+// Allowance Types (Issue #204)
+export interface AllowanceInfo {
+  /** The token owner who granted the allowance. */
+  owner: Address;
+  /** The spender who was granted the allowance. */
+  spender: Address;
+  /** The approved amount the spender may transfer on behalf of owner. */
+  amount: string;
+}
+
+export interface ApproveOptions extends TransactionOptions {
+  /** Optional expiry ledger number after which the allowance is invalid. */
+  expirationLedger?: number;
+}
+
 // Event Types
 export interface AssetEvent {
-  type: 'mint' | 'burn' | 'transfer' | 'pause' | 'unpause' | 'freeze' | 'unfreeze';
+  type: 'mint' | 'burn' | 'transfer' | 'transfer_from' | 'approve' | 'pause' | 'unpause' | 'freeze' | 'unfreeze';
   asset: Address;
   from?: Address;
   to?: Address;
+  /** Spender address, populated for transfer_from and approve events. */
+  spender?: Address;
   amount: string;
   timestamp: Date;
   txHash: string;
@@ -460,6 +477,11 @@ export enum ErrorCode {
   ASSET_FROZEN = 'ASSET_FROZEN',
   KYC_REQUIRED = 'KYC_REQUIRED',
   TRANSFER_RESTRICTION = 'TRANSFER_RESTRICTION',
+
+  // Allowance errors (Issue #204)
+  INSUFFICIENT_ALLOWANCE = 'INSUFFICIENT_ALLOWANCE',
+  ALLOWANCE_NOT_FOUND = 'ALLOWANCE_NOT_FOUND',
+  INVALID_ALLOWANCE_AMOUNT = 'INVALID_ALLOWANCE_AMOUNT',
 
   // Compliance errors (1-9)
   COMPLIANCE_FAILED = 'COMPLIANCE_FAILED',
