@@ -15,6 +15,24 @@ import { validateAddress, validateAmount, validateNonEmptyString, validatePositi
 // Type exports
 export * from './types';
 
+// Real-time event streaming exports (Issue #190)
+export {
+    EventStream,
+    STREAM_EVENT_TYPES,
+    eventMatchesFilter
+} from './eventStream';
+export type {
+    StreamEventType,
+    StreamEvent,
+    EventFilter,
+    EventStreamConfig,
+    EventStreamState,
+    EventStreamStatus,
+    EventStreamLifecycleEvent,
+    MinimalWebSocket,
+    WebSocketConstructor
+} from './types';
+
 // Custody-related exports
 export {
     CustodyClient,
