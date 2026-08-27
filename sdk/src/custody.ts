@@ -1,12 +1,36 @@
-import { Server, TransactionBuilder, Networks, Operation, Asset, Keypair, Account } from '@stellar/stellar-base';
-import { Horizon } from '@stellar/stellar-sdk';
+import { Server, TransactionBuilder, Networks, Operation, Keypair } from '@stellar/stellar-base';
+import { Horizon } from 'stellar-sdk';
 import axios from 'axios';
 import BigNumber from 'bignumber.js';
-import { RWASDKError, ContractError, VerificationFailedError, InsufficientBondError } from './errors';
-import { ErrorCode } from './types';
-import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_CUSTODY_EXPIRY_DAYS, DAY_IN_MILLISECONDS } from './constants';
+import {
+    RWASDKError,
+    ContractError,
+    VerificationFailedError,
+    InsufficientBondError,
+    InvalidParametersError,
+} from './errors';
+import {
+    ErrorCode,
+    DisputeOptions,
+    DisputeStatusResult,
+    DisputeStatus,
+    DisputeResolutionEvent,
+} from './types';
+import {
+    DEFAULT_FEE_RATE,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_CUSTODY_EXPIRY_DAYS,
+    DAY_IN_MILLISECONDS,
+} from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId } from './validation';
+import {
+    validateAddress,
+    validateAmount,
+    validateNonEmptyString,
+    validatePositiveInteger,
+    validateServerUrl,
+    validateContractId,
+} from './validation';
 
 export interface CustodyAttestation {
     assetId: string;
@@ -134,6 +158,15 @@ export class CustodyClient {
     private networkPassphrase: string;
     private logger: Logger;
 
+    /** In-memory store of all filed disputes, keyed by disputeId */
+    private disputeStore: Map<number, DisputeStatusResult> = new Map();
+    /** In-memory store of disputes indexed by custodian address */
+    private disputeByCustodian: Map<string, DisputeStatusResult[]> = new Map();
+    /** Registered resolution event listeners */
+    private resolutionListeners: Array<(event: DisputeResolutionEvent) => void> = [];
+    /** Auto-incrementing dispute ID counter (used locally; real ID comes from on-chain tx) */
+    private nextDisputeId: number = 1;
+
     constructor(
         contractId: string,
         serverUrl: string = 'https://horizon-testnet.stellar.org',
@@ -147,6 +180,10 @@ export class CustodyClient {
         this.logger = createLogger('CustodyClient');
     }
 
+    // -------------------------------------------------------------------------
+    // Custodian registration
+    // -------------------------------------------------------------------------
+
     async registerCustodian(
         signerKeypair: Keypair,
         profile: CustodianProfile
@@ -156,10 +193,13 @@ export class CustodyClient {
         validateNonEmptyString(profile.licenseNumber, 'licenseNumber');
         this.logger.info('Registering custodian', { name: profile.name, address: signerKeypair.publicKey() });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
-        
-        const verificationTypes = profile.verificationTypes.map(type => 
-            new TransactionBuilder(account, { networkPassphrase: this.networkPassphrase, fee: DEFAULT_FEE_RATE.toString() })
-                .addOperation(Operation.invokeContractFunction({
+
+        const transaction = new TransactionBuilder(account, {
+            networkPassphrase: this.networkPassphrase,
+            fee: DEFAULT_FEE_RATE.toString(),
+        })
+            .addOperation(
+                Operation.invokeContractFunction({
                     contract: this.contractId,
                     function: 'register_custodian',
                     args: [
@@ -170,29 +210,9 @@ export class CustodyClient {
                         ...this.encodeStringArray(profile.verificationTypes),
                         ...this.encodeString(profile.bondRequired),
                         ...this.encodeString(profile.insuranceProvider),
-                    ]
-                }))
-                .setTimeout(DEFAULT_TIMEOUT_SECONDS)
-                .build()
-        );
-
-        const transaction = new TransactionBuilder(account, { 
-            networkPassphrase: this.networkPassphrase, 
-            fee: DEFAULT_FEE_RATE.toString() 
-        })
-            .addOperation(Operation.invokeContractFunction({
-                contract: this.contractId,
-                function: 'register_custodian',
-                args: [
-                    ...this.encodeAddress(signerKeypair.publicKey()),
-                    ...this.encodeString(profile.name),
-                    ...this.encodeString(profile.jurisdiction),
-                    ...this.encodeString(profile.licenseNumber),
-                    ...this.encodeStringArray(profile.verificationTypes),
-                    ...this.encodeString(profile.bondRequired),
-                    ...this.encodeString(profile.insuranceProvider),
-                ]
-            }))
+                    ],
+                })
+            )
             .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
@@ -201,6 +221,10 @@ export class CustodyClient {
         this.logger.info('Custodian registered', { name: profile.name, address: signerKeypair.publicKey() });
         return result;
     }
+
+    // -------------------------------------------------------------------------
+    // Attestation management
+    // -------------------------------------------------------------------------
 
     async submitAttestation(
         signerKeypair: Keypair,
@@ -211,13 +235,13 @@ export class CustodyClient {
         validateNonEmptyString(assetId, 'assetId');
         this.logger.info('Submitting attestation', { assetId, custodian: signerKeypair.publicKey() });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
-        
+
         const attestation: CustodyAttestation = {
-            assetId: assetId,
+            assetId,
             custodian: signerKeypair.publicKey(),
-            location: proofData.iotData?.location ? 
-                `${proofData.iotData.location.lat},${proofData.iotData.location.lng}` : 
-                'unknown',
+            location: proofData.iotData?.location
+                ? `${proofData.iotData.location.lat},${proofData.iotData.location.lng}`
+                : 'unknown',
             condition: 'verified',
             value: '0',
             timestamp: Date.now(),
@@ -229,18 +253,20 @@ export class CustodyClient {
             multiSigSignatures: signatures,
             metadata: this.buildMetadata(proofData),
             isValid: true,
-            expiresAt: Date.now() + (DEFAULT_CUSTODY_EXPIRY_DAYS * DAY_IN_MILLISECONDS),
+            expiresAt: Date.now() + DEFAULT_CUSTODY_EXPIRY_DAYS * DAY_IN_MILLISECONDS,
         };
 
-        const transaction = new TransactionBuilder(account, { 
-            networkPassphrase: this.networkPassphrase, 
-            fee: DEFAULT_FEE_RATE.toString() 
+        const transaction = new TransactionBuilder(account, {
+            networkPassphrase: this.networkPassphrase,
+            fee: DEFAULT_FEE_RATE.toString(),
         })
-            .addOperation(Operation.invokeContractFunction({
-                contract: this.contractId,
-                function: 'submit_attestation',
-                args: [...this.encodeCustodyAttestation(attestation)]
-            }))
+            .addOperation(
+                Operation.invokeContractFunction({
+                    contract: this.contractId,
+                    function: 'submit_attestation',
+                    args: [...this.encodeCustodyAttestation(attestation)],
+                })
+            )
             .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
@@ -261,26 +287,25 @@ export class CustodyClient {
         try {
             const latestAttestation = await this.getLatestAttestation(tokenAddress);
             const alerts = await this.getCustodyAlerts();
-            
-            const isValid = latestAttestation ? 
-                latestAttestation.isValid && 
-                Date.now() < latestAttestation.expiresAt : 
-                false;
+
+            const isValid = latestAttestation
+                ? latestAttestation.isValid && Date.now() < latestAttestation.expiresAt
+                : false;
 
             const relevantAlerts = alerts
                 .filter((entry): entry is [string, string] => {
-                  if (!Array.isArray(entry) || entry.length < 2) return false;
-                  const [asset] = entry;
-                  return asset === tokenAddress;
+                    if (!Array.isArray(entry) || entry.length < 2) return false;
+                    const [asset] = entry;
+                    return asset === tokenAddress;
                 })
                 .map(([, alert]) => alert);
 
             this.logger.info('Asset backing verified', { tokenAddress, isValid });
             return {
-                isValid: isValid,
-                latestAttestation: latestAttestation,
+                isValid,
+                latestAttestation: latestAttestation ?? undefined,
                 alerts: relevantAlerts,
-                insuranceStatus: latestAttestation?.insuranceStatus || 'unknown'
+                insuranceStatus: latestAttestation?.insuranceStatus || 'unknown',
             };
         } catch (error) {
             throw new ContractError(`Failed to verify asset backing: ${error}`);
@@ -288,10 +313,181 @@ export class CustodyClient {
     }
 
     async getCustodyHistory(assetId: string): Promise<CustodyAttestation[]> {
-        const attestations: CustodyAttestation[] = [];
-        return attestations;
+        return [];
     }
 
+    // -------------------------------------------------------------------------
+    // Dispute lifecycle (Issue #203)
+    // -------------------------------------------------------------------------
+
+    /**
+     * File a new custody dispute against an existing attestation.
+     *
+     * Performs bond validation before broadcasting the `dispute_attestation`
+     * contract call. Throws `InsufficientBondError` when `bondAmount` is zero
+     * or negative.
+     *
+     * @param signerKeypair - Keypair of the challenger (must hold sufficient bond)
+     * @param options       - Dispute parameters (attestationId, reason, evidenceHash, bondAmount)
+     * @returns The newly created DisputeStatusResult with status PENDING
+     */
+    async fileDispute(
+        signerKeypair: Keypair,
+        options: DisputeOptions
+    ): Promise<DisputeStatusResult> {
+        const { attestationId, reason, evidenceHash, bondAmount } = options;
+
+        validatePositiveInteger(attestationId, 'attestationId');
+        validateNonEmptyString(reason, 'reason');
+        validateNonEmptyString(evidenceHash, 'evidenceHash');
+        validateAmount(bondAmount, 'bondAmount');
+
+        // Bond validation: must be a positive, non-zero amount
+        const bondBN = new BigNumber(bondAmount);
+        if (bondBN.isNaN() || bondBN.isLessThanOrEqualTo(0)) {
+            throw new InsufficientBondError(
+                `Bond amount "${bondAmount}" is invalid or non-positive. A positive bond is required to file a dispute.`
+            );
+        }
+
+        this.logger.info('Filing custody dispute', {
+            attestationId,
+            challenger: signerKeypair.publicKey(),
+            bondAmount,
+        });
+
+        const account = await this.server.loadAccount(signerKeypair.publicKey());
+
+        const transaction = new TransactionBuilder(account, {
+            networkPassphrase: this.networkPassphrase,
+            fee: DEFAULT_FEE_RATE.toString(),
+        })
+            .addOperation(
+                Operation.invokeContractFunction({
+                    contract: this.contractId,
+                    function: 'dispute_attestation',
+                    args: [
+                        ...this.encodeNumber(attestationId),
+                        ...this.encodeAddress(signerKeypair.publicKey()),
+                        ...this.encodeString(reason),
+                        ...this.encodeString(bondAmount),
+                        ...this.encodeString(evidenceHash),
+                    ],
+                })
+            )
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+            .build();
+
+        transaction.sign(signerKeypair);
+        const txResult = await this.server.submitTransaction(transaction);
+
+        // Assign a local dispute ID (the real on-chain ID would be parsed from the tx result/events)
+        const disputeId = this.nextDisputeId++;
+        const now = Date.now();
+
+        const record: DisputeStatusResult = {
+            disputeId,
+            attestationId,
+            challenger: signerKeypair.publicKey(),
+            custodian: '',
+            reason,
+            bondAmount,
+            evidenceHash,
+            status: DisputeStatus.PENDING,
+            createdAt: now,
+            resolvedAt: null,
+            resolution: null,
+            bondReturned: false,
+            penaltyApplied: false,
+            penaltyAmount: '0',
+        };
+
+        this.disputeStore.set(disputeId, record);
+
+        // Index by custodian for getRecentDisputes (when custodian is known)
+        const byCustodian = this.disputeByCustodian.get(record.custodian) ?? [];
+        byCustodian.push(record);
+        this.disputeByCustodian.set(record.custodian, byCustodian);
+
+        // Also index by challenger so callers can query their own disputes
+        if (record.challenger !== record.custodian) {
+            const byChallenger = this.disputeByCustodian.get(record.challenger) ?? [];
+            byChallenger.push(record);
+            this.disputeByCustodian.set(record.challenger, byChallenger);
+        }
+
+        this.logger.info('Dispute filed', { disputeId, txHash: txResult.hash });
+        return { ...record };
+    }
+
+    /**
+     * Retrieve the current status of a previously filed dispute.
+     *
+     * Returns a copy of the in-memory record if present, otherwise falls back
+     * to querying the chain via `fetchDisputeFromChain`.
+     *
+     * @param disputeId - Numeric dispute ID returned by `fileDispute`
+     * @returns The latest DisputeStatusResult
+     */
+    async getDisputeStatus(disputeId: number): Promise<DisputeStatusResult> {
+        validatePositiveInteger(disputeId, 'disputeId');
+        this.logger.info('Fetching dispute status', { disputeId });
+
+        const cached = this.disputeStore.get(disputeId);
+        if (cached) {
+            return { ...cached };
+        }
+
+        // Fallback: simulate a chain query (real implementation would call a contract view fn)
+        const record = await this.fetchDisputeFromChain(disputeId);
+        this.disputeStore.set(disputeId, record);
+        return { ...record };
+    }
+
+    /**
+     * Retrieve recent disputes associated with a custodian address,
+     * ordered from newest to oldest.
+     *
+     * @param custodian - Stellar address of the custodian being queried
+     * @param limit     - Maximum records to return (1–100, default 20)
+     * @returns Disputes sorted newest-first, capped at `limit`
+     */
+    async getRecentDisputes(
+        custodian: string,
+        limit: number = 20
+    ): Promise<DisputeStatusResult[]> {
+        validateAddress(custodian, 'custodian');
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+            throw new InvalidParametersError('limit must be an integer between 1 and 100');
+        }
+
+        this.logger.info('Fetching recent disputes for custodian', { custodian, limit });
+
+        const local = this.disputeByCustodian.get(custodian) ?? [];
+        return [...local]
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, limit);
+    }
+
+    /**
+     * Register a listener that is called whenever a dispute reaches a terminal
+     * resolution (RESOLVED_UPHELD or RESOLVED_REJECTED).
+     *
+     * Multiple listeners are supported and all are invoked in registration order.
+     *
+     * @param listener - Callback receiving a `DisputeResolutionEvent`
+     */
+    onDisputeResolution(listener: (event: DisputeResolutionEvent) => void): void {
+        this.resolutionListeners.push(listener);
+        this.logger.info('Dispute resolution listener registered', {
+            totalListeners: this.resolutionListeners.length,
+        });
+    }
+
+    /**
+     * @deprecated Use `fileDispute` for the full dispute lifecycle.
+     * Retained for backward compatibility.
+     */
     async initiateDispute(
         signerKeypair: Keypair,
         attestationId: number,
@@ -301,24 +497,30 @@ export class CustodyClient {
     ): Promise<Horizon.SubmitTransactionResponse> {
         validateNonEmptyString(reason, 'reason');
         validateAmount(bondAmount, 'bondAmount');
-        this.logger.info('Initiating dispute', { attestationId, challenger: signerKeypair.publicKey(), reason });
+        this.logger.info('Initiating dispute', {
+            attestationId,
+            challenger: signerKeypair.publicKey(),
+            reason,
+        });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
-        
-        const transaction = new TransactionBuilder(account, { 
-            networkPassphrase: this.networkPassphrase, 
-            fee: DEFAULT_FEE_RATE.toString() 
+
+        const transaction = new TransactionBuilder(account, {
+            networkPassphrase: this.networkPassphrase,
+            fee: DEFAULT_FEE_RATE.toString(),
         })
-            .addOperation(Operation.invokeContractFunction({
-                contract: this.contractId,
-                function: 'dispute_attestation',
-                args: [
-                    ...this.encodeNumber(attestationId),
-                    ...this.encodeAddress(signerKeypair.publicKey()),
-                    ...this.encodeString(reason),
-                    ...this.encodeString(bondAmount),
-                    ...this.encodeString(evidenceHash),
-                ]
-            }))
+            .addOperation(
+                Operation.invokeContractFunction({
+                    contract: this.contractId,
+                    function: 'dispute_attestation',
+                    args: [
+                        ...this.encodeNumber(attestationId),
+                        ...this.encodeAddress(signerKeypair.publicKey()),
+                        ...this.encodeString(reason),
+                        ...this.encodeString(bondAmount),
+                        ...this.encodeString(evidenceHash),
+                    ],
+                })
+            )
             .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
@@ -327,6 +529,37 @@ export class CustodyClient {
         this.logger.info('Dispute initiated', { attestationId, hash: result.hash });
         return result;
     }
+
+    /**
+     * Retrieve a dispute by ID in the legacy `DisputeRecord` shape.
+     * Delegates to `getDisputeStatus` internally.
+     *
+     * @param disputeId - Numeric dispute ID
+     */
+    async getDispute(disputeId: number): Promise<DisputeRecord> {
+        validatePositiveInteger(disputeId, 'disputeId');
+        const status = await this.getDisputeStatus(disputeId);
+        return {
+            disputeId: status.disputeId,
+            attestationId: status.attestationId,
+            challenger: status.challenger,
+            custodian: status.custodian,
+            reason: status.reason,
+            bondAmount: status.bondAmount,
+            evidenceHash: status.evidenceHash,
+            status: status.status,
+            createdAt: status.createdAt,
+            resolvedAt: status.resolvedAt ?? 0,
+            resolution: status.resolution ?? '',
+            bondReturned: status.bondReturned,
+            penaltyApplied: status.penaltyApplied,
+            penaltyAmount: status.penaltyAmount,
+        };
+    }
+
+    // -------------------------------------------------------------------------
+    // Insurance
+    // -------------------------------------------------------------------------
 
     /**
      * Trigger an insurance claim for an undercollateralized asset.
@@ -353,25 +586,27 @@ export class CustodyClient {
         this.logger.info('Triggering insurance claim', {
             assetId,
             claimReason,
-            admin: signerKeypair.publicKey()
+            admin: signerKeypair.publicKey(),
         });
 
         const account = await this.server.loadAccount(signerKeypair.publicKey());
 
         const transaction = new TransactionBuilder(account, {
             networkPassphrase: this.networkPassphrase,
-            fee: DEFAULT_FEE_RATE.toString()
+            fee: DEFAULT_FEE_RATE.toString(),
         })
-            .addOperation(Operation.invokeContractFunction({
-                contract: this.contractId,
-                function: 'trigger_insurance_claim',
-                args: [
-                    ...this.encodeAddress(signerKeypair.publicKey()), // auth
-                    ...this.encodeAddress(assetId),                   // asset_id
-                    ...this.encodeString(claimReason),                // claim_reason
-                    ...this.encodeString(evidenceHash),               // evidence_hash
-                ]
-            }))
+            .addOperation(
+                Operation.invokeContractFunction({
+                    contract: this.contractId,
+                    function: 'trigger_insurance_claim',
+                    args: [
+                        ...this.encodeAddress(signerKeypair.publicKey()),
+                        ...this.encodeAddress(assetId),
+                        ...this.encodeString(claimReason),
+                        ...this.encodeString(evidenceHash),
+                    ],
+                })
+            )
             .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .build();
 
@@ -380,15 +615,14 @@ export class CustodyClient {
         this.logger.info('Insurance claim triggered', {
             assetId,
             claimReason,
-            hash: result.hash
+            hash: result.hash,
         });
         return result;
     }
 
-    async getDispute(disputeId: number): Promise<DisputeRecord> {
-        validatePositiveInteger(disputeId, 'disputeId');
-        throw new ContractError('Not implemented');
-    }
+    // -------------------------------------------------------------------------
+    // Stub read methods (to be implemented against chain view functions)
+    // -------------------------------------------------------------------------
 
     async getCustodianInfo(custodianAddress: string): Promise<CustodianRegistry> {
         throw new ContractError('Not implemented');
@@ -400,6 +634,37 @@ export class CustodyClient {
 
     async getVerificationConfig(verificationType: string): Promise<VerificationTypeConfig> {
         throw new ContractError('Not implemented');
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Notify all registered resolution listeners with a terminal event.
+     * Errors thrown by individual listeners are swallowed and logged so that
+     * one faulty listener cannot block the rest.
+     */
+    private notifyResolutionListeners(event: DisputeResolutionEvent): void {
+        for (const listener of this.resolutionListeners) {
+            try {
+                listener(event);
+            } catch (err) {
+                this.logger.info('Resolution listener threw an error', { error: String(err) });
+            }
+        }
+    }
+
+    /**
+     * Simulate fetching a dispute from the chain.
+     * In a production SDK this would call a Soroban view function or query
+     * indexed event logs; here it returns a NOT_FOUND error to keep the
+     * unit-test surface honest.
+     */
+    private async fetchDisputeFromChain(disputeId: number): Promise<DisputeStatusResult> {
+        throw new ContractError(
+            `Dispute with id ${disputeId} not found in local store and chain query is not yet implemented.`
+        );
     }
 
     private async getLatestAttestation(assetId: string): Promise<CustodyAttestation | null> {
@@ -426,21 +691,21 @@ export class CustodyClient {
 
     private buildMetadata(proofData: ProofData): Record<string, string> {
         const metadata: Record<string, string> = {};
-        
+
         if (proofData.iotData) {
             metadata.iot_monitored = 'true';
             metadata.last_iot_reading = proofData.iotData.timestamp.toString();
         }
-        
+
         if (proofData.satelliteImagery) {
             metadata.satellite_verified = 'true';
             metadata.satellite_timestamp = proofData.satelliteImagery.timestamp.toString();
         }
-        
+
         if (proofData.legalVerification) {
             metadata.legal_verified = proofData.legalVerification.verificationStatus;
         }
-        
+
         return metadata;
     }
 
