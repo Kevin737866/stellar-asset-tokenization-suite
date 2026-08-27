@@ -385,6 +385,67 @@ export interface CustodyEvent {
   txHash: string;
 }
 
+/** Dispute status values matching contract state machine */
+export enum DisputeStatus {
+  PENDING = 'pending',
+  UNDER_REVIEW = 'under_review',
+  RESOLVED_UPHELD = 'resolved_upheld',
+  RESOLVED_REJECTED = 'resolved_rejected',
+  CANCELLED = 'cancelled',
+}
+
+/** Options for filing a new custody dispute */
+export interface DisputeOptions {
+  /** The on-chain attestation ID being disputed */
+  attestationId: number;
+  /** Human-readable reason for the dispute */
+  reason: string;
+  /**
+   * 64-character hex string (32 bytes) representing the hash of
+   * off-chain evidence supporting the dispute claim
+   */
+  evidenceHash: string;
+  /**
+   * Bond amount (as a string-encoded decimal) the challenger must
+   * lock to submit the dispute. Must meet the custodian's minimum.
+   */
+  bondAmount: string;
+}
+
+/** Full dispute record returned from the chain */
+export interface DisputeStatusResult {
+  disputeId: number;
+  attestationId: number;
+  challenger: string;
+  custodian: string;
+  reason: string;
+  bondAmount: string;
+  evidenceHash: string;
+  status: DisputeStatus;
+  createdAt: number;
+  resolvedAt: number | null;
+  resolution: string | null;
+  bondReturned: boolean;
+  penaltyApplied: boolean;
+  penaltyAmount: string;
+}
+
+/** Event emitted when a dispute reaches a terminal resolution */
+export interface DisputeResolutionEvent {
+  type: 'dispute_resolved';
+  disputeId: number;
+  attestationId: number;
+  challenger: string;
+  custodian: string;
+  resolution: string;
+  status: DisputeStatus.RESOLVED_UPHELD | DisputeStatus.RESOLVED_REJECTED;
+  bondReturned: boolean;
+  penaltyApplied: boolean;
+  penaltyAmount: string;
+  timestamp: Date;
+  txHash: string;
+}
+
 // Horizon Error Types (Issue #209)
 export interface HorizonErrorResult {
   result_codes: {
