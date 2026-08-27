@@ -11,9 +11,24 @@ import { InvalidParametersError, RWASDKError, NetworkError, ContractError, Trans
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
+import { serializeBigInts, stringifyJSON, parseJSON } from './types';
 
 // Type exports
 export * from './types';
+
+// BigInt JSON serialization exports (Issue #193)
+export {
+  BIGINT_TAG,
+  bigIntReplacer,
+  taggedBigIntReplacer,
+  bigIntReviver,
+  createBigIntReviver,
+  isTaggedBigInt,
+  serializeBigInts,
+  stringifyJSON,
+  parseJSON
+} from './types';
+export type { TaggedBigInt } from './types';
 
 // Custody-related exports
 export {
@@ -81,6 +96,31 @@ export class StellarRWASDK {
       config.stellar.passphrase
     );
     this.logger.info('SDK initialized successfully');
+  }
+
+  /**
+   * Serialize any value (SDK result, portfolio, order book, …) to a
+   * JSON-safe structure with every BigInt rendered as a decimal string.
+   * Use this when returning SDK data from a JSON HTTP API. (Issue #193)
+   */
+  toJSONSafe<T = any>(value: T): any {
+    return serializeBigInts(value);
+  }
+
+  /**
+   * `JSON.stringify` with lossless BigInt support (tagged `{"$bigint":"n"}`
+   * format restored by {@link StellarRWASDK.parseJSON}). (Issue #193)
+   */
+  stringifyJSON(value: any, space?: string | number): string {
+    return stringifyJSON(value, space);
+  }
+
+  /**
+   * `JSON.parse` that restores BigInt values produced by
+   * {@link StellarRWASDK.stringifyJSON}. (Issue #193)
+   */
+  parseJSON<T = any>(text: string): T {
+    return parseJSON<T>(text);
   }
 
   /**
