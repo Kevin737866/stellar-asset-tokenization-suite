@@ -1,4 +1,4 @@
-import { Address, Asset, Operation, Transaction, Server, Horizon } from 'stellar-sdk';
+import { Address, Asset, Operation, Transaction, Horizon } from 'stellar-sdk';
 
 // Core Types
 export interface AssetInfo {

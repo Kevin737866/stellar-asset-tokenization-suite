@@ -283,7 +283,7 @@ describe('validateServerUrl', () => {
 
 describe('validateContractId', () => {
   it('accepts a valid contract ID', () => {
-    expect(() => validateContractId('CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBW0WOWLHGW4UMDBFTRHTO6MCGZTL', 'test'))
+    expect(() => validateContractId('CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBWZWOWLHGW4UMDBFTRHTO6MCGZTL', 'test'))
       .not.toThrow();
   });
 

@@ -3,8 +3,6 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
-use crate::auth::assert_admin;
-
 const STORAGE_VERSION: u32 = 1;
 
 #[contracterror]
@@ -169,15 +167,7 @@ impl ComplianceRegistry {
     }
 
     pub fn migrate(env: Env, auth: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::RegistryNotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
+        crate::shared_admin::require_admin(&env, &auth);
 
         let ver = Self::read_version(&env);
         if ver >= STORAGE_VERSION {
@@ -195,15 +185,7 @@ impl ComplianceRegistry {
     }
 
     pub fn update_kyc_status(env: Env, auth: Address, user: Address, kyc_status: KYCStatus) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
+        crate::shared_admin::require_admin(&env, &auth);
 
         Self::check_version(&env);
 
@@ -234,15 +216,6 @@ impl ComplianceRegistry {
 
     pub fn add_to_blacklist(env: Env, auth: Address, address: Address, reason: Symbol) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -263,15 +236,6 @@ impl ComplianceRegistry {
 
     pub fn remove_from_blacklist(env: Env, auth: Address, address: Address) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -304,15 +268,6 @@ impl ComplianceRegistry {
 
     pub fn add_to_whitelist(env: Env, auth: Address, address: Address) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -335,15 +290,6 @@ impl ComplianceRegistry {
 
     pub fn remove_from_whitelist(env: Env, auth: Address, address: Address) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -722,15 +668,6 @@ impl ComplianceRegistry {
 
     pub fn set_transfer_limits(env: Env, auth: Address, user: Address, limits: TransferLimits) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -762,15 +699,6 @@ impl ComplianceRegistry {
 
     pub fn update_compliance_rule(env: Env, auth: Address, rule: ComplianceRule) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, ComplianceError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 

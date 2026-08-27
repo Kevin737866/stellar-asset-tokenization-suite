@@ -6,7 +6,6 @@ use soroban_sdk::{
 use crate::rwa_token::RWATokenClient;
 use crate::dividend_distributor::DividendDistributorClient;
 use crate::compliance_registry::ComplianceRegistryClient;
-use crate::auth::assert_admin;
 
 const STORAGE_VERSION: u32 = 1;
 
@@ -73,7 +72,6 @@ pub struct MarketConfig {
 
 #[contracttype]
 pub enum DataKey {
-    Admin,
     Config,
     OrderCount,
     TradeCount,
@@ -136,7 +134,7 @@ impl SecondaryMarket {
         min_order_size: i128,
         max_price_deviation_bps: i64,
     ) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&Symbol::new(&env, "admin")) {
             panic_with_error!(&env, MarketError::AlreadyInitialized);
         }
 
@@ -164,7 +162,7 @@ impl SecondaryMarket {
             dividend_distributor,
         };
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        crate::shared_admin::write_admin(&env, &admin, &admin);
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::OrderCount, &0u64);
         env.storage().instance().set(&DataKey::TradeCount, &0u64);
@@ -194,8 +192,7 @@ impl SecondaryMarket {
     }
 
     pub fn migrate(env: Env, auth: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+        crate::shared_admin::require_admin(&env, &auth);
 
         let ver = Self::read_version(&env);
         if ver >= STORAGE_VERSION {
@@ -213,15 +210,15 @@ impl SecondaryMarket {
     }
 
     pub fn update_config(env: Env, auth: Address, config: MarketConfig) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        assert_admin(&auth, &admin);
+        crate::shared_admin::require_admin(&env, &auth);
         env.storage().instance().set(&DataKey::Config, &config);
     }
 
     pub fn update_admin(env: Env, auth: Address, new_admin: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        assert_admin(&auth, &admin);
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        crate::shared_admin::require_admin(&env, &auth);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "admin"), &new_admin);
     }
 
     pub fn place_order(

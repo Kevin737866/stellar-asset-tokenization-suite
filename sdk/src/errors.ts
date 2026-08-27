@@ -1,4 +1,4 @@
-import { ErrorCode } from './types';
+import { ErrorCode, type ParsedHorizonError } from './types';
 
 export interface ErrorInfo {
   code: ErrorCode;
@@ -438,7 +438,7 @@ export const SUGGESTED_ACTIONS: Record<ErrorCode, string> = {
   [ErrorCode.TX_NO_SOURCE_ACCOUNT]: 'Verify the source account exists.',
   [ErrorCode.TX_NO_ACCOUNT]: 'The account does not exist on this network.',
   [ErrorCode.TX_INSUFFICIENT_BALANCE]: 'Fund the account for fees and reserves.',
-  [ErrorCode.TX_BAD_SEQ': 'Refresh the account sequence number and try again.',
+  [ErrorCode.TX_BAD_SEQ]: 'Refresh the account sequence number and try again.',
   [ErrorCode.TX_MEMO_TOO_LONG]: 'Shorten the transaction memo.',
 
   // Simulation errors
@@ -671,6 +671,9 @@ export function describeHorizonError(responseBody: any): string {
  */
 export function describeContractError(errorNumber: number): string {
   const code = contractErrorToCode(errorNumber);
+  if (code === ErrorCode.CONTRACT_ERROR) {
+    return 'Unknown contract error';
+  }
   return ERROR_DESCRIPTIONS[code] ?? 'Unknown contract error';
 }
 

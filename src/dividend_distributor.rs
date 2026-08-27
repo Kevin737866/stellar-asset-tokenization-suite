@@ -144,13 +144,7 @@ impl DividendDistributor {
     }
 
     pub fn migrate(env: Env, auth: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::DistributorNotInitialized); });
-
-        crate::auth::assert_admin(&env, &auth, &admin);
+        crate::shared_admin::require_admin(&env, &auth);
 
         let ver = Self::read_version(&env);
         if ver >= STORAGE_VERSION {
@@ -174,13 +168,6 @@ impl DividendDistributor {
         token_address: Address,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -239,13 +226,6 @@ impl DividendDistributor {
         metadata: Map<Symbol, Symbol>,
     ) -> Vec<u64> {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -305,13 +285,6 @@ impl DividendDistributor {
         }
 
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -630,13 +603,6 @@ impl DividendDistributor {
 
     pub fn update_config(env: Env, auth: Address, config: DividendConfig) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -647,13 +613,6 @@ impl DividendDistributor {
 
     pub fn deactivate_distribution(env: Env, auth: Address, distribution_id: u64) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
