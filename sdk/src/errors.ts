@@ -312,6 +312,11 @@ export const ERROR_DESCRIPTIONS: Record<ErrorCode, string> = {
 
   // Simulation errors (Issue #208)
   [ErrorCode.SIMULATION_FAILED]: 'Transaction simulation failed',
+
+  // Allowance errors (Issue #204)
+  [ErrorCode.INSUFFICIENT_ALLOWANCE]: 'Spender does not have sufficient allowance for this transfer.',
+  [ErrorCode.ALLOWANCE_NOT_FOUND]: 'No allowance record found for the given owner/spender pair.',
+  [ErrorCode.INVALID_ALLOWANCE_AMOUNT]: 'Invalid allowance amount — decrease exceeds the current allowance.',
 };
 
 /**
@@ -438,11 +443,16 @@ export const SUGGESTED_ACTIONS: Record<ErrorCode, string> = {
   [ErrorCode.TX_NO_SOURCE_ACCOUNT]: 'Verify the source account exists.',
   [ErrorCode.TX_NO_ACCOUNT]: 'The account does not exist on this network.',
   [ErrorCode.TX_INSUFFICIENT_BALANCE]: 'Fund the account for fees and reserves.',
-  [ErrorCode.TX_BAD_SEQ': 'Refresh the account sequence number and try again.',
+  [ErrorCode.TX_BAD_SEQ]: 'Refresh the account sequence number and try again.',
   [ErrorCode.TX_MEMO_TOO_LONG]: 'Shorten the transaction memo.',
 
   // Simulation errors
   [ErrorCode.SIMULATION_FAILED]: 'Review the transaction before resubmitting.',
+
+  // Allowance errors (Issue #204)
+  [ErrorCode.INSUFFICIENT_ALLOWANCE]: 'The spender does not have enough allowance to complete this transfer.',
+  [ErrorCode.ALLOWANCE_NOT_FOUND]: 'No allowance has been granted for this owner/spender pair.',
+  [ErrorCode.INVALID_ALLOWANCE_AMOUNT]: 'The allowance amount is invalid (e.g. decrease exceeds current allowance).',
 };
 
 /**
