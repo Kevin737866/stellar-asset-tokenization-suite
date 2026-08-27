@@ -1,4 +1,12 @@
 import { ErrorCode } from './types';
+import type { ParsedHorizonError } from './types';
+import {
+  DEFAULT_RETRY_CONFIG,
+  RETRYABLE_HTTP_STATUS_CODES,
+  RETRYABLE_NETWORK_ERROR_CODES,
+  RETRYABLE_STELLAR_RESULT_CODES,
+  RETRYABLE_ERROR_MESSAGE_PATTERNS,
+} from './constants';
 
 export interface ErrorInfo {
   code: ErrorCode;
@@ -438,7 +446,7 @@ export const SUGGESTED_ACTIONS: Record<ErrorCode, string> = {
   [ErrorCode.TX_NO_SOURCE_ACCOUNT]: 'Verify the source account exists.',
   [ErrorCode.TX_NO_ACCOUNT]: 'The account does not exist on this network.',
   [ErrorCode.TX_INSUFFICIENT_BALANCE]: 'Fund the account for fees and reserves.',
-  [ErrorCode.TX_BAD_SEQ': 'Refresh the account sequence number and try again.',
+  [ErrorCode.TX_BAD_SEQ]: 'Refresh the account sequence number and try again.',
   [ErrorCode.TX_MEMO_TOO_LONG]: 'Shorten the transaction memo.',
 
   // Simulation errors
@@ -681,4 +689,267 @@ export function fromContractError(errorNumber: number, details?: any): RWASDKErr
   const code = contractErrorToCode(errorNumber);
   const message = ERROR_DESCRIPTIONS[code] ?? `Unknown contract error (${errorNumber})`;
   return new RWASDKError(code, message, details);
+}
+
+// ---------------------------------------------------------------------------
+// Retry logic with exponential backoff (Issue #191)
+// ---------------------------------------------------------------------------
+
+/**
+ * Raised when a rate limit (HTTP 429) is hit. Retryable.
+ */
+export class RateLimitError extends RWASDKError {
+  public retryAfterMs?: number;
+  constructor(message?: string, details?: { retryAfterMs?: number } & Record<string, any>) {
+    super(ErrorCode.NETWORK_ERROR, message ?? 'Rate limit exceeded', details);
+    this.name = 'RateLimitError';
+    this.retryAfterMs = details?.retryAfterMs;
+  }
+}
+
+/**
+ * Raised when Horizon rejects a submission because its mempool/queue is full
+ * (typically surfaced as HTTP 503 or a 504 timeout). Retryable.
+ */
+export class MempoolFullError extends RWASDKError {
+  constructor(message?: string, details?: any) {
+    super(ErrorCode.NETWORK_ERROR, message ?? 'Transaction queue is full; retry shortly', details);
+    this.name = 'MempoolFullError';
+  }
+}
+
+export interface RetryConfig {
+  /** Maximum number of retries *after* the initial attempt. */
+  maxRetries: number;
+  /** Delay before the first retry, in milliseconds. */
+  baseDelayMs: number;
+  /** Upper bound for any single delay, in milliseconds. */
+  maxDelayMs: number;
+  /** Multiplier applied to the delay after each attempt. */
+  backoffMultiplier: number;
+  /** Fraction of the delay applied as +/- random jitter (0..1). Default 0.2. */
+  jitter?: number;
+}
+
+export const defaultRetryConfig: RetryConfig = { ...DEFAULT_RETRY_CONFIG };
+
+export type RetryEventType = 'retry' | 'exhausted' | 'succeeded';
+
+/** Emitted around each retry so a UI can surface progress/backoff state. */
+export interface RetryEvent {
+  type: RetryEventType;
+  /** 1-based index of the attempt that just failed (for 'retry'/'exhausted'). */
+  attempt: number;
+  /** Total attempts allowed (maxRetries + 1). */
+  maxAttempts: number;
+  /** Delay in ms before the next attempt (0 for 'exhausted'/'succeeded'). */
+  delayMs: number;
+  /** The error that triggered the retry, if any. */
+  error?: unknown;
+}
+
+export type RetryEventListener = (event: RetryEvent) => void;
+
+export interface RetryClassification {
+  retryable: boolean;
+  reason: string;
+}
+
+function messageOf(error: unknown): string {
+  if (!error) return '';
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message || '';
+  const anyErr = error as any;
+  return String(anyErr.message ?? anyErr.detail ?? anyErr.title ?? '');
+}
+
+function statusOf(error: unknown): number | undefined {
+  const e = error as any;
+  if (!e) return undefined;
+  const raw =
+    e.status ??
+    e.statusCode ??
+    e.response?.status ??
+    e.response?.statusCode ??
+    e.details?.status ??
+    e.extras?.status;
+  const n = typeof raw === 'string' ? parseInt(raw, 10) : raw;
+  return typeof n === 'number' && !Number.isNaN(n) ? n : undefined;
+}
+
+function networkCodeOf(error: unknown): string | undefined {
+  const e = error as any;
+  return e?.code ?? e?.errno ?? e?.cause?.code ?? undefined;
+}
+
+/**
+ * Classify an error as retryable (transient) or not, with a human-readable
+ * reason. Non-retryable errors: invalid signature, insufficient funds/balance,
+ * contract errors, unauthorized, invalid parameters, KYC/compliance failures.
+ */
+export function classifyError(error: unknown): RetryClassification {
+  const message = messageOf(error).toLowerCase();
+  const status = statusOf(error);
+  const netCode = networkCodeOf(error);
+
+  // --- explicitly retryable types -----------------------------------------
+  if (error instanceof RateLimitError) return { retryable: true, reason: 'rate limited (429)' };
+  if (error instanceof MempoolFullError) return { retryable: true, reason: 'mempool full' };
+  if (error instanceof TimeoutError) return { retryable: true, reason: 'request timed out' };
+
+  // --- explicitly non-retryable RWASDKError codes ------------------------
+  if (error instanceof RWASDKError) {
+    const nonRetryable: ErrorCode[] = [
+      ErrorCode.INVALID_SIGNATURE,
+      ErrorCode.INSUFFICIENT_BALANCE,
+      ErrorCode.INSUFFICIENT_FUNDS,
+      ErrorCode.CONTRACT_ERROR,
+      ErrorCode.UNAUTHORIZED,
+      ErrorCode.INVALID_PARAMETERS,
+      ErrorCode.COMPLIANCE_FAILED,
+      ErrorCode.COMPLIANCE_CHECK_FAILED,
+      ErrorCode.KYC_NOT_VERIFIED,
+      ErrorCode.KYC_REQUIRED,
+      ErrorCode.BLACKLISTED,
+      ErrorCode.ALREADY_CLAIMED,
+      ErrorCode.TX_BAD_AUTH,
+      ErrorCode.TX_MALFORMED,
+      ErrorCode.OP_UNDERFUNDED,
+      ErrorCode.OP_NOT_AUTHORIZED,
+    ];
+    if (nonRetryable.includes(error.code)) {
+      return { retryable: false, reason: `non-retryable error code: ${error.code}` };
+    }
+    if (error.code === ErrorCode.NETWORK_ERROR || error.code === ErrorCode.TIMEOUT) {
+      return { retryable: true, reason: `transient error code: ${error.code}` };
+    }
+  }
+
+  // --- Horizon / Stellar result codes -----------------------------------
+  const stellarResultCode: string | undefined =
+    (error as any)?.stellarResultCode ?? (error as any)?.details?.stellarResultCode;
+  if (stellarResultCode) {
+    if (RETRYABLE_STELLAR_RESULT_CODES.includes(stellarResultCode)) {
+      return { retryable: true, reason: `retryable stellar result code: ${stellarResultCode}` };
+    }
+    if (stellarResultCode === 'tx_bad_auth' || stellarResultCode.startsWith('op_')) {
+      return { retryable: false, reason: `non-retryable stellar result code: ${stellarResultCode}` };
+    }
+  }
+
+  // --- HTTP status ------------------------------------------------------
+  if (status !== undefined) {
+    if (RETRYABLE_HTTP_STATUS_CODES.includes(status)) {
+      return { retryable: true, reason: `retryable HTTP status ${status}` };
+    }
+    if (status >= 400 && status < 500) {
+      return { retryable: false, reason: `client error HTTP status ${status}` };
+    }
+  }
+
+  // --- socket-level network errors ------------------------------------
+  if (netCode && RETRYABLE_NETWORK_ERROR_CODES.includes(String(netCode))) {
+    return { retryable: true, reason: `network error ${netCode}` };
+  }
+
+  // --- message heuristics -------------------------------------------
+  if (message && RETRYABLE_ERROR_MESSAGE_PATTERNS.some((p) => message.includes(p))) {
+    return { retryable: true, reason: 'transient error message' };
+  }
+  if (message.includes('invalid signature') || message.includes('bad signature')) {
+    return { retryable: false, reason: 'invalid signature' };
+  }
+  if (message.includes('insufficient') && (message.includes('fund') || message.includes('balance'))) {
+    return { retryable: false, reason: 'insufficient funds' };
+  }
+
+  return { retryable: false, reason: 'unclassified error treated as non-retryable' };
+}
+
+/** Convenience predicate around {@link classifyError}. */
+export function isRetryableError(error: unknown): boolean {
+  return classifyError(error).retryable;
+}
+
+/**
+ * Compute the backoff delay (ms) for a given 0-based retry index.
+ * delay = min(maxDelayMs, baseDelayMs * multiplier^index), then +/- jitter.
+ */
+export function computeRetryDelay(
+  retryIndex: number,
+  config: RetryConfig = defaultRetryConfig,
+  rng: () => number = Math.random
+): number {
+  const base = config.baseDelayMs * Math.pow(config.backoffMultiplier, Math.max(0, retryIndex));
+  const capped = Math.min(config.maxDelayMs, base);
+  const jitterFraction = config.jitter ?? 0;
+  if (jitterFraction <= 0) return Math.round(capped);
+  const delta = capped * jitterFraction * (rng() * 2 - 1);
+  return Math.max(0, Math.round(capped + delta));
+}
+
+export interface WithRetryOptions {
+  config?: Partial<RetryConfig>;
+  /** Receives retry lifecycle events for UI feedback. */
+  onRetryEvent?: RetryEventListener;
+  /** Custom retryable predicate (defaults to {@link isRetryableError}). */
+  isRetryable?: (error: unknown) => boolean;
+  /** Abort further retries. */
+  signal?: { aborted: boolean };
+  /** Injected sleep (mainly for tests). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injected RNG for deterministic jitter (mainly for tests). */
+  rng?: () => number;
+}
+
+const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Execute `fn`, retrying transient failures with exponential backoff.
+ * Re-throws the last error once retries are exhausted or the error is
+ * classified as non-retryable.
+ *
+ * @param fn Receives the 1-based attempt number.
+ */
+export async function withRetry<T>(
+  fn: (attempt: number) => Promise<T>,
+  options: WithRetryOptions = {}
+): Promise<T> {
+  const config: RetryConfig = { ...defaultRetryConfig, ...(options.config ?? {}) };
+  const isRetryable = options.isRetryable ?? isRetryableError;
+  const emit = options.onRetryEvent ?? (() => undefined);
+  const sleep = options.sleep ?? realSleep;
+  const rng = options.rng ?? Math.random;
+  const maxAttempts = config.maxRetries + 1;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (options.signal?.aborted) {
+      throw lastError ?? new RWASDKError(ErrorCode.TIMEOUT, 'Retry aborted');
+    }
+    try {
+      const result = await fn(attempt);
+      if (attempt > 1) {
+        emit({ type: 'succeeded', attempt, maxAttempts, delayMs: 0 });
+      }
+      return result;
+    } catch (error) {
+      lastError = error;
+      const isLast = attempt >= maxAttempts;
+      if (isLast || !isRetryable(error)) {
+        if (isLast && isRetryable(error)) {
+          emit({ type: 'exhausted', attempt, maxAttempts, delayMs: 0, error });
+        }
+        throw error;
+      }
+      let delayMs = computeRetryDelay(attempt - 1, config, rng);
+      if (error instanceof RateLimitError && typeof error.retryAfterMs === 'number') {
+        delayMs = Math.max(delayMs, error.retryAfterMs);
+      }
+      emit({ type: 'retry', attempt, maxAttempts, delayMs, error });
+      await sleep(delayMs);
+    }
+  }
+  // Unreachable, but satisfies the type checker.
+  throw lastError;
 }

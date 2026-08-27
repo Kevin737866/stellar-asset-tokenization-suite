@@ -9,6 +9,8 @@ import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
 import { InvalidParametersError, RWASDKError, NetworkError, ContractError, TransactionError, HorizonError, parseHorizonError, describeHorizonError } from './errors';
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
+import { withRetry, defaultRetryConfig } from './errors';
+import type { RetryConfig, WithRetryOptions, RetryEventListener } from './errors';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 
@@ -38,6 +40,31 @@ export {
 
 // Error exports - avoid re-exporting RWASDKError since it's already exported from types
 export * from './errors';
+
+// Retry / backoff exports (Issue #191)
+export {
+  withRetry,
+  classifyError,
+  isRetryableError,
+  computeRetryDelay,
+  defaultRetryConfig,
+  RateLimitError,
+  MempoolFullError
+} from './errors';
+export type {
+  RetryConfig,
+  WithRetryOptions,
+  RetryEvent,
+  RetryEventType,
+  RetryEventListener,
+  RetryClassification
+} from './errors';
+export {
+  DEFAULT_RETRY_CONFIG,
+  RETRYABLE_HTTP_STATUS_CODES,
+  RETRYABLE_NETWORK_ERROR_CODES,
+  RETRYABLE_STELLAR_RESULT_CODES
+} from './constants';
 export {
   HorizonError,
   parseHorizonError,
@@ -59,10 +86,15 @@ export class StellarRWASDK {
 
   private _portfolioCache: Map<string, { data: Portfolio; expiry: number }> = new Map();
 
-  constructor(config: RWASDKConfig) {
+  /** Active retry policy for transient network failures (Issue #191). */
+  public retryConfig: RetryConfig;
+  private _retryListener?: RetryEventListener;
+
+  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
     this.config = config;
+    this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
     this.logger.info('Initializing SDK', { network: config.stellar.network, serverUrl: config.stellar.serverUrl });
     
@@ -81,6 +113,32 @@ export class StellarRWASDK {
       config.stellar.passphrase
     );
     this.logger.info('SDK initialized successfully');
+  }
+
+  /**
+   * Register a listener for retry lifecycle events (retry / exhausted /
+   * succeeded) so a UI can surface backoff progress. (Issue #191)
+   */
+  onRetry(listener: RetryEventListener): void {
+    this._retryListener = listener;
+  }
+
+  /**
+   * Run an operation with the SDK's retry policy. Transient failures
+   * (network timeout, HTTP 429, Horizon 504, mempool full) are retried with
+   * exponential backoff; deterministic failures (invalid signature,
+   * insufficient funds, contract errors) are re-thrown immediately.
+   * (Issue #191)
+   */
+  async withRetry<T>(
+    fn: (attempt: number) => Promise<T>,
+    options: WithRetryOptions = {}
+  ): Promise<T> {
+    return withRetry(fn, {
+      config: this.retryConfig,
+      onRetryEvent: this._retryListener,
+      ...options,
+    });
   }
 
   /**

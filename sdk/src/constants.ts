@@ -72,3 +72,68 @@ export const MINUTES_PER_HOUR = 60;
 export const HOURS_PER_DAY = 24;
 export const SALT_WORD_COUNT = 12;
 export const DEFAULT_SALT_STRENGTH = 128;
+
+// Retry / backoff configuration (Issue #191)
+
+/** Default retry policy applied to transient network failures. */
+export const DEFAULT_RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelayMs: 500,
+  maxDelayMs: 30_000,
+  backoffMultiplier: 2,
+  /** Fraction of the computed delay applied as +/- random jitter (0..1). */
+  jitter: 0.2,
+} as const;
+
+/** HTTP status codes that indicate a transient, retryable failure. */
+export const RETRYABLE_HTTP_STATUS_CODES: readonly number[] = [
+  408, // Request Timeout
+  425, // Too Early
+  429, // Too Many Requests
+  500, // Internal Server Error (Horizon transient)
+  502, // Bad Gateway
+  503, // Service Unavailable
+  504, // Gateway Timeout (Horizon submit timeout)
+];
+
+/** Node.js socket error codes that indicate a transient network failure. */
+export const RETRYABLE_NETWORK_ERROR_CODES: readonly string[] = [
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+];
+
+/**
+ * Stellar result codes (transaction- or operation-level) that are safe to
+ * retry — the transaction never made it into the ledger.
+ */
+export const RETRYABLE_STELLAR_RESULT_CODES: readonly string[] = [
+  'tx_too_late',
+  'tx_insufficient_fee',
+  'tx_bad_seq',
+  'tx_internal_error',
+  'tx_fee_bump_inner_failed',
+];
+
+/**
+ * Substrings that, when present in an error message, mark it retryable.
+ * Covers Horizon "mempool full" / rate-limit style responses.
+ */
+export const RETRYABLE_ERROR_MESSAGE_PATTERNS: readonly string[] = [
+  'timeout',
+  'timed out',
+  'mempool is full',
+  'mempool full',
+  'too many requests',
+  'rate limit',
+  'try again',
+  'temporarily unavailable',
+  'connection reset',
+  'socket hang up',
+];
