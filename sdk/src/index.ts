@@ -1,5 +1,8 @@
-// Main SDK exports
+// ─── Third-party ─────────────────────────────────────────────────────────────
+import { Address } from 'stellar-sdk';
 export { Address } from 'stellar-sdk';
+
+// ─── Internal modules ─────────────────────────────────────────────────────────
 import { AssetFactory } from './assetFactory';
 import { TokenClient } from './tokenClient';
 import { DividendClient } from './dividendClient';
@@ -7,42 +10,116 @@ import { MarketClient } from './marketClient';
 import { ComplianceClient } from './complianceClient';
 import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
-import { InvalidParametersError, RWASDKError, NetworkError, ContractError, TransactionError, HorizonError, parseHorizonError, describeHorizonError } from './errors';
-import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
-import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
-
-// Type exports
-export * from './types';
-
-// Custody-related exports
-export {
-    CustodyClient,
-    CustodyMonitoring,
-    type CustodyAttestation,
-    type CustodianRegistry,
-    type DisputeRecord,
-    type VerificationTypeConfig,
-    type InsuranceIntegration,
-    type CustodianProfile,
-    type ProofData
-} from './custody';
-
-export {
-    type CustodyAlert,
-    type CustodianMetrics,
-    type AssetDepreciationData,
-    type InsuranceStatus,
-    type MonitoringConfig
-} from './custodyMonitoring';
-
-// Error exports - avoid re-exporting RWASDKError since it's already exported from types
-export * from './errors';
-export {
+import {
+  InvalidParametersError,
+  RWASDKError,
+  NetworkError,
+  ContractError,
+  TransactionError,
   HorizonError,
   parseHorizonError,
   describeHorizonError,
-  type ParsedHorizonError
+} from './errors';
+import {
+  DEFAULT_DECIMALS,
+  DEFAULT_FEE_RATE,
+  DEFAULT_TIMEOUT_SECONDS,
+  STELLAR_NETWORKS,
+} from './constants';
+import { createLogger, Logger } from './logger';
+import {
+  validateAddress,
+  validateAmount,
+  validateNonEmptyString,
+  validatePositiveInteger,
+  validateServerUrl,
+  validateContractId,
+  validateBoolean,
+  validateEnum,
+  validateRange,
+} from './validation';
+
+// ─── Type imports (one-way: index → types, never types → index) ───────────────
+import type {
+  RWASDKConfig,
+  AssetInfo,
+  Balance,
+  KYCStatus,
+  DividendDistribution,
+  Order,
+  Trade,
+  TransactionOptions,
+  DeploymentOptions,
+  Portfolio,
+  AssetHolding,
+  SimulationResult,
+  SimulationEvent,
+  StorageChange,
+  SimulationOptions,
+} from './types';
+
+// ─── All public types re-exported from the types module ───────────────────────
+// This is the SINGLE re-export of every shared type. No other module should
+// re-export from types.ts to prevent accidental circular paths.
+export * from './types';
+
+// ─── Custody module exports ───────────────────────────────────────────────────
+export {
+  CustodyClient,
+  type CustodyAttestation,
+  type CustodianRegistry,
+  type DisputeRecord,
+  type VerificationTypeConfig,
+  type InsuranceIntegration,
+  type CustodianProfile,
+  type ProofData,
+} from './custody';
+
+export {
+  CustodyMonitoring,
+  type CustodyAlert,
+  type CustodianMetrics,
+  type AssetDepreciationData,
+  type InsuranceStatus,
+  type MonitoringConfig,
+} from './custodyMonitoring';
+
+// ─── Error module exports ─────────────────────────────────────────────────────
+// We export the ERROR CLASS as `RWASDKErrorClass` to avoid a name collision
+// with the `RWASDKError` *interface* already re-exported from `types.ts` above.
+// Consumers who need the class should import `RWASDKErrorClass` or the
+// specific subclasses (NetworkError, TransactionError, etc.).
+export {
+  RWASDKError as RWASDKErrorClass,
+  NetworkError,
+  TransactionError,
+  InsufficientBalanceError,
+  ComplianceError,
+  UnauthorizedError,
+  InvalidParametersError,
+  TimeoutError,
+  ContractError,
+  OracleError,
+  AssetNotFoundError,
+  OrderNotFoundError,
+  DistributionNotFoundError,
+  ProofNotFoundError,
+  KYCNotVerifiedError,
+  AssetFrozenError,
+  TransferPausedError,
+  CustodyError,
+  VerificationFailedError,
+  InsufficientBondError,
+  HorizonError,
+  parseHorizonError,
+  describeHorizonError,
+  getErrorInfo,
+  contractErrorToCode,
+  describeContractError,
+  fromContractError,
+  ERROR_DESCRIPTIONS,
+  SUGGESTED_ACTIONS,
+  type ErrorInfo,
 } from './errors';
 
 // Configuration utilities
@@ -482,31 +559,7 @@ export class StellarRWASDK {
   }
 }
 
-// Re-export types for convenience
-import type { 
-  RWASDKConfig, 
-  Address, 
-  AssetInfo, 
-  Balance, 
-  KYCStatus, 
-  DividendDistribution, 
-  Order, 
-  Trade, 
-  TransactionOptions, 
-  DeploymentOptions,
-  AssetType,
-  Currency,
-  OrderType,
-  VerificationLevel,
-  SimulationResult,
-  SimulationEvent,
-  StorageChange,
-  SimulationOptions,
-  Portfolio,
-  AssetHolding
-} from './types';
-
-// Factory function to create SDK instance with common configurations
+// ─── Factory Function ─────────────────────────────────────────────────────────
 export function createStellarRWASDK(
   network: 'testnet' | 'mainnet' | 'futurenet' | 'standalone',
   contracts: {
@@ -589,26 +642,5 @@ export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS)
   return (wholeBigInt * divisor + fractionalBigInt).toString();
 }
 
-// Export all types and classes
-export {
-  // Types
-  type RWASDKConfig,
-  type Address,
-  type AssetInfo,
-  type Balance,
-  type KYCStatus,
-  type DividendDistribution,
-  type Order,
-  type Trade,
-  type TransactionOptions,
-  type DeploymentOptions,
-  type AssetType,
-  type Currency,
-  type OrderType,
-  type VerificationLevel,
-  type Portfolio,
-  type AssetHolding,
-  
-  // Classes
-  StellarRWASDK as default
-};
+// ─── Default export ───────────────────────────────────────────────────────────
+export default StellarRWASDK;

@@ -8,15 +8,27 @@ import {
   xdr,
   ScInt
 } from 'stellar-sdk';
-import { 
+import type { 
   AssetInfo, 
   Balance, 
   TransferOptions, 
   TransactionOptions, 
-  RWASDKConfig, 
-  RWASDKError
+  RWASDKConfig,
+  ErrorCode,
 } from './types';
-import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, TransactionError, ContractError } from './errors';
+// RWASDKError is imported as the class (not the interface) from errors.ts.
+// The interface RWASDKError in types.ts is not imported here to avoid
+// the same-name confusion. All runtime usage uses the class.
+import {
+  RWASDKError,
+  contractErrorToCode,
+  TimeoutError,
+  InsufficientBalanceError,
+  UnauthorizedError,
+  TransactionError,
+  ContractError,
+  InvalidParametersError,
+} from './errors';
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
@@ -445,7 +457,7 @@ export class TokenClient {
         hasMore: payments.records.length > 0,
         nextCursor: payments.records.length > 0 ? payments.records[payments.records.length - 1].paging_token : undefined
       };
-      throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'getTransferHistory not implemented');
+      throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'getTransferHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
@@ -533,8 +545,8 @@ export class TokenClient {
     throw new UnauthorizedError('signTransaction requires a configured secretKey in the SDK config');
   }
 
-  private handleError(error: unknown): RWASDKErrorClass {
-    if (error instanceof RWASDKErrorClass) {
+  private handleError(error: unknown): RWASDKError {
+    if (error instanceof RWASDKError) {
       return error;
     }
 
@@ -557,7 +569,7 @@ export class TokenClient {
     const match = message.match(/ContractError\((\d+)\)/);
     if (match) {
       const code = contractErrorToCode(parseInt(match[1]));
-      return new RWASDKErrorClass(code, message);
+      return new RWASDKError(code, message);
     }
 
     return new ContractError(message);

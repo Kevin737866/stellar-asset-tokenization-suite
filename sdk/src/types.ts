@@ -1,4 +1,16 @@
-import { Address, Asset, Operation, Transaction, Server, Horizon } from 'stellar-sdk';
+// ─── types.ts ─────────────────────────────────────────────────────────────────
+// Single source of truth for all SDK types.
+// IMPORTANT: This module must NEVER import from any other internal SDK module
+// (index.ts, errors.ts, validation.ts, etc.) to maintain a strict one-way
+// dependency graph:
+//
+//   index.ts  →  types.ts  (re-exports)
+//   errors.ts →  types.ts  (ErrorCode, ParsedHorizonError)
+//   clients   →  types.ts  (domain types)
+//
+// Verified with: npx madge --circular sdk/src/index.ts
+// ─────────────────────────────────────────────────────────────────────────────
+import { Address } from 'stellar-sdk';
 
 // Core Types
 export interface AssetInfo {
