@@ -7,7 +7,7 @@ import {
   scValToNative, 
   nativeToScVal 
 } from 'stellar-sdk';
-import { RWASDKConfig, TransactionOptions, Order, Trade, OrderBook, Address } from './types';
+import { RWASDKConfig, TransactionOptions, Order, Trade, OrderBook } from './types';
 import { formatAmount, parseAmount } from './index';
 import { DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
