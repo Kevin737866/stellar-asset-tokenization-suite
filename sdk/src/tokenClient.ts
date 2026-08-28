@@ -48,6 +48,7 @@ export class TokenClient {
   }
 
   async getBalance(address: Address): Promise<Balance> {
+    validateAddress(address, 'address');
     try {
       const result = await this.contract.call('get_balance', new Address(address));
       const balance = this.convertScValToBalance(result.result);
@@ -236,6 +237,8 @@ export class TokenClient {
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAmount(amount, 'amount');
     this.logger.info('Unlocking tokens', { owner: owner.toString(), amount });
     try {
       const account = await this.server.getAccount(owner.toString());
@@ -425,6 +428,8 @@ export class TokenClient {
     hasMore: boolean;
     nextCursor?: string;
   }> {
+    validateAddress(address, 'address');
+    validatePositiveInteger(limit, 'limit');
     try {
       const payments = await this.server.payments()
         .forAccount(address.toString())
@@ -461,6 +466,9 @@ export class TokenClient {
     totalFee: string;
     feeCurrency: string;
   }> {
+    validateAddress(from, 'from');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
     try {
       const baseFee = (this.config.defaultFeeRate || DEFAULT_FEE_RATE).toString();
       return {
@@ -483,6 +491,9 @@ export class TokenClient {
     reason?: string;
     restrictions?: string[];
   }> {
+    validateAddress(from, 'from');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
     try {
       const result = await this.contract.call(
         'check_transfer_compliance', 

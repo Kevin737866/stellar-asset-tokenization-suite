@@ -154,6 +154,8 @@ export class CustodyClient {
         validateNonEmptyString(profile.name, 'name');
         validateNonEmptyString(profile.jurisdiction, 'jurisdiction');
         validateNonEmptyString(profile.licenseNumber, 'licenseNumber');
+        if (profile.bondRequired) validateAmount(profile.bondRequired, 'bondRequired');
+        validateNonEmptyString(profile.insuranceProvider, 'insuranceProvider');
         this.logger.info('Registering custodian', { name: profile.name, address: signerKeypair.publicKey() });
         const account = await this.server.loadAccount(signerKeypair.publicKey());
         
@@ -288,6 +290,7 @@ export class CustodyClient {
     }
 
     async getCustodyHistory(assetId: string): Promise<CustodyAttestation[]> {
+        validateNonEmptyString(assetId, 'assetId');
         const attestations: CustodyAttestation[] = [];
         return attestations;
     }
