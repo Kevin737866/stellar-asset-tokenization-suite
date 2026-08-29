@@ -287,6 +287,58 @@ export interface SimulationOptions {
   feeEstimation?: boolean;
 }
 
+// ─── Batch Transaction Types ─────────────────────────────────────────────────
+
+/**
+ * A single contract-call operation to be included in a batch transaction.
+ *
+ * Each operation targets one Soroban contract function. Multiple operations
+ * from different contracts may be mixed in the same batch (cross-contract).
+ */
+export interface BatchTransactionOperation {
+  /** Human-readable label for this operation — appears in logs and error messages. */
+  label: string;
+  /** The Soroban contract ID to invoke (C…56 chars). */
+  contractId: string;
+  /** The contract function name to call. */
+  functionName: string;
+  /** XDR-encoded arguments to pass to the function. */
+  args: unknown[];
+  /**
+   * Optional fee contribution for this operation in stroops.
+   * When omitted the builder applies a conservative per-operation default.
+   */
+  fee?: number;
+}
+
+/**
+ * Result returned after a batch transaction has been submitted.
+ *
+ * Because Stellar transactions are atomic, either ALL operations succeed or
+ * ALL are reverted. The \`operationResults\` array reflects the outcome for
+ * each operation in the same order they were added via \`add()\`.
+ */
+export interface BatchTransactionResult {
+  /** Stellar transaction hash of the submitted envelope. */
+  transactionHash: string;
+  /** \`true\` when the entire batch was accepted; \`false\` on network rejection. */
+  success: boolean;
+  /**
+   * Per-operation outcome in insertion order.
+   * On failure all entries will have \`success: false\` and an \`errorMessage\`
+   * because Stellar atomically reverts the whole transaction.
+   */
+  operationResults: Array<{
+    label: string;
+    success: boolean;
+    errorMessage?: string;
+  }>;
+  /** Actual fee consumed in stroops (as a decimal string). */
+  totalFee: string;
+  /** Estimated gas for the batch — sum of per-operation fees plus overhead. */
+  estimatedGas: string;
+}
+
 export interface TransferOptions {
   from?: Address;
   to?: Address;
@@ -560,6 +612,14 @@ export enum ErrorCode {
 
   // Simulation errors (Issue #208)
   SIMULATION_FAILED = 'SIMULATION_FAILED',
+
+  // Batch transaction errors
+  /** Submitted a batch with zero operations. */
+  BATCH_EMPTY = 'BATCH_EMPTY',
+  /** One or more operations in the batch failed; Stellar reverted all of them. */
+  BATCH_PARTIAL_FAILURE = 'BATCH_PARTIAL_FAILURE',
+  /** The batch exceeds the maximum number of allowed operations. */
+  BATCH_SIZE_EXCEEDED = 'BATCH_SIZE_EXCEEDED',
 }
 
 // Utility Types

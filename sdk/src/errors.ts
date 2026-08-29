@@ -1,4 +1,4 @@
-import { ErrorCode } from './types';
+import { ErrorCode, ParsedHorizonError } from './types';
 
 export interface ErrorInfo {
   code: ErrorCode;
@@ -312,6 +312,11 @@ export const ERROR_DESCRIPTIONS: Record<ErrorCode, string> = {
 
   // Simulation errors (Issue #208)
   [ErrorCode.SIMULATION_FAILED]: 'Transaction simulation failed',
+
+  // Batch transaction errors
+  [ErrorCode.BATCH_EMPTY]: 'The batch contains no operations',
+  [ErrorCode.BATCH_PARTIAL_FAILURE]: 'One or more operations in the batch failed; the entire batch was reverted',
+  [ErrorCode.BATCH_SIZE_EXCEEDED]: 'The batch exceeds the maximum allowed number of operations',
 };
 
 /**
@@ -443,6 +448,11 @@ export const SUGGESTED_ACTIONS: Record<ErrorCode, string> = {
 
   // Simulation errors
   [ErrorCode.SIMULATION_FAILED]: 'Review the transaction before resubmitting.',
+
+  // Batch transaction errors
+  [ErrorCode.BATCH_EMPTY]: 'Add at least one operation via add() before calling build() or submit().',
+  [ErrorCode.BATCH_PARTIAL_FAILURE]: 'Identify the failing operation and fix it, then resubmit the entire batch.',
+  [ErrorCode.BATCH_SIZE_EXCEEDED]: 'Split the operations into smaller batches (max 50 per batch).',
 };
 
 /**
