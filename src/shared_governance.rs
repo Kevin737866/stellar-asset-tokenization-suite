@@ -39,8 +39,9 @@ pub struct Proposal {
     pub proposal_key: Symbol,
     pub payload_hash: soroban_sdk::BytesN<32>,
     pub created_at: u64,
+    pub review_until: u64,
     pub executable_after: u64,
-    pub approvals: soroban_sdk::Vec<Address>,
+    pub approvals: Vec<Address>,
     pub executed: bool,
     pub vetoed: bool,
     pub veto_votes: soroban_sdk::Vec<Address>,
@@ -49,7 +50,7 @@ pub struct Proposal {
 pub fn write_governance(
     env: &Env,
     auth: &Address,
-    owners: &soroban_sdk::Vec<Address>,
+    owners: &Vec<Address>,
     threshold: u32,
     timelock_seconds: u64,
 ) {
@@ -72,6 +73,14 @@ pub fn write_governance(
         .set(&timelock_key, &timelock_seconds);
     env.storage().instance().set(&init_key, &true);
 
+    // default quorum (20%) for normal proposals
+    let default_quorum = QuorumConfig {
+        min_participation_bps: 2000,
+    };
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "gov_quorum_config"), &default_quorum);
+
     // proposal id counter
     env.storage()
         .instance()
@@ -83,7 +92,7 @@ pub fn write_governance(
         .set(&Symbol::new(env, "gov_min_proposal_balance"), &0u128);
 }
 
-fn read_owners(env: &Env) -> soroban_sdk::Vec<Address> {
+fn read_owners(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
         .get(&Symbol::new(env, "gov_owners"))
@@ -236,14 +245,18 @@ pub fn create_proposal(
 
     let timelock = read_timelock_seconds(&env);
     let now = env.ledger().timestamp();
+    let review_period = get_category_review_period(&env, &category);
+    let review_until = now + review_period;
+    let executable_after = review_until + timelock;
 
     let proposal = Proposal {
         id: proposal_count + 1,
         proposal_key,
+        category,
         payload_hash,
         created_at: now,
         executable_after: now + timelock,
-        approvals: soroban_sdk::Vec::<Address>::new(&env),
+        approvals: Vec::<Address>::new(&env),
         executed: false,
         vetoed: false,
         veto_votes: soroban_sdk::Vec::<Address>::new(&env),
@@ -257,14 +270,103 @@ pub fn create_proposal(
         .unwrap_or(soroban_sdk::Map::new(&env));
 
     let id = proposal.id;
-    proposals.set(id, proposal);
+    proposals.set(id, proposal.clone());
     env.storage().instance().set(&proposals_key, &proposals);
 
     env.storage()
         .instance()
         .set(&Symbol::new(&env, "gov_proposal_count"), &(id));
 
+    env.events().publish(
+        (
+            Symbol::new(&env, "governance"),
+            Symbol::new(&env, "proposal_created"),
+            ProposalType::Normal,
+        ),
+        proposal,
+    );
+
     id
+}
+
+/// Create an emergency proposal. Emergency proposals undergo a short review
+/// window, require a much higher threshold, and expire if not executed in time.
+pub fn create_emergency_proposal(
+    env: Env,
+    proposer: Address,
+    proposal_key: Symbol,
+    payload_hash: Bytes,
+) -> u64 {
+    proposer.require_auth();
+
+    if !is_owner(&env, &proposer) {
+        panic_with_error!(&env, GovernanceError::Unauthorized);
+    }
+
+    let proposal_count: u64 = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(&env, "gov_proposal_count"))
+        .unwrap_or(0u64);
+
+    // Emergency proposals require the configured review window regardless of
+    // the configured timelock, and auto-expire after 48h if not executed.
+    let emergency_review_seconds: u64 = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(&env, "gov_emergency_review_seconds"))
+        .unwrap_or(3600u64);
+
+    let now = env.ledger().timestamp();
+
+    let proposal = Proposal {
+        id: proposal_count + 1,
+        proposal_key,
+        payload_hash,
+        created_at: now,
+        executable_after: now + emergency_review_seconds,
+        approvals: Vec::<Address>::new(&env),
+        executed: false,
+        proposal_type: ProposalType::Emergency,
+    };
+
+    let proposals_key = Symbol::new(&env, "gov_proposals");
+    let mut proposals: soroban_sdk::Map<u64, Proposal> = env
+        .storage()
+        .instance()
+        .get(&proposals_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+
+    let id = proposal.id;
+    proposals.set(id, proposal.clone());
+    env.storage().instance().set(&proposals_key, &proposals);
+
+    env.storage()
+        .instance()
+        .set(&Symbol::new(&env, "gov_proposal_count"), &(id));
+
+    env.events().publish(
+        (
+            Symbol::new(&env, "governance"),
+            Symbol::new(&env, "proposal_created"),
+            ProposalType::Emergency,
+            Symbol::new(&env, "EMERGENCY"),
+        ),
+        proposal,
+    );
+
+    id
+}
+
+/// Set the review window (in seconds) applied to emergency proposals.
+pub fn set_emergency_review_seconds(env: &Env, caller: &Address, seconds: u64) {
+    caller.require_auth();
+    if !is_owner(env, caller) {
+        panic_with_error!(env, GovernanceError::Unauthorized);
+    }
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "gov_emergency_review_seconds"), &seconds);
 }
 
 pub fn approve(env: Env, approver: Address, proposal_id: u64) {
@@ -405,8 +507,30 @@ pub fn can_execute(
         return false;
     }
 
-    let threshold = read_threshold(env);
-    (proposal.approvals.len() as u32) >= threshold
+    match proposal.proposal_type {
+        ProposalType::Normal => {
+            let threshold = read_threshold(env);
+            if proposal.approvals.len() < threshold {
+                return false;
+            }
+            // Quorum must be satisfied for normal proposals.
+            let quorum = read_quorum_config(env);
+            let votes_cast = proposal.approvals.len();
+            let q = quorum_bps(env, votes_cast);
+            q >= quorum.min_participation_bps
+        }
+        ProposalType::Emergency => {
+            // Emergency proposals require an 80% threshold and expire after 48h.
+            let threshold_bps = 8000u32;
+            let votes_cast = proposal.approvals.len();
+            let participation = quorum_bps(env, votes_cast);
+            if participation < threshold_bps {
+                return false;
+            }
+            let expires_at = proposal.created_at.saturating_add(172800);
+            now <= expires_at
+        }
+    }
 }
 
 pub fn execute_mark(env: Env, executor: Address, proposal_id: u64) {
@@ -438,4 +562,40 @@ pub fn execute_mark(env: Env, executor: Address, proposal_id: u64) {
     proposal.executed = true;
     proposals.set(proposal_id, proposal);
     env.storage().instance().set(&proposals_key, &proposals);
+}
+
+/// Read-only dry-run that estimates the impact of executing a proposal.
+/// Any caller may use this; it performs no state changes.
+pub fn simulate_proposal(env: &Env, proposal_id: u64) -> ProposalSimulationResult {
+    let proposals_key = Symbol::new(env, "gov_proposals");
+    let proposals: soroban_sdk::Map<u64, Proposal> = env
+        .storage()
+        .instance()
+        .get(&proposals_key)
+        .unwrap_or(soroban_sdk::Map::new(env));
+
+    let proposal = proposals
+        .get(proposal_id)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::ProposalNotFound));
+
+    if proposal.executed {
+        panic_with_error!(env, GovernanceError::AlreadyExecuted);
+    }
+
+    // Deterministic estimates derived from the proposal's own parameters.
+    let mut affected_contracts = Vec::new(env);
+    affected_contracts.push_back(proposal.proposal_key);
+
+    let state_changes = 1u32;
+    let estimated_gas = 50_000u64 + (proposal.approvals.len() as u64) * 1_000u64;
+
+    let payload_flag = proposal.payload_hash.first().unwrap_or(0u8);
+    let requires_migration = payload_flag & 0x01 == 0x01;
+
+    ProposalSimulationResult {
+        affected_contracts,
+        state_changes,
+        estimated_gas,
+        requires_migration,
+    }
 }

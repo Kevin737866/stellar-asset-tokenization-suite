@@ -1,4 +1,5 @@
 use soroban_sdk::{Env, Address, Symbol, Map, BytesN, Vec};
+use soroban_sdk::testutils::Address as _;
 use stellar_asset_tokenization_suite::rwa_token::{RWAToken, RWATokenClient};
 use stellar_asset_tokenization_suite::secondary_market::{SecondaryMarket, SecondaryMarketClient};
 use stellar_asset_tokenization_suite::compliance_registry::{ComplianceRegistry, ComplianceRegistryClient, KYCStatus};
@@ -10,6 +11,10 @@ use stellar_asset_tokenization_suite::security::SecurityConfig;
 use stellar_asset_tokenization_suite::art::ArtConfig;
 use stellar_asset_tokenization_suite::carbon_credit::CarbonCreditConfig;
 use proptest::prelude::*;
+
+fn get_proptest_config() -> ProptestConfig {
+    ProptestConfig::default()
+}
 
 // ── Helper: Create base AssetConfig for fuzzing ─────────────────────────────
 

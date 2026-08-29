@@ -23,7 +23,7 @@ pub enum ComplianceError {
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KYCStatus {
     pub is_verified: bool,
     pub verification_level: u32,
@@ -35,7 +35,7 @@ pub struct KYCStatus {
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
     pub daily_limit: i128,
     pub monthly_limit: i128,
@@ -49,7 +49,7 @@ pub struct TransferLimits {
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComplianceRule {
     pub rule_id: Symbol,
     pub name: Symbol,

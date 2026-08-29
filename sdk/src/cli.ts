@@ -4,10 +4,15 @@ import {
   Operation,
   TransactionBuilder,
   Keypair,
-  Server
+  Horizon
 } from 'stellar-sdk';
+import * as readline from 'readline';
 import { STELLAR_NETWORKS } from './constants';
 import { CustodyClient } from './custody';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Asset utilities
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Helper to parse asset string
 function parseAsset(assetStr: string): Asset {
@@ -33,16 +38,26 @@ function compareAssets(a: Asset, b: Asset): number {
   return a.getIssuer().localeCompare(b.getIssuer());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Help text
+// ─────────────────────────────────────────────────────────────────────────────
+
 function printHelp() {
   console.log(`
 Stellar RWA Suite CLI
 
 Usage:
   node dist/cli.js <command> [options]
+  node dist/cli.js --interactive
+  node dist/cli.js -i
 
 Commands:
   create-pool   Create and fund a Stellar liquidity pool
   liquidate     Liquidate an undercollateralized RWA position
+
+Global Options:
+  --interactive, -i   Launch guided interactive prompt mode
+  --help,       -h    Show this help message
 
 Run "node dist/cli.js <command> --help" for command-specific options.
 `);
@@ -94,6 +109,10 @@ Options:
 `);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Argument parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
 function parseArgs(args: string[]): Record<string, string> {
   const options: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
@@ -111,6 +130,348 @@ function parseArgs(args: string[]): Record<string, string> {
   }
   return options;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Interactive prompt helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PromptOptions {
+  description?: string;
+  defaultValue?: string;
+  validate?: (input: string) => string | null; // returns error message or null
+}
+
+/**
+ * Prompts the user for a single value, re-prompting on validation failure.
+ * Exported so tests can spy on / mock it.
+ */
+export async function prompt(
+  rl: readline.Interface,
+  question: string,
+  opts: PromptOptions = {}
+): Promise<string> {
+  const { description, defaultValue, validate } = opts;
+
+  if (description) {
+    console.log(`  ℹ  ${description}`);
+  }
+
+  const displayQuestion = defaultValue
+    ? `  ${question} [${defaultValue}]: `
+    : `  ${question}: `;
+
+  return new Promise((resolve) => {
+    const ask = () => {
+      rl.question(displayQuestion, (answer) => {
+        const value = answer.trim() === '' ? (defaultValue ?? '') : answer.trim();
+
+        if (value === '') {
+          console.log('  ⚠  This field is required.');
+          ask();
+          return;
+        }
+
+        if (validate) {
+          const error = validate(value);
+          if (error) {
+            console.log(`  ⚠  ${error}`);
+            ask();
+            return;
+          }
+        }
+
+        resolve(value);
+      });
+    };
+    ask();
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared validators (exported for reuse in tests)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const validators = {
+  network: (value: string): string | null => {
+    const valid = ['testnet', 'mainnet', 'futurenet', 'standalone'];
+    return valid.includes(value)
+      ? null
+      : `Must be one of: ${valid.join(', ')}`;
+  },
+
+  secret: (value: string): string | null => {
+    try {
+      Keypair.fromSecret(value);
+      return null;
+    } catch {
+      return 'Invalid Stellar secret key (must start with "S" and be 56 characters)';
+    }
+  },
+
+  asset: (value: string): string | null => {
+    try {
+      parseAsset(value);
+      return null;
+    } catch {
+      return 'Invalid asset format. Use "XLM" for native, or "CODE:ISSUER" for non-native assets';
+    }
+  },
+
+  positiveNumber: (value: string): string | null => {
+    const n = parseFloat(value);
+    return isNaN(n) || n <= 0 ? 'Must be a positive number' : null;
+  },
+
+  feeBasicPoints: (value: string): string | null => {
+    const n = parseInt(value, 10);
+    if (isNaN(n) || n <= 0 || n > 10000) {
+      return 'Fee must be an integer between 1 and 10000 basis points';
+    }
+    return null;
+  },
+
+  slippage: (value: string): string | null => {
+    const n = parseFloat(value);
+    if (isNaN(n) || n < 0 || n >= 1) {
+      return 'Slippage must be a decimal between 0 and 1 (e.g. 0.01 for 1%)';
+    }
+    return null;
+  },
+
+  contractAddress: (value: string): string | null => {
+    if (!/^[A-Z0-9]{56}$/.test(value)) {
+      return 'Must be a valid 56-character Stellar address (contract or account)';
+    }
+    return null;
+  },
+
+  evidenceHash: (value: string): string | null => {
+    return /^[0-9a-fA-F]{64}$/.test(value)
+      ? null
+      : 'Must be a 64-character hexadecimal string (32 bytes)';
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-command interactive prompt flows
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function promptCreatePool(
+  rl: readline.Interface
+): Promise<Record<string, string>> {
+  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  Create Liquidity Pool — Guided Setup');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  const network = await prompt(rl, 'Network', {
+    description: 'Stellar network to connect to (testnet, mainnet, futurenet, standalone)',
+    defaultValue: 'testnet',
+    validate: validators.network,
+  });
+
+  const secret = await prompt(rl, 'Depositor secret key', {
+    description: 'Secret key (starts with "S") of the account that will fund the pool',
+    validate: validators.secret,
+  });
+
+  const assetA = await prompt(rl, 'Asset A', {
+    description: 'First asset — use "XLM" for native Lumens, or "CODE:ISSUER" for other assets',
+    validate: validators.asset,
+  });
+
+  const assetB = await prompt(rl, 'Asset B', {
+    description: 'Second asset — use "CODE:ISSUER" format (e.g. USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN)',
+    validate: validators.asset,
+  });
+
+  const amountA = await prompt(rl, 'Max amount of Asset A to deposit', {
+    description: 'Maximum amount of Asset A you want to contribute to the pool',
+    validate: validators.positiveNumber,
+  });
+
+  const amountB = await prompt(rl, 'Max amount of Asset B to deposit', {
+    description: 'Maximum amount of Asset B you want to contribute to the pool',
+    validate: validators.positiveNumber,
+  });
+
+  const fee = await prompt(rl, 'Pool fee (basis points)', {
+    description: 'Fee charged per trade in basis points. 30 = 0.30%, the Stellar DEX standard',
+    defaultValue: '30',
+    validate: validators.feeBasicPoints,
+  });
+
+  const slippage = await prompt(rl, 'Slippage tolerance', {
+    description: 'Maximum price ratio drift allowed (0.01 = 1%). Larger values reduce failed transactions in volatile markets',
+    defaultValue: '0.01',
+    validate: validators.slippage,
+  });
+
+  return {
+    'asset-a': assetA,
+    'asset-b': assetB,
+    'amount-a': amountA,
+    'amount-b': amountB,
+    fee,
+    secret,
+    network,
+    slippage,
+  };
+}
+
+export async function promptLiquidate(
+  rl: readline.Interface
+): Promise<Record<string, string>> {
+  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  Liquidate RWA Position — Guided Setup');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  const network = await prompt(rl, 'Network', {
+    description: 'Stellar network to connect to (testnet, mainnet, futurenet, standalone)',
+    defaultValue: 'testnet',
+    validate: validators.network,
+  });
+
+  const secret = await prompt(rl, 'Admin secret key', {
+    description: 'Secret key of the authorized admin account that will trigger the liquidation',
+    validate: validators.secret,
+  });
+
+  const assetId = await prompt(rl, 'RWA token contract address', {
+    description: 'On-chain contract address of the RWA token to be liquidated',
+    validate: validators.contractAddress,
+  });
+
+  const custodyValidator = await prompt(rl, 'Custody Validator contract address', {
+    description: 'Address of the Custody Validator smart contract that holds collateral attestations',
+    validate: validators.contractAddress,
+  });
+
+  const evidenceHash = await prompt(rl, 'Evidence hash', {
+    description: 'A 64-character hex string (32 bytes) that references off-chain liquidation evidence',
+    validate: validators.evidenceHash,
+  });
+
+  const reason = await prompt(rl, 'Reason code', {
+    description: 'Short reason code logged on-chain explaining why the liquidation is triggered',
+    defaultValue: 'undercollateralized',
+  });
+
+  const forceAnswer = await prompt(rl, 'Skip collateralization check? (yes/no)', {
+    description: 'If "yes", the collateral verification step is bypassed and liquidation proceeds immediately',
+    defaultValue: 'no',
+  });
+
+  const options: Record<string, string> = {
+    'asset-id': assetId,
+    'custody-validator': custodyValidator,
+    secret,
+    reason,
+    'evidence-hash': evidenceHash,
+    network,
+  };
+
+  if (forceAnswer.toLowerCase() === 'yes' || forceAnswer.toLowerCase() === 'y') {
+    options['force'] = 'true';
+  }
+
+  return options;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Command selection prompt
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function promptCommandSelection(
+  rl: readline.Interface
+): Promise<string> {
+  console.log('\n╔══════════════════════════════════════════╗');
+  console.log('║    Stellar RWA Suite — Interactive CLI   ║');
+  console.log('╚══════════════════════════════════════════╝\n');
+  console.log('Available commands:\n');
+  console.log('  1. create-pool  — Create and fund a Stellar liquidity pool');
+  console.log('  2. liquidate    — Liquidate an undercollateralized RWA position\n');
+
+  const raw = await prompt(rl, 'Select a command (create-pool / liquidate)', {
+    description: 'You can type the command name or its number (1 or 2)',
+    validate: (value) => {
+      const normalized = value === '1' ? 'create-pool' : value === '2' ? 'liquidate' : value;
+      return ['create-pool', 'liquidate'].includes(normalized)
+        ? null
+        : 'Please enter "create-pool" (or 1) or "liquidate" (or 2)';
+    },
+  });
+
+  return raw === '1' ? 'create-pool' : raw === '2' ? 'liquidate' : raw;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Interactive mode entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function runInteractive(
+  rlOverride?: readline.Interface
+): Promise<void> {
+  const rl =
+    rlOverride ??
+    readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+  const closeIfOwned = () => {
+    if (!rlOverride) rl.close();
+  };
+
+  try {
+    const command = await promptCommandSelection(rl);
+
+    let options: Record<string, string>;
+    if (command === 'create-pool') {
+      options = await promptCreatePool(rl);
+    } else {
+      options = await promptLiquidate(rl);
+    }
+
+    // Show review summary, masking secret key
+    console.log('\n──────────────────────────────────────────');
+    console.log('  Review your inputs:');
+    for (const [key, value] of Object.entries(options)) {
+      const display = key === 'secret' ? '*'.repeat(8) : value;
+      console.log(`    ${key}: ${display}`);
+    }
+    console.log('──────────────────────────────────────────\n');
+
+    const confirm = await prompt(rl, 'Proceed with these settings? (yes/no)', {
+      defaultValue: 'yes',
+    });
+
+    if (confirm.toLowerCase() !== 'yes' && confirm.toLowerCase() !== 'y') {
+      console.log('\nOperation cancelled.');
+      closeIfOwned();
+      return;
+    }
+
+    // Convert options map back to flat arg array for the existing runners
+    const argArray = Object.entries(options).flatMap(([k, v]) =>
+      v === 'true' ? [`--${k}`] : [`--${k}`, v]
+    );
+
+    closeIfOwned();
+
+    if (command === 'create-pool') {
+      await runCreatePool(argArray);
+    } else {
+      await runLiquidate(argArray);
+    }
+  } catch (err) {
+    closeIfOwned();
+    throw err;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// create-pool command
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function runCreatePool(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
@@ -147,7 +508,7 @@ async function runCreatePool(args: string[]): Promise<void> {
 
   const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
   console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
-  const server = new Server(horizonUrl);
+  const server = new Horizon.Server(horizonUrl);
 
   const depositorKeypair = Keypair.fromSecret(secret);
   const depositorAddress = depositorKeypair.publicKey();
@@ -257,11 +618,15 @@ async function runCreatePool(args: string[]): Promise<void> {
   tx.sign(depositorKeypair);
 
   console.log(`Submitting transaction with ${operationsAdded} operations to network...`);
-  const response = await server.sendTransaction(tx);
+  const response = await server.submitTransaction(tx);
   console.log('Transaction submitted successfully!');
   console.log(`Hash: ${response.hash}`);
-  console.log(`Ledger: ${response.ledger}`);
+  console.log(`Ledger: ${(response as any).ledger}`);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// liquidate command
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function runLiquidate(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
@@ -368,8 +733,23 @@ async function runLiquidate(args: string[]): Promise<void> {
   console.log('The insurance provider will now process the claim and compensate token holders.');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Main entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function runCli() {
   const args = process.argv.slice(2);
+
+  // Interactive mode
+  if (args.includes('--interactive') || args.includes('-i')) {
+    try {
+      await runInteractive();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message || error}`);
+      process.exit(1);
+    }
+    return;
+  }
 
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     printHelp();

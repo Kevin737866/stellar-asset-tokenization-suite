@@ -30,6 +30,7 @@ pub enum DividendError {
     DistributorNotInitialized = 18,
     AlreadyAtLatestVersion = 19,
     InvalidParameters = 20,
+    NoAccrualConfigured = 21,
 }
 
 #[contracttype]
@@ -62,6 +63,23 @@ pub struct ClaimInfo {
     pub amount_claimed: i128,
     pub claimed_at: u64,
     pub currency: Symbol,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AccrualRate {
+    pub token_address: Address,
+    pub currency: Symbol,
+    pub amount_per_second: i128,
+    pub last_accrual_update: u64,
+    pub total_accrued: i128,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AccrualClaimKey {
+    pub token_address: Address,
+    pub claimer: Address,
 }
 
 #[contracttype]
@@ -127,6 +145,18 @@ impl DividendDistributor {
             .set(&Symbol::new(&env, "clm_tot"),             &Map::<u64, i128>::new(&env));
         env.storage()
             .instance()
+            .set(
+                &Symbol::new(&env, "accruals"),
+                &Map::<Address, AccrualRate>::new(&env),
+            );
+        env.storage()
+            .instance()
+            .set(
+                &Symbol::new(&env, "registered_tokens"),
+                &Vec::<Address>::new(&env),
+            );
+        env.storage()
+            .instance()
             .set(&Symbol::new(&env, "version"), &STORAGE_VERSION);
     }
 
@@ -181,6 +211,19 @@ impl DividendDistributor {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "currency_tokens"), &map);
+    }
+
+    pub fn register_token(env: Env, auth: Address, token_address: Address) {
+        crate::shared_admin::require_admin(&env, &auth);
+
+        Self::check_version(&env);
+
+        Self::register_token_internal(env.clone(), token_address.clone());
+
+        env.events().publish(
+            (Symbol::new(&env, "token_registered"), token_address),
+            (),
+        );
     }
 
     pub fn multi_ccy_distributions(
@@ -356,6 +399,9 @@ impl DividendDistributor {
 
         currency_client.transfer(&admin, &env.current_contract_address(), &amount);
 
+        // Track the token so portfolio-wide claims can iterate all held assets
+        Self::register_token_internal(env.clone(), token_address.clone());
+
         env.events().publish(
             (Symbol::new(&env, "distribution_created"), token_address),
             (distribution_id, amount, currency, env.ledger().timestamp()),
@@ -501,6 +547,82 @@ impl DividendDistributor {
         claimed_amounts
     }
 
+    pub fn claim_all_portfolio_dividends(env: Env, claimer: Address) -> Vec<(Address, i128)> {
+        Self::check_version(&env);
+
+        let tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "registered_tokens"))
+            .unwrap_or(Vec::new(&env));
+
+        // Bound portfolio iteration to a fixed maximum number of tokens
+        let max_tokens: u32 = 20;
+        let mut results = Vec::<(Address, i128)>::new(&env);
+        let mut processed: u32 = 0;
+
+        for token in tokens.iter() {
+            if processed >= max_tokens {
+                break;
+            }
+            processed += 1;
+
+            let rwa_client = RWATokenClient::new(&env, &token);
+            let balance = rwa_client.get_balance(&claimer).amount;
+            if balance == 0 {
+                continue;
+            }
+
+            let total_claimed =
+                Self::claim_all_for_token(env.clone(), claimer.clone(), token.clone());
+            if total_claimed > 0 {
+                results.push_back((token.clone(), total_claimed));
+            }
+        }
+
+        results
+    }
+
+    fn claim_all_for_token(env: Env, claimer: Address, token_address: Address) -> i128 {
+        let distributions: Vec<DividendDistribution> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "distributions"))
+            .unwrap_or(Vec::new(&env));
+
+        let mut total: i128 = 0;
+        let current_time = env.ledger().timestamp();
+
+        for distribution in distributions.iter() {
+            if distribution.token_address != token_address {
+                continue;
+            }
+            if distribution.is_active && current_time <= distribution.claim_deadline {
+                let ck = ClaimKey {
+                    distribution_id: distribution.distribution_id,
+                    claimer: claimer.clone(),
+                };
+                if !env.storage().instance().has(&ck) {
+                    let available = Self::calculate_available_dividend(
+                        env.clone(),
+                        distribution.distribution_id,
+                        claimer.clone(),
+                    );
+                    if available > 0 {
+                        let claimed = Self::claim_dividend(
+                            env.clone(),
+                            distribution.distribution_id,
+                            claimer.clone(),
+                        );
+                        total += claimed;
+                    }
+                }
+            }
+        }
+
+        total
+    }
+
     pub fn get_distribution(env: Env, distribution_id: u64) -> DividendDistribution {
         let distributions: Vec<DividendDistribution> = env
             .storage()
@@ -601,14 +723,91 @@ impl DividendDistributor {
         claimable_amount - fee_amount
     }
 
-    pub fn update_config(env: Env, auth: Address, config: DividendConfig) {
+    pub fn update_accrual(
+        env: Env,
+        auth: Address,
+        token_address: Address,
+        currency: Symbol,
+        amount_per_second: i128,
+    ) {
         crate::shared_admin::require_admin(&env, &auth);
 
+    pub fn claim_accrued_yield(env: Env, claimer: Address, token_address: Address) -> i128 {
         Self::check_version(&env);
 
+        let mut accruals: Map<Address, AccrualRate> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "accruals"))
+            .unwrap_or(Map::new(&env));
+
+        let rate = accruals
+            .get(token_address.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, DividendError::NoAccrualConfigured));
+
+        let now = env.ledger().timestamp();
+        let accrued_total = Self::settle_accrual(&env, &rate, now);
+
+        // Persist the settled rate so the next claim resumes from this timestamp
+        let mut updated_rate = rate.clone();
+        updated_rate.total_accrued = accrued_total;
+        updated_rate.last_accrual_update = now;
+        let accrual_currency = updated_rate.currency.clone();
+        accruals.set(token_address.clone(), updated_rate);
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, "config"), &config);
+            .set(&Symbol::new(&env, "accruals"), &accruals);
+
+        let rwa_client = RWATokenClient::new(&env, &token_address);
+        let balance = rwa_client.get_balance(&claimer).amount;
+
+        if balance == 0 {
+            panic_with_error!(&env, DividendError::NoTokensToClaim);
+        }
+
+        let ack = AccrualClaimKey {
+            token_address: token_address.clone(),
+            claimer: claimer.clone(),
+        };
+        let last_claimed: i128 = env.storage().instance().get(&ack).unwrap_or(0i128);
+
+        let gross_amount = (balance * (accrued_total - last_claimed)) / 1000000000000000000i128;
+
+        if gross_amount <= 0 {
+            panic_with_error!(&env, DividendError::NoDividendAvailable);
+        }
+
+        let config: DividendConfig = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "config"))
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
+
+        let fee_amount = (gross_amount * config.fee_rate as i128) / 10000i128;
+        let net_amount = gross_amount - fee_amount;
+
+        let currency_token_address =
+            Self::get_currency_token_address(env.clone(), accrual_currency.clone());
+        let currency_client = TokenClient::new(&env, &currency_token_address);
+
+        currency_client.transfer(&env.current_contract_address(), &claimer, &net_amount);
+
+        if fee_amount > 0 {
+            currency_client.transfer(
+                &env.current_contract_address(),
+                &config.fee_recipient,
+                &fee_amount,
+            );
+        }
+
+        env.storage().instance().set(&ack, &accrued_total);
+
+        env.events().publish(
+            (Symbol::new(&env, "accrued_yield_claimed"), claimer),
+            (token_address, net_amount, accrual_currency, now),
+        );
+
+        net_amount
     }
 
     pub fn deactivate_distribution(env: Env, auth: Address, distribution_id: u64) {
