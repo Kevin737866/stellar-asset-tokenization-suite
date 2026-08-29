@@ -9,6 +9,7 @@ import {
 import * as readline from 'readline';
 import { STELLAR_NETWORKS } from './constants';
 import { CustodyClient } from './custody';
+import { runTypeGenerator } from './typeGenerator';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Asset utilities
@@ -52,8 +53,9 @@ Usage:
   node dist/cli.js -i
 
 Commands:
-  create-pool   Create and fund a Stellar liquidity pool
-  liquidate     Liquidate an undercollateralized RWA position
+  create-pool     Create and fund a Stellar liquidity pool
+  liquidate       Liquidate an undercollateralized RWA position
+  generate-types  Generate TypeScript types from Soroban contract schemas
 
 Global Options:
   --interactive, -i   Launch guided interactive prompt mode
@@ -61,6 +63,108 @@ Global Options:
 
 Run "node dist/cli.js <command> --help" for command-specific options.
 `);
+}
+
+function printGenerateTypesHelp() {
+  console.log(`
+Stellar RWA Suite CLI - Type Generator
+
+Generates a TypeScript module from Soroban contract SCHEMA (spec) entries:
+interfaces for structs, discriminated unions / enums for Soroban unions and
+enums, and a <Name>Client interface with one method signature per contract
+function. Map, Vec, Option, tuples, BytesN and custom structs/enums are all
+handled. A warning is emitted for any generated type whose name collides with
+a manually-maintained type.
+
+Usage:
+  npx rwa-sdk generate-types --contracts <id[,id...]> --rpc-url <url> [options]
+  npx rwa-sdk generate-types --schema <file.json> [--schema <file.json>...] [options]
+
+Options:
+  --contracts <ids>       Comma-separated contract ids to fetch from the network
+  --rpc-url <url>         Soroban RPC URL (required with --contracts)
+  --network <network>     Network passphrase preset: testnet, mainnet, futurenet,
+                          standalone (used with --contracts; default: testnet)
+  --schema <file.json>    Local schema JSON file (repeatable; array of spec
+                          entries or { "entries": [...] })
+  --out <file.ts>         Write the generated module here (default: stdout)
+  --manual-types <file>   Manual types module to diff generated names against
+                          (default: sdk/src/types.ts when present)
+  --no-client             Do not emit the <Name>Client interface
+  --dry-run               Print the result and warnings without writing --out
+  --help, -h              Show this help message
+`);
+}
+
+function collectRepeated(args: string[], flag: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && args[i + 1] && !args[i + 1].startsWith('--')) {
+      out.push(args[i + 1]);
+      i++;
+    }
+  }
+  return out;
+}
+
+async function runGenerateTypes(args: string[]): Promise<void> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printGenerateTypesHelp();
+    process.exit(0);
+  }
+
+  const options = parseArgs(args);
+  const contracts = (options['contracts'] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const schemaFiles = collectRepeated(args, '--schema');
+  if (options['schema'] && !schemaFiles.includes(options['schema']) && options['schema'] !== 'true') {
+    schemaFiles.push(options['schema']);
+  }
+
+  if (contracts.length === 0 && schemaFiles.length === 0) {
+    console.error('Error: provide --contracts <ids> or at least one --schema <file.json>');
+    printGenerateTypesHelp();
+    process.exit(1);
+  }
+
+  const networkName = options['network'] || 'testnet';
+  const networkConfig = STELLAR_NETWORKS[networkName];
+  if (contracts.length > 0 && !networkConfig) {
+    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
+  }
+
+  let manualTypesFile = options['manual-types'];
+  if (!manualTypesFile) {
+    const candidate = require('path').join(__dirname, 'types.ts');
+    if (require('fs').existsSync(candidate)) manualTypesFile = candidate;
+  }
+
+  const result = await runTypeGenerator({
+    schemaFiles,
+    contracts,
+    rpcUrl: options['rpc-url'],
+    networkPassphrase: networkConfig?.passphrase,
+    outFile: options['out'],
+    emitClient: options['no-client'] !== 'true',
+    manualTypesFile,
+    dryRun: options['dry-run'] === 'true',
+  });
+
+  console.log(`Loaded ${result.schemasLoaded} schema(s); declared ${result.declaredTypes.length} type(s).`);
+  for (const warning of result.warnings) {
+    console.warn(`⚠️  ${warning}`);
+  }
+
+  if (result.written) {
+    console.log(`✅ Wrote ${result.outFile}`);
+  } else if (options['out'] && options['dry-run'] === 'true') {
+    console.log(`(dry run) would write ${options['out']}`);
+    console.log(result.code);
+  } else {
+    console.log(result.code);
+  }
 }
 
 function printCreatePoolHelp() {
@@ -764,6 +868,8 @@ export async function runCli() {
       await runCreatePool(commandArgs);
     } else if (command === 'liquidate') {
       await runLiquidate(commandArgs);
+    } else if (command === 'generate-types') {
+      await runGenerateTypes(commandArgs);
     } else {
       console.error(`Unknown command: "${command}".`);
       printHelp();
