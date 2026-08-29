@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol, panic_with_error};
+use soroban_sdk::{contracterror, Address, Env, Symbol, panic_with_error};
 use crate::auth::{assert_admin, AuthError};
 
 #[contracterror]
