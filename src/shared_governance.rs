@@ -1,5 +1,5 @@
 use crate::auth::AuthError;
-use soroban_sdk::{panic_with_error, Address, Env, Symbol};
+use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum GovernanceError {
@@ -13,25 +13,35 @@ pub enum GovernanceError {
     InvalidProposalPayload = 8,
 }
 
-/// Minimal threshold-based governance.
-///
-/// Security model:
-/// - Owners set at initialization
-/// - Any governance action is represented by a `proposal_key` (Symbol)
-/// - Owners create a proposal (or any one can create; approvals still required)
-/// - Approvers call `approve(proposal_id)`
-/// - Once `threshold` unique approvals are collected, the action can be executed
-///
-/// NOTE: This is intentionally generic and uses a `proposal_payload_hash` to bind params.
-#[derive(Clone)]
+/// Minimal threshold-based governance with risk-based categorization & review periods.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
     pub id: u64,
     pub proposal_key: Symbol,
+    pub category: Symbol,
     pub payload_hash: [u8; 32],
     pub created_at: u64,
+    pub review_until: u64,
     pub executable_after: u64,
     pub approvals: soroban_sdk::Vec<Address>,
     pub executed: bool,
+}
+
+pub fn get_category_review_period(env: &Env, category: &Symbol) -> u64 {
+    if *category == Symbol::new(env, "ContractUpgrade") {
+        1_209_600 // 14 days
+    } else if *category == Symbol::new(env, "TreasuryManagement") {
+        604_800 // 7 days
+    } else if *category == Symbol::new(env, "AssetManagement") {
+        259_200 // 72 hours
+    } else if *category == Symbol::new(env, "ParameterChange") {
+        86_400 // 24 hours
+    } else if *category == Symbol::new(env, "EmergencyAction") {
+        86_400 // 24 hours
+    } else {
+        86_400 // Default 24 hours
+    }
 }
 
 pub fn write_governance(
@@ -96,6 +106,7 @@ pub fn create_proposal(
     env: Env,
     proposer: Address,
     proposal_key: Symbol,
+    category: Symbol,
     payload_hash: [u8; 32],
 ) -> u64 {
     proposer.require_auth();
@@ -112,13 +123,18 @@ pub fn create_proposal(
 
     let timelock = read_timelock_seconds(&env);
     let now = env.ledger().timestamp();
+    let review_period = get_category_review_period(&env, &category);
+    let review_until = now + review_period;
+    let executable_after = review_until + timelock;
 
     let proposal = Proposal {
         id: proposal_count + 1,
         proposal_key,
+        category,
         payload_hash,
         created_at: now,
-        executable_after: now + timelock,
+        review_until,
+        executable_after,
         approvals: soroban_sdk::Vec::<Address>::new(&env),
         executed: false,
     };
@@ -229,6 +245,11 @@ pub fn execute_mark(env: Env, executor: Address, proposal_id: u64) {
 
     if proposal.executed {
         panic_with_error!(&env, GovernanceError::AlreadyExecuted);
+    }
+
+    let now = env.ledger().timestamp();
+    if now < proposal.executable_after {
+        panic_with_error!(&env, GovernanceError::TimelockNotExpired);
     }
 
     proposal.executed = true;
