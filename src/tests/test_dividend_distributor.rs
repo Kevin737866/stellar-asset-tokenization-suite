@@ -23,6 +23,7 @@ struct TestEnv {
     token: RWATokenClient<'static>,
     currency_token: TokenClient<'static>,
     currency_symbol: Symbol,
+    compliance: Address,
 }
 
 fn setup() -> TestEnv {
@@ -83,6 +84,7 @@ fn setup() -> TestEnv {
         token,
         currency_token,
         currency_symbol,
+        compliance: compliance_id,
     }
 }
 
@@ -566,4 +568,248 @@ fn migrate_preserves_auto_distribution_config() {
     );
     let dist = t.distributor.get_distribution(&id);
     assert!(dist.is_active);
+}
+
+// ── accrual tracking (issue #135) ─────────────────────────────────────────────
+
+// 0.0005 per second in 1e18 fixed point (5e14) — sized so test claims stay
+// within the 10_000 currency pool the admin funds for the distributor.
+const ACCRUAL_RATE: i128 = 500_000_000_000_000;
+
+fn setup_accrual(t: &TestEnv, claimer: &Address, balance: i128) {
+    // Fund the distributor's currency pool that accrual yield is paid from
+    t.currency_token.transfer(&t.admin, &t.distributor.address, &10_000i128);
+    t.token.transfer(&t.admin, claimer, &balance);
+    t.distributor.update_accrual(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &ACCRUAL_RATE,
+    );
+}
+
+#[test]
+fn accrual_accumulates_over_time() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    setup_accrual(&t, &claimer, 500_000); // 50% of supply
+
+    advance_ledger(&t.env, 10);
+
+    let claimed = t.distributor.claim_accrued_yield(&claimer, &t.token.address);
+    // gross = 500_000 * (5e14 * 10) / 1e18 = 2_500; fee 0.5% = 12; net 2_488
+    assert_eq!(claimed, 2_488);
+}
+
+#[test]
+fn accrual_supports_multiple_claims() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    setup_accrual(&t, &claimer, 500_000);
+
+    advance_ledger(&t.env, 10);
+    let first = t.distributor.claim_accrued_yield(&claimer, &t.token.address);
+    assert_eq!(first, 2_488);
+
+    // Nothing new accrued immediately after a claim
+    assert_eq!(t.distributor.calculate_accrued_yield(&claimer, &t.token.address), 0);
+
+    advance_ledger(&t.env, 10);
+    let second = t.distributor.claim_accrued_yield(&claimer, &t.token.address);
+    assert_eq!(second, 2_488);
+}
+
+#[test]
+fn accrual_claim_after_rate_change() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    setup_accrual(&t, &claimer, 500_000);
+
+    advance_ledger(&t.env, 10);
+    assert_eq!(t.distributor.claim_accrued_yield(&claimer, &t.token.address), 2_488);
+
+    // Admin doubles the per-second rate mid-period
+    t.distributor.update_accrual(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &(ACCRUAL_RATE * 2),
+    );
+
+    advance_ledger(&t.env, 10);
+    // gross = 500_000 * (1e15 * 10) / 1e18 = 5_000; fee 0.5% = 25; net 4_975
+    assert_eq!(t.distributor.claim_accrued_yield(&claimer, &t.token.address), 4_975);
+}
+
+#[test]
+fn accrual_calculate_returns_pending_yield() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    setup_accrual(&t, &claimer, 500_000);
+
+    advance_ledger(&t.env, 10);
+
+    let pending = t.distributor.calculate_accrued_yield(&claimer, &t.token.address);
+    assert_eq!(pending, 2_488);
+}
+
+#[test]
+fn accrual_rate_is_queryable() {
+    let t = setup();
+    t.distributor.update_accrual(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &ACCRUAL_RATE,
+    );
+
+    let rate = t.distributor.get_accrual_rate(&t.token.address);
+    assert!(rate.is_some());
+    let rate = rate.unwrap();
+    assert_eq!(rate.amount_per_second, ACCRUAL_RATE);
+    assert_eq!(rate.currency, t.currency_symbol);
+}
+
+#[test]
+#[should_panic]
+fn accrual_update_by_non_admin_panics() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.distributor.update_accrual(
+        &attacker,
+        &t.token.address,
+        &t.currency_symbol,
+        &ACCRUAL_RATE,
+    );
+}
+
+#[test]
+#[should_panic]
+fn accrual_update_with_unsupported_currency_panics() {
+    let t = setup();
+    t.distributor.update_accrual(
+        &t.admin,
+        &t.token.address,
+        &Symbol::new(&t.env, "UNKNOWN"),
+        &ACCRUAL_RATE,
+    );
+}
+
+#[test]
+#[should_panic]
+fn accrual_claim_without_configuration_panics() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    t.token.transfer(&t.admin, &claimer, &100_000i128);
+    t.distributor.claim_accrued_yield(&claimer, &t.token.address);
+}
+
+// ── cross-token portfolio aggregation (issue #137) ────────────────────────────
+
+fn deploy_second_token(t: &TestEnv) -> RWATokenClient<'static> {
+    let token2_id = t.env.register_contract(None, RWAToken);
+    let token2 = RWATokenClient::new(&t.env, &token2_id);
+    token2.initialize(
+        &t.admin,
+        &Symbol::new(&t.env, "RWAToken2"),
+        &Symbol::new(&t.env, "RWA2"),
+        &1_000_000i128,
+        &6u32,
+        &Symbol::new(&t.env, "real_estate"),
+        &Map::new(&t.env),
+        &t.compliance,
+        &t.distributor.address,
+    );
+    unsafe { core::mem::transmute(token2) }
+}
+
+fn create_distribution(t: &TestEnv, token_address: &Address) -> u64 {
+    let deadline = t.env.ledger().timestamp() + 86400;
+    t.distributor.create_distribution(
+        &t.admin,
+        token_address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    )
+}
+
+#[test]
+fn claim_all_portfolio_dividends_multi_token() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    let token2 = deploy_second_token(&t);
+
+    // Claimer holds 50% of both tokens
+    t.token.transfer(&t.admin, &claimer, &500_000i128);
+    token2.transfer(&t.admin, &claimer, &500_000i128);
+
+    create_distribution(&t, &t.token.address);
+    create_distribution(&t, &token2.address);
+
+    let results = t.distributor.claim_all_portfolio_dividends(&claimer);
+    assert_eq!(results.len(), 2);
+
+    let mut total: i128 = 0;
+    for (addr, claimed) in results.iter() {
+        total += claimed;
+        assert!(claimed > 0);
+        assert!(addr == t.token.address.clone() || addr == token2.address.clone());
+    }
+    // 498 per token (500 gross minus 0.5% fee)
+    assert_eq!(total, 996);
+
+    // Claiming again yields nothing — all dividends already claimed
+    let second = t.distributor.claim_all_portfolio_dividends(&claimer);
+    assert_eq!(second.len(), 0);
+}
+
+#[test]
+fn claim_all_portfolio_dividends_partial_claims() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    let token2 = deploy_second_token(&t);
+
+    t.token.transfer(&t.admin, &claimer, &500_000i128);
+    token2.transfer(&t.admin, &claimer, &500_000i128);
+
+    // Only token1 has a distribution
+    create_distribution(&t, &t.token.address);
+    t.distributor.register_token(&t.admin, &token2.address);
+
+    let results = t.distributor.claim_all_portfolio_dividends(&claimer);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap().0, t.token.address);
+    assert_eq!(results.get(0).unwrap().1, 498);
+}
+
+#[test]
+fn claim_all_portfolio_dividends_skips_unheld_tokens() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    let token2 = deploy_second_token(&t);
+
+    // Claimer only holds token1; token2 has a distribution but zero balance
+    t.token.transfer(&t.admin, &claimer, &500_000i128);
+
+    create_distribution(&t, &t.token.address);
+    create_distribution(&t, &token2.address);
+
+    let results = t.distributor.claim_all_portfolio_dividends(&claimer);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap().0, t.token.address);
+    assert_eq!(results.get(0).unwrap().1, 498);
+}
+
+#[test]
+fn claim_all_portfolio_dividends_no_dividends_available() {
+    let t = setup();
+    let claimer = Address::generate(&t.env);
+    t.token.transfer(&t.admin, &claimer, &500_000i128);
+    t.distributor.register_token(&t.admin, &t.token.address);
+
+    // Token is registered and held, but no distributions exist yet
+    let results = t.distributor.claim_all_portfolio_dividends(&claimer);
+    assert_eq!(results.len(), 0);
 }
