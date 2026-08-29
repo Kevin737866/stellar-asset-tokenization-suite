@@ -264,7 +264,7 @@ impl CustodyValidator {
             reputation_score: 80,
             fee_rate: 25,
             is_active: true,
-            last_verification: 0,
+            last_verification: env.ledger().timestamp(),
             total_verifications: 0,
             multi_sig_threshold: 2,
             auditor_type: Symbol::new(&env, "external"),
@@ -294,7 +294,6 @@ impl CustodyValidator {
         }
 
         Self::init_config(&env, &admin);
-        Self::init_storage_collections(&env);
         Self::init_default_oracles(&env, &oracle_addresses);
 
         env.storage()
@@ -1037,8 +1036,54 @@ impl CustodyValidator {
     }
 
     pub fn get_attestation(env: Env, attestation_id: u64) -> CustodyAttestation {
-        Self::read_attestation(&env, &attestation_id)
-            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::AttestationNotFound))
+        let mut attestation = Self::read_attestation(&env, &attestation_id)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::AttestationNotFound));
+
+        let now = env.ledger().timestamp();
+        if now > attestation.expires_at {
+            if attestation.is_valid {
+                attestation.is_valid = false;
+                Self::write_attestation(&env, &attestation_id, &attestation);
+                env.events().publish(
+                    (Symbol::new(&env, "attestation_expired"), attestation.asset_id.clone()),
+                    (attestation_id, now),
+                );
+            }
+        }
+        attestation
+    }
+
+    pub fn is_attestation_valid(env: Env, attestation_id: u64) -> bool {
+        if let Some(attestation) = Self::read_attestation(&env, &attestation_id) {
+            attestation.is_valid && env.ledger().timestamp() <= attestation.expires_at
+        } else {
+            false
+        }
+    }
+
+    pub fn invalidate_attestation(env: Env, auth: Address, attestation_id: u64) {
+        crate::shared_admin::require_admin(&env, &auth);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "admin"))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, CustodyError::NotInitialized);
+            });
+        assert_admin(&env, &auth, &admin);
+
+        Self::check_version(&env);
+
+        let mut attestation = Self::read_attestation(&env, &attestation_id)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::AttestationNotFound));
+
+        attestation.is_valid = false;
+        Self::write_attestation(&env, &attestation_id, &attestation);
+
+        env.events().publish(
+            (Symbol::new(&env, "attestation_invalidated"), attestation.asset_id.clone()),
+            (attestation_id, auth, env.ledger().timestamp()),
+        );
     }
 
     pub fn get_latest_attestation(env: Env, asset_id: Address) -> Option<CustodyAttestation> {
@@ -1234,6 +1279,19 @@ impl CustodyValidator {
         alerts
     }
 
+    fn apply_oracle_decay(env: &Env, mut oracle_info: OracleInfo) -> OracleInfo {
+        let now = env.ledger().timestamp();
+        if oracle_info.last_verification > 0 && now > oracle_info.last_verification {
+            let elapsed = now - oracle_info.last_verification;
+            let decay_periods = elapsed / (7 * 86400);
+            if decay_periods > 0 {
+                let decay = decay_periods as u32;
+                oracle_info.reputation_score = oracle_info.reputation_score.saturating_sub(decay).max(10);
+            }
+        }
+        oracle_info
+    }
+
     pub fn get_oracle_info(env: Env, oracle_address: Address) -> OracleInfo {
         let oracles: Map<Address, OracleInfo> = env
             .storage()
@@ -1241,9 +1299,10 @@ impl CustodyValidator {
             .get(&Symbol::new(&env, "oracles"))
             .unwrap_or(Map::new(&env));
 
-        oracles.get(oracle_address).unwrap_or_else(|| {
+        let oracle_info = oracles.get(oracle_address).unwrap_or_else(|| {
             panic_with_error!(&env, CustodyError::OracleNotFound);
-        })
+        });
+        Self::apply_oracle_decay(&env, oracle_info)
     }
 
     pub fn list_active_oracles(env: Env) -> Vec<OracleInfo> {
@@ -1323,6 +1382,7 @@ impl CustodyValidator {
 
         if let Some(mut oracle_info) = oracles.get(oracle_address.clone()) {
             oracle_info.reputation_score = reputation_score;
+            oracle_info.last_verification = env.ledger().timestamp();
             oracles.set(oracle_address, oracle_info);
             env.storage()
                 .instance()

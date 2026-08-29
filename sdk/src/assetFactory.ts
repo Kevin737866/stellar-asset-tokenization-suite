@@ -16,7 +16,7 @@ import { RWASDKError, InvalidParametersError, TransactionError, NetworkError } f
 import { ErrorCode } from './types';
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, HOLDING_PERIOD_RULE_144, HOLDING_PERIOD_DEFAULT, HOLDING_PERIOD_INVOICE, HOLDING_PERIOD_ART, HOLDING_PERIOD_SECURITY, TRANSFER_LIMIT_REAL_ESTATE, TRANSFER_LIMIT_COMMODITY, TRANSFER_LIMIT_INVOICE, TRANSFER_LIMIT_SECURITY, TRANSFER_LIMIT_ART, TRANSFER_LIMIT_CARBON_CREDIT, RENTAL_YIELD_MAX_BASIS_POINTS, VALID_PURITY_GRADES, VALID_CREDIT_RATINGS, VALID_REGULATION_FRAMEWORKS, DAY_IN_SECONDS } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateNonNegativeInteger } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateNonNegativeInteger, validateRange } from './validation';
 
 export enum AssetClass {
   RealEstate = 0,
@@ -181,6 +181,7 @@ export class AssetFactory {
     if (propertyDetails.appraisalValue < 0n) {
       throw new InvalidParametersError('appraisalValue must be non-negative');
     }
+    validateRange(propertyDetails.rentalYieldRate, 0, 10000, 'rentalYieldRate');
     const account = await this.server.getAccount(signer.publicKey());
 
     const metadata = {

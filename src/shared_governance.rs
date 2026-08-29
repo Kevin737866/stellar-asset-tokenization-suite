@@ -63,10 +63,27 @@ pub struct Proposal {
     pub proposal_key: Symbol,
     pub payload_hash: Bytes,
     pub created_at: u64,
+    pub review_until: u64,
     pub executable_after: u64,
     pub approvals: Vec<Address>,
     pub executed: bool,
     pub proposal_type: ProposalType,
+}
+
+pub fn get_category_review_period(env: &Env, category: &Symbol) -> u64 {
+    if *category == Symbol::new(env, "ContractUpgrade") {
+        1_209_600 // 14 days
+    } else if *category == Symbol::new(env, "TreasuryManagement") {
+        604_800 // 7 days
+    } else if *category == Symbol::new(env, "AssetManagement") {
+        259_200 // 72 hours
+    } else if *category == Symbol::new(env, "ParameterChange") {
+        86_400 // 24 hours
+    } else if *category == Symbol::new(env, "EmergencyAction") {
+        86_400 // 24 hours
+    } else {
+        86_400 // Default 24 hours
+    }
 }
 
 pub fn write_governance(
@@ -215,10 +232,14 @@ pub fn create_proposal(
 
     let timelock = read_timelock_seconds(&env);
     let now = env.ledger().timestamp();
+    let review_period = get_category_review_period(&env, &category);
+    let review_until = now + review_period;
+    let executable_after = review_until + timelock;
 
     let proposal = Proposal {
         id: proposal_count + 1,
         proposal_key,
+        category,
         payload_hash,
         created_at: now,
         executable_after: now + timelock,

@@ -87,41 +87,6 @@ pub enum DataKey {
 #[contract]
 pub struct SecondaryMarket;
 
-pub struct SecondaryMarketClient<'a> {
-    env: &'a Env,
-    id: Address,
-}
-
-impl<'a> SecondaryMarketClient<'a> {
-    pub fn new(env: &'a Env, id: &Address) -> Self {
-        Self { env, id: id.clone() }
-    }
-
-    pub fn initialize(&self, admin: &Address, base_currency: &Address, compliance_registry: &Address, dividend_distributor: &Address, fee_rate_bps: i64, min_order_size: i128) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "initialize"), &(admin, base_currency, compliance_registry, dividend_distributor, fee_rate_bps, min_order_size));
-    }
-
-    pub fn place_order(&self, maker: &Address, token_address: &Address, side: Symbol, price: i128, amount: i128, expiry: u64, min_fill: i128) -> u64 {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "place_order"), &(maker, token_address, side, price, amount, expiry, min_fill))
-    }
-
-    pub fn fill_order(&self, taker: &Address, order_id: u64, fill_amount: i128) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "fill_order"), &(taker, order_id, fill_amount));
-    }
-
-    pub fn cancel_order(&self, maker: &Address, order_id: u64) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "cancel_order"), &(maker, order_id));
-    }
-
-    pub fn get_vwap(&self, token: &Address) -> i128 {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "get_vwap"), &(token))
-    }
-
-    pub fn get_twap(&self, token: &Address, start_time: u64) -> i128 {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "get_twap"), &(token, start_time))
-    }
-}
-
 #[contractimpl]
 impl SecondaryMarket {
 // ...
@@ -303,6 +268,8 @@ impl SecondaryMarket {
             (count, maker, side, price, amount, env.ledger().timestamp()),
         );
 
+        Self::auto_prune_expired_orders(&env);
+
         count
     }
 
@@ -311,13 +278,25 @@ impl SecondaryMarket {
 
         Self::check_version(&env);
 
+        Self::auto_prune_expired_orders(&env);
+
         let mut order: Order = env
             .storage()
             .temporary()
             .get(&DataKey::Order(order_id))
             .unwrap_or_else(|| { panic_with_error!(&env, MarketError::OrderNotFound); });
 
-        if !order.is_active || order.expires_at <= env.ledger().timestamp() {
+        if order.expires_at <= env.ledger().timestamp() {
+            if order.is_active {
+                env.events().publish(
+                    (Symbol::new(&env, "order_expired"), order.token_address.clone()),
+                    (order_id, order.maker.clone(), env.ledger().timestamp()),
+                );
+            }
+            panic_with_error!(&env, MarketError::OrderExpired);
+        }
+
+        if !order.is_active {
             panic_with_error!(&env, MarketError::OrderExpired);
         }
 
@@ -423,6 +402,45 @@ impl SecondaryMarket {
             (Symbol::new(&env, "order_cancelled"), order.token_address),
             (order_id, maker, order.side, order.filled_amount, env.ledger().timestamp()),
         );
+    }
+
+    pub fn prune_expired_orders(env: Env) {
+        Self::auto_prune_expired_orders(&env);
+    }
+
+    fn auto_prune_expired_orders(env: &Env) {
+        let count: u64 = env.storage().instance().get(&DataKey::OrderCount).unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        let config: MarketConfig = match env.storage().instance().get(&DataKey::Config) {
+            Some(c) => c,
+            None => return,
+        };
+        let now = env.ledger().timestamp();
+        for id in 1..=count {
+            if let Some(mut order) = env.storage().temporary().get::<DataKey, Order>(&DataKey::Order(id)) {
+                if order.is_active && order.expires_at <= now {
+                    let remaining = order.amount - order.filled_amount;
+                    if remaining > 0 {
+                        if order.side == Symbol::new(env, "buy") {
+                            let refund = remaining * order.price;
+                            let base_token = TokenClient::new(env, &config.base_currency);
+                            base_token.transfer(&env.current_contract_address(), &order.maker, &refund);
+                        } else if order.side == Symbol::new(env, "sell") {
+                            let rwa_token = RWATokenClient::new(env, &order.token_address);
+                            rwa_token.transfer(&env.current_contract_address(), &order.maker, &remaining);
+                        }
+                    }
+                    order.is_active = false;
+                    env.storage().temporary().set(&DataKey::Order(id), &order);
+                    env.events().publish(
+                        (Symbol::new(env, "order_expired"), order.token_address.clone()),
+                        (id, order.maker.clone(), now),
+                    );
+                }
+            }
+        }
     }
 
     // Helper: VWAP & TWAP Recording
