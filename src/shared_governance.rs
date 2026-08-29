@@ -18,6 +18,11 @@ pub enum GovernanceError {
     NotCouncil = 10,
     AlreadyVetoed = 11,
     ProposalVetoed = 12,
+    // Delegated voting (liquid democracy).
+    SelfDelegation = 13,
+    DelegationChainNotAllowed = 14,
+    NotDelegated = 15,
+    Overflow = 16,
 }
 
 /// Minimal threshold-based governance.
@@ -597,5 +602,223 @@ pub fn simulate_proposal(env: &Env, proposal_id: u64) -> ProposalSimulationResul
         state_changes,
         estimated_gas,
         requires_migration,
+    }
+}
+
+// ── Delegated voting (liquid democracy) ──────────────────────────────────────
+//
+// Token holders may delegate their voting power to a representative. The
+// delegation graph lives in the *calling contract's* instance storage, so these
+// helpers can be reused by any contract that embeds them (e.g. `RWAToken`).
+//
+// Semantics:
+// - A holder keeps at most one active delegation; delegating again replaces it.
+// - Delegated power = own voting power + power delegated to the address.
+// - Max chain depth is 1: representatives may not re-delegate the power they
+//   receive, so chains such as A -> B -> C are rejected at delegation time.
+//
+// Storage keys (instance):
+//   "gov_delegations"       : Map<Address, Address>  owner -> delegate
+//   "gov_delegated_power"   : Map<Address, i128>     delegate -> total power received
+//   "gov_delegated_count"   : Map<Address, u32>      delegate -> # of delegators
+//   "gov_delegated_amounts" : Map<Address, i128>     owner -> power currently delegated
+
+pub fn delegate_votes(env: Env, owner: Address, delegate: Address, own_voting_power: i128) {
+    owner.require_auth();
+
+    if owner == delegate {
+        panic_with_error!(&env, GovernanceError::SelfDelegation);
+    }
+
+    let delegations_key = Symbol::new(&env, "gov_delegations");
+    let delegated_power_key = Symbol::new(&env, "gov_delegated_power");
+    let delegated_count_key = Symbol::new(&env, "gov_delegated_count");
+    let delegated_amounts_key = Symbol::new(&env, "gov_delegated_amounts");
+
+    let mut delegations: soroban_sdk::Map<Address, Address> = env
+        .storage()
+        .instance()
+        .get(&delegations_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+    let mut delegated_power: soroban_sdk::Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&delegated_power_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+    let mut delegated_count: soroban_sdk::Map<Address, u32> = env
+        .storage()
+        .instance()
+        .get(&delegated_count_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+    let mut delegated_amounts: soroban_sdk::Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&delegated_amounts_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+
+    // Max chain depth 1: the target must not itself be a delegator, otherwise
+    // the received power would flow further downstream (A -> B -> C).
+    if delegations.contains_key(delegate.clone()) {
+        panic_with_error!(&env, GovernanceError::DelegationChainNotAllowed);
+    }
+    // Max chain depth 1: an address that already receives delegated power may
+    // not push that power further downstream.
+    if delegated_count.get(owner.clone()).unwrap_or(0) > 0 {
+        panic_with_error!(&env, GovernanceError::DelegationChainNotAllowed);
+    }
+
+    // Re-delegation replaces the previous delegation from this owner.
+    if let Some(previous) = delegations.get(owner.clone()) {
+        let prev_amount = delegated_amounts.get(owner.clone()).unwrap_or(0);
+        let mut power = delegated_power.get(previous.clone()).unwrap_or(0);
+        power = power.checked_sub(prev_amount).unwrap_or(0);
+        if power > 0 {
+            delegated_power.set(previous.clone(), power);
+        } else {
+            delegated_power.remove(previous.clone());
+        }
+        let mut count = delegated_count.get(previous.clone()).unwrap_or(0);
+        count = count.saturating_sub(1);
+        if count > 0 {
+            delegated_count.set(previous.clone(), count);
+        } else {
+            delegated_count.remove(previous.clone());
+        }
+        delegated_amounts.remove(owner.clone());
+    }
+
+    delegations.set(owner.clone(), delegate.clone());
+    delegated_amounts.set(owner.clone(), own_voting_power);
+    let new_power = delegated_power
+        .get(delegate.clone())
+        .unwrap_or(0)
+        .checked_add(own_voting_power)
+        .unwrap_or_else(|| panic_with_error!(&env, GovernanceError::Overflow));
+    delegated_power.set(delegate.clone(), new_power);
+    delegated_count.set(
+        delegate.clone(),
+        delegated_count.get(delegate.clone()).unwrap_or(0) + 1,
+    );
+
+    env.storage().instance().set(&delegations_key, &delegations);
+    env.storage().instance().set(&delegated_power_key, &delegated_power);
+    env.storage().instance().set(&delegated_count_key, &delegated_count);
+    env.storage().instance().set(&delegated_amounts_key, &delegated_amounts);
+
+    env.events().publish(
+        (Symbol::new(&env, "votes_delegated"), owner),
+        (delegate, own_voting_power),
+    );
+}
+
+pub fn undelegate_votes(env: Env, owner: Address) {
+    owner.require_auth();
+
+    let delegations_key = Symbol::new(&env, "gov_delegations");
+    let delegated_power_key = Symbol::new(&env, "gov_delegated_power");
+    let delegated_count_key = Symbol::new(&env, "gov_delegated_count");
+    let delegated_amounts_key = Symbol::new(&env, "gov_delegated_amounts");
+
+    let mut delegations: soroban_sdk::Map<Address, Address> = env
+        .storage()
+        .instance()
+        .get(&delegations_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+    let mut delegated_power: soroban_sdk::Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&delegated_power_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+    let mut delegated_count: soroban_sdk::Map<Address, u32> = env
+        .storage()
+        .instance()
+        .get(&delegated_count_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+    let mut delegated_amounts: soroban_sdk::Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&delegated_amounts_key)
+        .unwrap_or(soroban_sdk::Map::new(&env));
+
+    let delegate = delegations
+        .get(owner.clone())
+        .unwrap_or_else(|| panic_with_error!(&env, GovernanceError::NotDelegated));
+    let prev_amount = delegated_amounts.get(owner.clone()).unwrap_or(0);
+
+    delegations.remove(owner.clone());
+    delegated_amounts.remove(owner.clone());
+
+    let mut power = delegated_power.get(delegate.clone()).unwrap_or(0);
+    power = power.checked_sub(prev_amount).unwrap_or(0);
+    if power > 0 {
+        delegated_power.set(delegate.clone(), power);
+    } else {
+        delegated_power.remove(delegate.clone());
+    }
+
+    let mut count = delegated_count.get(delegate.clone()).unwrap_or(0);
+    count = count.saturating_sub(1);
+    if count > 0 {
+        delegated_count.set(delegate.clone(), count);
+    } else {
+        delegated_count.remove(delegate.clone());
+    }
+
+    env.storage().instance().set(&delegations_key, &delegations);
+    env.storage().instance().set(&delegated_power_key, &delegated_power);
+    env.storage().instance().set(&delegated_count_key, &delegated_count);
+    env.storage().instance().set(&delegated_amounts_key, &delegated_amounts);
+
+    env.events().publish(
+        (Symbol::new(&env, "votes_undelegated"), owner),
+        (delegate, prev_amount),
+    );
+}
+
+/// Returns the representative `owner` currently delegates to, if any.
+pub fn get_delegation(env: &Env, owner: &Address) -> Option<Address> {
+    let delegations: soroban_sdk::Map<Address, Address> = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, "gov_delegations"))
+        .unwrap_or(soroban_sdk::Map::new(env));
+    delegations.get(owner.clone())
+}
+
+/// Number of holders currently delegating to `delegate`.
+pub fn get_delegated_count(env: &Env, delegate: &Address) -> u32 {
+    let delegated_count: soroban_sdk::Map<Address, u32> = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, "gov_delegated_count"))
+        .unwrap_or(soroban_sdk::Map::new(env));
+    delegated_count.get(delegate.clone()).unwrap_or(0)
+}
+
+/// Total voting power `delegate` currently holds on behalf of its delegators.
+pub fn get_delegated_voting_power(env: &Env, delegate: &Address) -> i128 {
+    let delegated_power: soroban_sdk::Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, "gov_delegated_power"))
+        .unwrap_or(soroban_sdk::Map::new(env));
+    delegated_power.get(delegate.clone()).unwrap_or(0)
+}
+
+/// Effective voting power = own power (unless delegated away) + power received
+/// from direct delegators. Chains are impossible by construction (depth <= 1).
+pub fn get_effective_voting_power(env: &Env, address: &Address, own_voting_power: i128) -> i128 {
+    let delegations: soroban_sdk::Map<Address, Address> = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, "gov_delegations"))
+        .unwrap_or(soroban_sdk::Map::new(env));
+
+    let received = get_delegated_voting_power(env, address);
+    if delegations.contains_key(address.clone()) {
+        // Own power has been delegated away; only incoming power counts here.
+        received
+    } else {
+        own_voting_power + received
     }
 }
