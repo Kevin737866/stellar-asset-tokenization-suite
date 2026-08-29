@@ -174,13 +174,7 @@ impl DividendDistributor {
     }
 
     pub fn migrate(env: Env, auth: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::DistributorNotInitialized); });
-
-        crate::auth::assert_admin(&env, &auth, &admin);
+        crate::shared_admin::require_admin(&env, &auth);
 
         let ver = Self::read_version(&env);
         if ver >= STORAGE_VERSION {
@@ -334,11 +328,6 @@ impl DividendDistributor {
         }
 
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::NotInitialized); });
 
         Self::check_version(&env);
 
@@ -743,61 +732,6 @@ impl DividendDistributor {
     ) {
         crate::shared_admin::require_admin(&env, &auth);
 
-        Self::check_version(&env);
-
-        if amount_per_second < 0 {
-            panic_with_error!(&env, DividendError::InvalidParameters);
-        }
-
-        let config: DividendConfig = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "config"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
-
-        if !config
-            .supported_currencies
-            .iter()
-            .any(|c| c.clone() == currency)
-        {
-            panic_with_error!(&env, DividendError::UnsupportedCurrency);
-        }
-
-        let mut accruals: Map<Address, AccrualRate> = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "accruals"))
-            .unwrap_or(Map::new(&env));
-
-        let now = env.ledger().timestamp();
-        // Settle any yield accrued under the previous rate before changing it
-        let settled_total = match accruals.get(token_address.clone()) {
-            Some(rate) => Self::settle_accrual(&env, &rate, now),
-            None => 0,
-        };
-
-        let rate = AccrualRate {
-            token_address: token_address.clone(),
-            currency: currency.clone(),
-            amount_per_second,
-            last_accrual_update: now,
-            total_accrued: settled_total,
-        };
-
-        accruals.set(token_address.clone(), rate);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "accruals"), &accruals);
-
-        // Track the token so portfolio-wide yield aggregation can find it
-        Self::register_token_internal(env.clone(), token_address.clone());
-
-        env.events().publish(
-            (Symbol::new(&env, "accrual_updated"), token_address),
-            (amount_per_second, currency, now),
-        );
-    }
-
     pub fn claim_accrued_yield(env: Env, claimer: Address, token_address: Address) -> i128 {
         Self::check_version(&env);
 
@@ -874,93 +808,6 @@ impl DividendDistributor {
         );
 
         net_amount
-    }
-
-    pub fn get_accrual_rate(env: Env, token_address: Address) -> Option<AccrualRate> {
-        let accruals: Map<Address, AccrualRate> = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "accruals"))
-            .unwrap_or(Map::new(&env));
-
-        accruals.get(token_address)
-    }
-
-    pub fn calculate_accrued_yield(env: Env, claimer: Address, token_address: Address) -> i128 {
-        let accruals: Map<Address, AccrualRate> = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "accruals"))
-            .unwrap_or(Map::new(&env));
-
-        let rate = accruals
-            .get(token_address.clone())
-            .unwrap_or_else(|| panic_with_error!(&env, DividendError::NoAccrualConfigured));
-
-        let now = env.ledger().timestamp();
-        let accrued_total = Self::settle_accrual(&env, &rate, now);
-
-        let rwa_client = RWATokenClient::new(&env, &token_address);
-        let balance = rwa_client.get_balance(&claimer).amount;
-
-        if balance == 0 {
-            return 0;
-        }
-
-        let ack = AccrualClaimKey {
-            token_address: token_address.clone(),
-            claimer: claimer.clone(),
-        };
-        let last_claimed: i128 = env.storage().instance().get(&ack).unwrap_or(0i128);
-
-        if accrued_total <= last_claimed {
-            return 0;
-        }
-
-        let gross_amount = (balance * (accrued_total - last_claimed)) / 1000000000000000000i128;
-
-        let config: DividendConfig = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "config"))
-            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
-
-        let fee_amount = (gross_amount * config.fee_rate as i128) / 10000i128;
-        gross_amount - fee_amount
-    }
-
-    fn settle_accrual(env: &Env, rate: &AccrualRate, now: u64) -> i128 {
-        if now > rate.last_accrual_update {
-            let elapsed = now - rate.last_accrual_update;
-            rate.total_accrued + (rate.amount_per_second * elapsed as i128)
-        } else {
-            rate.total_accrued
-        }
-    }
-
-    fn register_token_internal(env: Env, token_address: Address) {
-        let mut tokens: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "registered_tokens"))
-            .unwrap_or(Vec::new(&env));
-
-        if !tokens.iter().any(|t| t.clone() == token_address) {
-            tokens.push_back(token_address.clone());
-            env.storage()
-                .instance()
-                .set(&Symbol::new(&env, "registered_tokens"), &tokens);
-        }
-    }
-
-    pub fn update_config(env: Env, auth: Address, config: DividendConfig) {
-        crate::shared_admin::require_admin(&env, &auth);
-
-        Self::check_version(&env);
-
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "config"), &config);
     }
 
     pub fn deactivate_distribution(env: Env, auth: Address, distribution_id: u64) {

@@ -1,4 +1,4 @@
-import { ErrorCode, ParsedHorizonError } from './types';
+import { ErrorCode, type ParsedHorizonError } from './types';
 
 export interface ErrorInfo {
   code: ErrorCode;
@@ -681,6 +681,9 @@ export function describeHorizonError(responseBody: any): string {
  */
 export function describeContractError(errorNumber: number): string {
   const code = contractErrorToCode(errorNumber);
+  if (code === ErrorCode.CONTRACT_ERROR) {
+    return 'Unknown contract error';
+  }
   return ERROR_DESCRIPTIONS[code] ?? 'Unknown contract error';
 }
 

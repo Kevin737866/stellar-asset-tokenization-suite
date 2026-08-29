@@ -1,37 +1,20 @@
-/** @type {import('jest').Config} */
+/**
+ * Jest configuration for the SDK's TypeScript unit tests.
+ *
+ * The SDK test suite is written in TypeScript and relies on `ts-jest`; this
+ * config keeps the transform consistent across all SDK test files under
+ * `sdk/src/__tests__`.
+ */
+/** @type {import('ts-jest').JestConfigWithTsJest} */
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   roots: ['<rootDir>/sdk/src'],
   testMatch: ['**/__tests__/**/*.test.ts'],
+  moduleFileExtensions: ['ts', 'tsx', 'js', 'json', 'node'],
   transform: {
-    '^.+\\.tsx?$': ['ts-jest', {
-      // diagnostics off + isolatedModules: each file transpiled in isolation
-      // via ts.transpileModule() — no language service, no full type graph.
-      // This avoids OOM on resource-constrained runners.
-      // Type safety is still enforced by the separate `tsc` build.
-      diagnostics: false,
-      tsconfig: {
-        target: 'ES2020',
-        module: 'commonjs',
-        lib: ['ES2020'],
-        esModuleInterop: true,
-        skipLibCheck: true,
-        isolatedModules: true,
-        experimentalDecorators: true,
-        emitDecoratorMetadata: true,
-        resolveJsonModule: true,
-        moduleResolution: 'node',
-        allowSyntheticDefaultImports: true,
-      },
-    }],
+    '^.+\\.tsx?$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.json' }],
   },
-  // Redirect heavy stellar packages to lightweight mocks so ts-jest does not
-  // attempt to load their type declarations (which causes OOM).
-  moduleNameMapper: {
-    '^stellar-sdk$': '<rootDir>/sdk/src/__mocks__/stellar-sdk.ts',
-    '^@stellar/stellar-base$': '<rootDir>/sdk/src/__mocks__/@stellar/stellar-base.ts',
-    '^@stellar/stellar-sdk$': '<rootDir>/sdk/src/__mocks__/@stellar/stellar-sdk.ts',
-  },
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
+  transformIgnorePatterns: ['node_modules/(?!(stellar-sdk|@stellar)/)'],
+  testPathIgnorePatterns: ['/node_modules/'],
 };

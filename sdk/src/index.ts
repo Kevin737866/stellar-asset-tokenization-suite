@@ -11,21 +11,16 @@ import { InvalidParametersError, RWASDKError, NetworkError, ContractError, Trans
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
-import type {
-  RWASDKConfig,
-  AssetInfo,
-  Balance,
-  TransactionOptions,
-  DeploymentOptions,
-  Portfolio,
-  AssetHolding,
-  SimulationResult,
-  SimulationEvent,
-  StorageChange,
-  SimulationOptions,
-  BatchTransactionOperation,
-  BatchTransactionResult,
-} from './types';
+import {
+  GasEstimator,
+  estimateGas,
+  isWithinAccuracy,
+  gasCostToString,
+  type GasEstimate,
+  type GasEstimationOptions,
+  type OperationType,
+  type EstimateParams
+} from './gasEstimator';
 
 // Type exports
 export * from './types';
@@ -790,6 +785,29 @@ export class StellarRWASDK {
       );
     }
     return simulation;
+  }
+
+  /**
+   * Estimate the gas cost of an operation before submission (Issue #194).
+   *
+   * Uses today's Soroban RPC `simulateTransaction` when a `tx` is provided,
+   * caching estimates for common operations within the configured TTL. Falls
+   * back to a deterministic heuristic when simulation is unavailable so a
+   * usable fee is always produced.
+   *
+   * @param operation Which category of operation is being costed.
+   * @param params    Transaction + contextual params for the estimate.
+   * @param options   Optional overrides (server, base fee, cache TTL, congestion
+   *                  multiplier).
+   */
+  async estimateGas(
+    operation: OperationType,
+    params: EstimateParams = {},
+    options: GasEstimationOptions = {},
+  ): Promise<GasEstimate> {
+    const { SorobanRpc } = await import('stellar-sdk');
+    const server = options.server ?? new SorobanRpc.Server(this.config.stellar.serverUrl);
+    return estimateGas(operation, { ...params, ...options, server });
   }
 }
 
