@@ -256,6 +256,8 @@ export class MarketClient {
     tokenAddress: Address,
     limit: number = DEFAULT_PAGINATION_LIMIT
   ): Promise<Trade[]> {
+    validateAddress(tokenAddress, 'tokenAddress');
+    validatePositiveInteger(limit, 'limit');
     try {
       const result = await this.contract.call(
         'get_recent_trades', 
@@ -309,6 +311,7 @@ export class MarketClient {
     paused: boolean,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
     this.logger.info('Setting pause status', { paused });
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -342,6 +345,8 @@ export class MarketClient {
     config: MarketConfig,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    if (config.feeRate != null) validateRange(config.feeRate, 0, 10000, 'config.feeRate');
     this.logger.info('Updating market config');
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -423,6 +428,8 @@ export class MarketClient {
     totalFee: string;
     feeCurrency: string;
   }> {
+    validateAmount(amount, 'amount');
+    validateAmount(price, 'price');
     try {
       return {
         baseFee: '100',
@@ -442,6 +449,8 @@ export class MarketClient {
     bids: Array<{ price: string; amount: string; total: string }>;
     asks: Array<{ price: string; amount: string; total: string }>;
   }> {
+    validateAddress(tokenAddress, 'tokenAddress');
+    validatePositiveInteger(depth, 'depth');
     try {
       const orderBook = await this.getOrderBook(tokenAddress);
       

@@ -1,8 +1,5 @@
-// ─── Third-party ─────────────────────────────────────────────────────────────
+// Main SDK exports
 import { Address } from 'stellar-sdk';
-export { Address } from 'stellar-sdk';
-
-// ─── Internal modules ─────────────────────────────────────────────────────────
 import { AssetFactory } from './assetFactory';
 import { TokenClient } from './tokenClient';
 import { DividendClient } from './dividendClient';
@@ -27,36 +24,17 @@ import {
   STELLAR_NETWORKS,
 } from './constants';
 import { createLogger, Logger } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 import {
-  validateAddress,
-  validateAmount,
-  validateNonEmptyString,
-  validatePositiveInteger,
-  validateServerUrl,
-  validateContractId,
-  validateBoolean,
-  validateEnum,
-  validateRange,
-} from './validation';
-
-// ─── Type imports (one-way: index → types, never types → index) ───────────────
-import type {
-  RWASDKConfig,
-  AssetInfo,
-  Balance,
-  KYCStatus,
-  DividendDistribution,
-  Order,
-  Trade,
-  TransactionOptions,
-  DeploymentOptions,
-  Portfolio,
-  AssetHolding,
-  SimulationResult,
-  SimulationEvent,
-  StorageChange,
-  SimulationOptions,
-} from './types';
+  GasEstimator,
+  estimateGas,
+  isWithinAccuracy,
+  gasCostToString,
+  type GasEstimate,
+  type GasEstimationOptions,
+  type OperationType,
+  type EstimateParams
+} from './gasEstimator';
 
 // ─── All public types re-exported from the types module ───────────────────────
 // This is the SINGLE re-export of every shared type. No other module should
@@ -65,30 +43,28 @@ export * from './types';
 
 // ─── Custody module exports ───────────────────────────────────────────────────
 export {
-  CustodyClient,
-  type CustodyAttestation,
-  type CustodianRegistry,
-  type DisputeRecord,
-  type VerificationTypeConfig,
-  type InsuranceIntegration,
-  type CustodianProfile,
-  type ProofData,
+    CustodyClient,
+    type CustodyAttestation,
+    type CustodianRegistry,
+    type DisputeRecord,
+    type VerificationTypeConfig,
+    type InsuranceIntegration,
+    type CustodianProfile,
+    type ProofData
 } from './custody';
 
 export {
-  CustodyMonitoring,
-  type CustodyAlert,
-  type CustodianMetrics,
-  type AssetDepreciationData,
-  type InsuranceStatus,
-  type MonitoringConfig,
+    CustodyMonitoring,
+    type CustodyAlert,
+    type CustodianMetrics,
+    type AssetDepreciationData,
+    type InsuranceStatus,
+    type MonitoringConfig
 } from './custodyMonitoring';
 
-// ─── Error module exports ─────────────────────────────────────────────────────
-// We export the ERROR CLASS as `RWASDKErrorClass` to avoid a name collision
-// with the `RWASDKError` *interface* already re-exported from `types.ts` above.
-// Consumers who need the class should import `RWASDKErrorClass` or the
-// specific subclasses (NetworkError, TransactionError, etc.).
+// Error exports — selective to avoid re-exporting RWASDKError class under the
+// same name as the RWASDKError interface that comes from `export * from './types'`.
+// Consumers who need the class can use RWASDKErrorClass.
 export {
   RWASDKError as RWASDKErrorClass,
   NetworkError,
@@ -121,6 +97,253 @@ export {
   SUGGESTED_ACTIONS,
   type ErrorInfo,
 } from './errors';
+
+// ─── BatchTransactionBuilder ──────────────────────────────────────────────────
+
+/**
+ * Maximum number of operations per batch.
+ * Stellar protocol allows up to 100 operations per transaction; we cap at 50
+ * to leave room for fee-bump and auth operations.
+ */
+const BATCH_MAX_OPS = 50;
+
+/** Default per-operation fee contribution in stroops when none is specified. */
+const BATCH_BASE_OP_FEE = 100;
+
+/** Fixed overhead added on top of summed per-operation fees to cover envelope costs. */
+const BATCH_OVERHEAD_FEE = 1000;
+
+/**
+ * Builder for creating and submitting multi-operation Stellar transactions.
+ *
+ * All operations added via {@link add} are collected and then submitted as a
+ * single **atomic** Stellar transaction when {@link submit} is called.
+ * Stellar's atomicity guarantee means any failure causes the entire batch to
+ * revert — no partial state changes are ever committed on-chain.
+ *
+ * Cross-contract batches are fully supported: each
+ * {@link BatchTransactionOperation} may target a different contract.
+ *
+ * @example
+ * ```ts
+ * const batch = sdk.createBatch();
+ *
+ * batch
+ *   .add({ label: 'mint',       contractId: tokenAddr,    functionName: 'mint',                args: [toScVal(to), toScVal(amount)] })
+ *   .add({ label: 'distribute', contractId: dividendAddr, functionName: 'create_distribution', args: [toScVal(opts)] });
+ *
+ * console.log('estimated gas:', batch.estimateGas());
+ * const result = await batch.submit(sourceAddress);
+ * console.log('tx hash:', result.transactionHash);
+ * ```
+ */
+export class BatchTransactionBuilder {
+  private readonly operations: BatchTransactionOperation[] = [];
+  private readonly serverUrl: string;
+  private readonly networkPassphrase: string;
+  private readonly logger: Logger;
+
+  constructor(serverUrl: string, networkPassphrase: string) {
+    validateServerUrl(serverUrl, 'serverUrl');
+    validateNonEmptyString(networkPassphrase, 'networkPassphrase');
+    this.serverUrl = serverUrl;
+    this.networkPassphrase = networkPassphrase;
+    this.logger = createLogger('BatchTransactionBuilder');
+  }
+
+  // ─── add ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Append a contract-call operation to the batch.
+   *
+   * @param operation - Descriptor with `label`, `contractId`, `functionName`,
+   *   `args`, and an optional per-operation `fee`.
+   * @returns `this` — supports method chaining.
+   * @throws {InvalidParametersError} if the batch is already full (≥ {@link BATCH_MAX_OPS})
+   *   or if required fields are missing/invalid.
+   */
+  add(operation: BatchTransactionOperation): this {
+    if (this.operations.length >= BATCH_MAX_OPS) {
+      throw new InvalidParametersError(
+        `Batch cannot exceed ${BATCH_MAX_OPS} operations (currently ${this.operations.length}). ` +
+        `Split into multiple batches.`
+      );
+    }
+    validateNonEmptyString(operation.label,        'operation.label');
+    validateNonEmptyString(operation.contractId,   'operation.contractId');
+    validateNonEmptyString(operation.functionName, 'operation.functionName');
+    if (!Array.isArray(operation.args)) {
+      throw new InvalidParametersError('operation.args must be an array');
+    }
+    if (operation.fee != null && (typeof operation.fee !== 'number' || operation.fee <= 0)) {
+      throw new InvalidParametersError('operation.fee must be a positive number when provided');
+    }
+
+    this.operations.push({ ...operation });
+    this.logger.info('Operation queued in batch', {
+      label: operation.label,
+      contractId: operation.contractId,
+      functionName: operation.functionName,
+      totalOps: this.operations.length,
+    });
+    return this;
+  }
+
+  // ─── build ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Return a snapshot of all queued operations without submitting.
+   *
+   * Useful for previewing or serialising the batch before calling
+   * {@link submit}.
+   *
+   * @throws {InvalidParametersError} if the batch is empty.
+   */
+  build(): BatchTransactionOperation[] {
+    if (this.operations.length === 0) {
+      throw new InvalidParametersError(
+        'Cannot build an empty batch — add at least one operation first'
+      );
+    }
+    return [...this.operations];
+  }
+
+  // ─── estimateGas ───────────────────────────────────────────────────────────
+
+  /**
+   * Estimate the total fee for this batch in stroops.
+   *
+   * Formula: `sum(op.fee ?? BATCH_BASE_OP_FEE) + BATCH_OVERHEAD_FEE`
+   *
+   * @returns Estimated total fee as a decimal string.
+   */
+  estimateGas(): string {
+    const opsTotal = this.operations.reduce(
+      (sum, op) => sum + (op.fee ?? BATCH_BASE_OP_FEE),
+      0,
+    );
+    return String(opsTotal + BATCH_OVERHEAD_FEE);
+  }
+
+  // ─── submit ────────────────────────────────────────────────────────────────
+
+  /**
+   * Build and submit all queued operations as a single atomic Stellar transaction.
+   *
+   * **Atomicity**: if any operation is rejected on-chain, Stellar reverts the
+   * entire transaction. `operationResults` in the thrown error will mark every
+   * operation as failed.
+   *
+   * @param source    - The Stellar account that signs the transaction.
+   * @param txOptions - Optional fee and timeout overrides.
+   * @returns {@link BatchTransactionResult} with the hash and per-operation outcomes.
+   * @throws {InvalidParametersError} if the batch is empty or `source` is invalid.
+   * @throws {TransactionError} wrapping the network failure with full
+   *   `operationResults` so callers can diagnose which entry caused the revert.
+   */
+  async submit(
+    source: Address,
+    txOptions: TransactionOptions = {},
+  ): Promise<BatchTransactionResult> {
+    validateAddress(source, 'source');
+    if (this.operations.length === 0) {
+      throw new InvalidParametersError(
+        'Cannot submit an empty batch — call add() with at least one operation first'
+      );
+    }
+    if (txOptions.fee != null && (typeof txOptions.fee !== 'number' || txOptions.fee <= 0)) {
+      throw new InvalidParametersError('txOptions.fee must be a positive number');
+    }
+    if (txOptions.timeout != null && (typeof txOptions.timeout !== 'number' || txOptions.timeout <= 0)) {
+      throw new InvalidParametersError('txOptions.timeout must be a positive number');
+    }
+
+    const estimatedFee = parseInt(this.estimateGas(), 10);
+    const fee = txOptions.fee ?? estimatedFee;
+
+    this.logger.info('Submitting batch transaction', {
+      source: source.toString(),
+      operationCount: this.operations.length,
+      estimatedFee,
+    });
+
+    try {
+      const { SorobanRpc, TransactionBuilder, Operation } = await import('stellar-sdk');
+      const server = new SorobanRpc.Server(this.serverUrl);
+      const account = await server.getAccount(source.toString());
+
+      const builder = new TransactionBuilder(account, {
+        fee: fee.toString(),
+        networkPassphrase: this.networkPassphrase,
+      });
+
+      for (const op of this.operations) {
+        builder.addOperation(
+          Operation.invokeContractFunction({
+            contract: op.contractId,
+            function: op.functionName,
+            args: op.args as any[],
+          }),
+        );
+      }
+
+      const tx = builder
+        .setTimeout(txOptions.timeout ?? DEFAULT_TIMEOUT_SECONDS)
+        .build();
+
+      const response = await server.sendTransaction(tx);
+      if ((response as any).status === 'ERROR') {
+        throw new TransactionError(
+          `Batch rejected by network: ${JSON.stringify((response as any).errorResult ?? '')}`
+        );
+      }
+
+      const hash: string = (response as any).hash;
+      const operationResults: BatchTransactionResult['operationResults'] =
+        this.operations.map(op => ({ label: op.label, success: true }));
+
+      this.logger.info('Batch transaction submitted successfully', {
+        hash,
+        operationCount: this.operations.length,
+      });
+
+      return {
+        transactionHash: hash,
+        success: true,
+        operationResults,
+        totalFee: fee.toString(),
+        estimatedGas: estimatedFee.toString(),
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error('Batch transaction failed — all operations reverted', {
+        error: msg,
+        operationCount: this.operations.length,
+      });
+
+      const operationResults: BatchTransactionResult['operationResults'] =
+        this.operations.map(op => ({ label: op.label, success: false, errorMessage: msg }));
+
+      throw new TransactionError(
+        `Batch failed — all ${this.operations.length} operations reverted: ${msg}`,
+        { operationResults },
+      );
+    }
+  }
+
+  // ─── Utility ───────────────────────────────────────────────────────────────
+
+  /** Number of operations currently queued. */
+  get size(): number {
+    return this.operations.length;
+  }
+
+  /** Remove all queued operations and reset to an empty state. */
+  clear(): void {
+    this.operations.length = 0;
+    this.logger.info('Batch cleared');
+  }
+}
 
 // Configuration utilities
 export class StellarRWASDK {
@@ -168,6 +391,28 @@ export class StellarRWASDK {
       throw new InvalidParametersError('tokenAddress is required');
     }
     return new TokenClient(this.config, tokenAddress);
+  }
+
+  /**
+   * Create a new {@link BatchTransactionBuilder} pre-configured with this
+   * SDK's network settings.
+   *
+   * Use the returned builder to queue multiple contract-call operations and
+   * then submit them as a single atomic Stellar transaction.
+   *
+   * @example
+   * ```ts
+   * const batch = sdk.createBatch();
+   * batch.add({ label: 'mint', contractId: token, functionName: 'mint', args });
+   * batch.add({ label: 'lock', contractId: token, functionName: 'lock_tokens', args });
+   * const result = await batch.submit(signerAddress);
+   * ```
+   */
+  createBatch(): BatchTransactionBuilder {
+    return new BatchTransactionBuilder(
+      this.config.stellar.serverUrl,
+      this.config.stellar.passphrase,
+    );
   }
 
   /**
@@ -557,9 +802,34 @@ export class StellarRWASDK {
     }
     return simulation;
   }
+
+  /**
+   * Estimate the gas cost of an operation before submission (Issue #194).
+   *
+   * Uses today's Soroban RPC `simulateTransaction` when a `tx` is provided,
+   * caching estimates for common operations within the configured TTL. Falls
+   * back to a deterministic heuristic when simulation is unavailable so a
+   * usable fee is always produced.
+   *
+   * @param operation Which category of operation is being costed.
+   * @param params    Transaction + contextual params for the estimate.
+   * @param options   Optional overrides (server, base fee, cache TTL, congestion
+   *                  multiplier).
+   */
+  async estimateGas(
+    operation: OperationType,
+    params: EstimateParams = {},
+    options: GasEstimationOptions = {},
+  ): Promise<GasEstimate> {
+    const { SorobanRpc } = await import('stellar-sdk');
+    const server = options.server ?? new SorobanRpc.Server(this.config.stellar.serverUrl);
+    return estimateGas(operation, { ...params, ...options, server });
+  }
 }
 
 // ─── Factory Function ─────────────────────────────────────────────────────────
+
+// Factory function to create SDK instance with common configurations
 export function createStellarRWASDK(
   network: 'testnet' | 'mainnet' | 'futurenet' | 'standalone',
   contracts: {

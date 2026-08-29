@@ -332,6 +332,7 @@ export class ComplianceClient {
     user: Address,
     amount: string
   ): Promise<boolean> {
+    validateAddress(user, 'user');
     try {
       const result = await this.contract.call(
         'check_transfer_limits',
@@ -353,6 +354,9 @@ export class ComplianceClient {
   ): Promise<string> {
     validateAddress(admin, 'admin');
     validateAddress(user, 'user');
+    if (limits.dailyLimit) validateAmount(limits.dailyLimit, 'limits.dailyLimit');
+    if (limits.monthlyLimit) validateAmount(limits.monthlyLimit, 'limits.monthlyLimit');
+    if (limits.annualLimit) validateAmount(limits.annualLimit, 'limits.annualLimit');
     this.logger.info('Setting transfer limits', { user: user.toString() });
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -402,6 +406,9 @@ export class ComplianceClient {
     rule: ComplianceRule,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    validateNonEmptyString(rule.ruleId, 'rule.ruleId');
+    validateNonEmptyString(rule.name, 'rule.name');
     this.logger.info('Updating compliance rule', { ruleId: rule.ruleId });
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -480,6 +487,9 @@ export class ComplianceClient {
     validateAddress(admin, 'admin');
     if (!updates || !Array.isArray(updates) || updates.length === 0) {
       throw new InvalidParametersError('updates must be a non-empty array');
+    }
+    for (const update of updates) {
+      validateAddress(update.user, 'update.user');
     }
     this.logger.info('Batch updating KYC status', { count: updates.length });
     try {

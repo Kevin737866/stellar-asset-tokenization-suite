@@ -9,6 +9,7 @@ mod dividend_distributor;
 mod rwa_token;
 mod secondary_market;
 pub mod shared_admin;
+pub mod shared_governance;
 pub mod real_estate;
 pub mod commodity;
 pub mod invoice;

@@ -148,6 +148,7 @@ export class DividendClient {
     claimer: Address,
     txOptions: TransactionOptions = {}
   ): Promise<{ transactionHash: string; claimedAmounts: string[] }> {
+    validateAddress(claimer, 'claimer');
     this.logger.info('Claiming all dividends', { claimer: claimer.toString() });
     try {
       const account = await this.server.getAccount(claimer.toString());
@@ -182,6 +183,7 @@ export class DividendClient {
   }
 
   async getDistribution(distributionId: number): Promise<DividendDistribution> {
+    validatePositiveInteger(distributionId, 'distributionId');
     try {
       const result = await this.contract.call('get_distribution', new ScInt(distributionId));
       const distribution = this.convertScValToDistribution(result.result);
@@ -192,6 +194,7 @@ export class DividendClient {
   }
 
   async getActiveDistributions(tokenAddress: Address): Promise<DividendDistribution[]> {
+    validateAddress(tokenAddress, 'tokenAddress');
     try {
       const result = await this.contract.call('get_active_distributions', new Address(tokenAddress));
       const distributions = this.convertScValToDistributionArray(result.result);
@@ -202,6 +205,8 @@ export class DividendClient {
   }
 
   async getClaimInfo(distributionId: number, claimer: Address): Promise<ClaimInfo | null> {
+    validatePositiveInteger(distributionId, 'distributionId');
+    validateAddress(claimer, 'claimer');
     try {
       const result = await this.contract.call(
         'get_claim_info', 
@@ -224,6 +229,8 @@ export class DividendClient {
     distributionId: number,
     claimer: Address
   ): Promise<string> {
+    validatePositiveInteger(distributionId, 'distributionId');
+    validateAddress(claimer, 'claimer');
     try {
       const result = await this.contract.call(
         'calculate_available_dividend',
@@ -284,6 +291,8 @@ export class DividendClient {
     distributionId: number,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    validatePositiveInteger(distributionId, 'distributionId');
     this.logger.info('Deactivating distribution', { distributionId });
     try {
       const account = await this.server.getAccount(admin.toString());
