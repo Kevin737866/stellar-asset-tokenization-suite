@@ -415,6 +415,47 @@ impl RWAToken {
         );
     }
 
+    // ── delegated voting (liquid democracy) ───────────────────────────────────
+    //
+    // A holder may delegate its voting power to a representative. Delegated
+    // power = own + delegated, with a max chain depth of 1 (representatives
+    // cannot re-delegate the power they receive). See `shared_governance.rs`.
+
+    /// Delegates `owner`'s voting power to `delegate` (replaces any previous
+    /// delegation from `owner`). Panics on self-delegation and on any attempt
+    /// to form a delegation chain longer than 1.
+    pub fn delegate_votes(env: Env, owner: Address, delegate: Address) {
+        let balance = Self::get_balance(env.clone(), owner.clone());
+        crate::shared_governance::delegate_votes(env, owner, delegate, balance.voting_power);
+    }
+
+    /// Removes `owner`'s active delegation, returning its voting power.
+    pub fn undelegate_votes(env: Env, owner: Address) {
+        crate::shared_governance::undelegate_votes(env, owner);
+    }
+
+    /// The representative `owner` currently delegates to, if any.
+    pub fn get_delegation(env: Env, owner: Address) -> Option<Address> {
+        crate::shared_governance::get_delegation(&env, &owner)
+    }
+
+    /// Number of holders currently delegating to `delegate`.
+    pub fn get_delegated_count(env: Env, delegate: Address) -> u32 {
+        crate::shared_governance::get_delegated_count(&env, &delegate)
+    }
+
+    /// Total voting power `delegate` holds on behalf of its delegators.
+    pub fn get_delegated_voting_power(env: Env, delegate: Address) -> i128 {
+        crate::shared_governance::get_delegated_voting_power(&env, &delegate)
+    }
+
+    /// Effective voting power of `address` = own power (unless delegated away)
+    /// + power received from direct delegators.
+    pub fn get_effective_voting_power(env: Env, address: Address) -> i128 {
+        let balance = Self::get_balance(env.clone(), address.clone());
+        crate::shared_governance::get_effective_voting_power(&env, &address, balance.voting_power)
+    }
+
     pub fn pause(env: Env, auth: Address) {
         crate::shared_admin::require_admin(&env, &auth);
         Self::check_version(&env);
