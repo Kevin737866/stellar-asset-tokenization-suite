@@ -7,8 +7,22 @@ import { MarketClient } from './marketClient';
 import { ComplianceClient } from './complianceClient';
 import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
-import { InvalidParametersError, RWASDKError, NetworkError, ContractError, TransactionError, HorizonError, parseHorizonError, describeHorizonError } from './errors';
-import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, STELLAR_NETWORKS } from './constants';
+import {
+  InvalidParametersError,
+  RWASDKError,
+  NetworkError,
+  ContractError,
+  TransactionError,
+  HorizonError,
+  parseHorizonError,
+  describeHorizonError,
+} from './errors';
+import {
+  DEFAULT_DECIMALS,
+  DEFAULT_FEE_RATE,
+  DEFAULT_TIMEOUT_SECONDS,
+  STELLAR_NETWORKS,
+} from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 import {
@@ -22,10 +36,12 @@ import {
   type EstimateParams
 } from './gasEstimator';
 
-// Type exports
+// ─── All public types re-exported from the types module ───────────────────────
+// This is the SINGLE re-export of every shared type. No other module should
+// re-export from types.ts to prevent accidental circular paths.
 export * from './types';
 
-// Custody-related exports
+// ─── Custody module exports ───────────────────────────────────────────────────
 export {
     CustodyClient,
     type CustodyAttestation,

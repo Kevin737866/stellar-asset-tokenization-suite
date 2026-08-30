@@ -8,20 +8,29 @@ import {
   xdr,
   ScInt
 } from 'stellar-sdk';
-import { 
+import type { 
   DividendDistribution, 
   DividendConfig, 
   DividendOptions, 
   Currency, 
   ClaimInfo, 
   TransactionOptions, 
-  RWASDKConfig, 
-  RWASDKError
+  RWASDKConfig,
+  ErrorCode,
 } from './types';
-import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, ContractError } from './errors';
+import {
+  RWASDKError,
+  contractErrorToCode,
+  TimeoutError,
+  InsufficientBalanceError,
+  UnauthorizedError,
+  ContractError,
+  InvalidParametersError,
+  TransactionError,
+} from './errors';
 import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange, validateFutureDate } from './validation';
 
 export class DividendClient {
   private server: Server;
@@ -342,7 +351,7 @@ export class DividendClient {
     nextCursor?: string;
   }> {
     try {
-      throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'getUserDividendHistory not implemented');
+      throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'getUserDividendHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
@@ -383,39 +392,39 @@ export class DividendClient {
   }
 
   private convertDividendConfigToScVal(config: DividendConfig): xdr.ScVal {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertDividendConfigToScVal not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertDividendConfigToScVal not implemented');
   }
 
   private convertScValToDistribution(scVal: xdr.ScVal): DividendDistribution {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToDistribution not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertScValToDistribution not implemented');
   }
 
   private convertScValToDistributionArray(scVal: xdr.ScVal): DividendDistribution[] {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToDistributionArray not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertScValToDistributionArray not implemented');
   }
 
   private convertScValToClaimInfo(scVal: xdr.ScVal): ClaimInfo {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToClaimInfo not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertScValToClaimInfo not implemented');
   }
 
   private extractDistributionId(resultMetaXdr: string): number {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'extractDistributionId not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'extractDistributionId not implemented');
   }
 
   private extractClaimedAmount(resultMetaXdr: string): string {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'extractClaimedAmount not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'extractClaimedAmount not implemented');
   }
 
   private extractClaimedAmounts(resultMetaXdr: string): string[] {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'extractClaimedAmounts not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'extractClaimedAmounts not implemented');
   }
 
   private async signTransaction(transaction: any, signer: Address): Promise<any> {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'signTransaction not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'signTransaction not implemented');
   }
 
-  private handleError(error: unknown): RWASDKErrorClass {
-    if (error instanceof RWASDKErrorClass) {
+  private handleError(error: unknown): RWASDKError {
+    if (error instanceof RWASDKError) {
       return error;
     }
 
@@ -436,7 +445,7 @@ export class DividendClient {
     const match = message.match(/ContractError\((\d+)\)/);
     if (match) {
       const code = contractErrorToCode(parseInt(match[1]));
-      return new RWASDKErrorClass(code, message);
+      return new RWASDKError(code, message);
     }
 
     return new ContractError(message);
