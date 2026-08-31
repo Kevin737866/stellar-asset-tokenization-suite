@@ -397,7 +397,7 @@ impl DividendDistributor {
             Self::get_currency_token_address(env.clone(), currency.clone());
         let currency_client = TokenClient::new(&env, &currency_token_address);
 
-        currency_client.transfer(&admin, &env.current_contract_address(), &amount);
+        currency_client.transfer(&auth, &env.current_contract_address(), &amount);
 
         // Track the token so portfolio-wide claims can iterate all held assets
         Self::register_token_internal(env.clone(), token_address.clone());
@@ -731,6 +731,152 @@ impl DividendDistributor {
         amount_per_second: i128,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
+        Self::check_version(&env);
+
+        let config: DividendConfig = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "config"))
+            .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
+
+        if !config
+            .supported_currencies
+            .iter()
+            .any(|c| c.clone() == currency)
+        {
+            panic_with_error!(&env, DividendError::UnsupportedCurrency);
+        }
+
+        let mut accruals: Map<Address, AccrualRate> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "accruals"))
+            .unwrap_or(Map::new(&env));
+
+        let now = env.ledger().timestamp();
+        let total_accrued = if let Some(existing) = accruals.get(token_address.clone()) {
+            Self::settle_accrual(&env, &existing, now)
+        } else {
+            0
+        };
+
+        let new_rate = AccrualRate {
+            token_address: token_address.clone(),
+            currency,
+            amount_per_second,
+            last_accrual_update: now,
+            total_accrued,
+        };
+
+        accruals.set(token_address, new_rate);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "accruals"), &accruals);
+    }
+
+    fn settle_accrual(env: &Env, rate: &AccrualRate, now: u64) -> i128 {
+        if now <= rate.last_accrual_update {
+            return rate.total_accrued;
+        }
+        let elapsed = (now - rate.last_accrual_update) as i128;
+        rate.total_accrued + (rate.amount_per_second * elapsed)
+    }
+
+    pub fn calculate_accrued_yield(env: Env, claimer: Address, token_address: Address) -> i128 {
+        let accruals: Map<Address, AccrualRate> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "accruals"))
+            .unwrap_or(Map::new(&env));
+
+        let rate = match accruals.get(token_address.clone()) {
+            Some(r) => r,
+            None => return 0,
+        };
+
+        let now = env.ledger().timestamp();
+        let accrued_total = Self::settle_accrual(&env, &rate, now);
+
+        let rwa_client = RWATokenClient::new(&env, &token_address);
+        let balance = rwa_client.get_balance(&claimer).amount;
+        if balance == 0 {
+            return 0;
+        }
+
+        let ack = AccrualClaimKey {
+            token_address,
+            claimer,
+        };
+        let last_claimed: i128 = env.storage().instance().get(&ack).unwrap_or(0i128);
+
+        let gross_amount = (balance * (accrued_total - last_claimed)) / 1000000000000000000i128;
+        if gross_amount <= 0 {
+            return 0;
+        }
+
+        let config: DividendConfig = match env.storage().instance().get(&Symbol::new(&env, "config")) {
+            Some(c) => c,
+            None => return 0,
+        };
+
+        let fee_amount = (gross_amount * config.fee_rate as i128) / 10000i128;
+        gross_amount - fee_amount
+    }
+
+    pub fn get_accrual_rate(env: Env, token_address: Address) -> Option<AccrualRate> {
+        let accruals: Map<Address, AccrualRate> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "accruals"))
+            .unwrap_or(Map::new(&env));
+        accruals.get(token_address)
+    }
+
+    pub fn update_config(env: Env, auth: Address, new_config: DividendConfig) {
+        crate::shared_admin::require_admin(&env, &auth);
+        Self::check_version(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "config"), &new_config);
+    }
+
+    fn register_token_internal(env: Env, token_address: Address) {
+        let mut tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "registered_tokens"))
+            .unwrap_or(Vec::new(&env));
+
+        if !tokens.iter().any(|t| t == token_address) {
+            tokens.push_back(token_address);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "registered_tokens"), &tokens);
+        }
+    }
+
+    pub fn calculate_dividend_by_rights(
+        env: Env,
+        base_amount: i128,
+        rights: crate::security::DividendRights,
+        unpaid_accrued: i128,
+        excess_profit: i128,
+    ) -> i128 {
+        match rights {
+            crate::security::DividendRights::Cumulative => {
+                base_amount.saturating_add(unpaid_accrued)
+            }
+            crate::security::DividendRights::NonCumulative => {
+                base_amount
+            }
+            crate::security::DividendRights::Participating => {
+                base_amount.saturating_add(excess_profit)
+            }
+            crate::security::DividendRights::NonParticipating => {
+                base_amount
+            }
+        }
+    }
 
     pub fn claim_accrued_yield(env: Env, claimer: Address, token_address: Address) -> i128 {
         Self::check_version(&env);

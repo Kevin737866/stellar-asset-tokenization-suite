@@ -116,7 +116,7 @@ fn setup_gas_env() -> GasTestEnv {
     let token = RWATokenClient::new(&env, &token_id);
 
     let mut metadata = Map::new(&env);
-    metadata.set(Symbol::new(&env, "asset_type"), Symbol::new(&env, "real_estate"));
+    metadata.set(Symbol::new(&env, "asset_type"), soroban_sdk::String::from_str(&env, "real_estate"));
 
     token.initialize(
         &admin,
@@ -264,7 +264,7 @@ fn gas_bench_update_kyc() {
     };
 
     t.env.budget().reset_default();
-    t.compliance.update_kyc_status(&t.admin, &t.user, kyc);
+    t.compliance.update_kyc_status(&t.admin, &t.user, &kyc);
     let gas = get_gas_consumed(&t.env);
 
     check_gas_regression("update_kyc_status", gas);
@@ -311,10 +311,7 @@ fn gas_bench_place_order() {
     // Deploy and initialize market
     let market_id = env.register_contract(None, SecondaryMarket);
     let market = SecondaryMarketClient::new(&env, &market_id);
-    market.initialize(&admin, &base_token);
-
-    // Add a supported token
-    market.add_supported_token(&admin, &base_token);
+    market.initialize(&admin, &base_token, &admin, &admin, &50i64, &100i128, &2000i64);
 
     env.budget().reset_default();
     market.place_order(
@@ -322,8 +319,9 @@ fn gas_bench_place_order() {
         &base_token,
         &Symbol::new(&env, "buy"),
         &1000i128,
-        &10_000_000i128, // 10 USDC (7 decimals)
+        &10_000_000i128,
         &(env.ledger().timestamp() + 86400 * 7),
+        &100i128,
     );
     let gas = get_gas_consumed(&env);
 
@@ -340,8 +338,7 @@ fn gas_bench_cancel_order() {
 
     let market_id = env.register_contract(None, SecondaryMarket);
     let market = SecondaryMarketClient::new(&env, &market_id);
-    market.initialize(&admin, &base_token);
-    market.add_supported_token(&admin, &base_token);
+    market.initialize(&admin, &base_token, &admin, &admin, &50i64, &100i128, &2000i64);
 
     market.place_order(
         &admin,
@@ -350,6 +347,7 @@ fn gas_bench_cancel_order() {
         &1000i128,
         &10_000_000i128,
         &(env.ledger().timestamp() + 86400 * 7),
+        &100i128,
     );
 
     env.budget().reset_default();
@@ -370,31 +368,20 @@ fn gas_bench_fill_order() {
 
     let market_id = env.register_contract(None, SecondaryMarket);
     let market = SecondaryMarketClient::new(&env, &market_id);
-    market.initialize(&admin, &base_token);
-    market.add_supported_token(&admin, &base_token);
+    market.initialize(&admin, &base_token, &admin, &admin, &50i64, &100i128, &2000i64);
 
-    // Place sell order
     market.place_order(
-        &admin,
+        &seller,
         &base_token,
         &Symbol::new(&env, "sell"),
         &1000i128,
         &10_000_000i128,
         &(env.ledger().timestamp() + 86400 * 7),
-    );
-
-    // Place buy order
-    market.place_order(
-        &seller,
-        &base_token,
-        &Symbol::new(&env, "buy"),
-        &500i128,
-        &10_000_000i128,
-        &(env.ledger().timestamp() + 86400 * 7),
+        &100i128,
     );
 
     env.budget().reset_default();
-    let _result = market.fill_order(&admin, &1u64, &2u64);
+    let _result = market.fill_order(&admin, &1u64, &500i128);
     let gas = get_gas_consumed(&env);
 
     check_gas_regression("fill_order", gas);
@@ -412,9 +399,9 @@ fn gas_bench_claim_dividend() {
 
     let dividend_id = env.register_contract(None, DividendDistributor);
     let dividend = DividendDistributorClient::new(&env, &dividend_id);
-    dividend.initialize(&admin, &token_addr);
+    dividend.initialize(&admin, &admin, &Vec::from_array(&env, [Symbol::new(&env, "USDC")]));
+    dividend.register_currency_token(&admin, &Symbol::new(&env, "USDC"), &admin);
 
-    // Create a distribution
     dividend.create_distribution(
         &admin,
         &token_addr,
@@ -425,7 +412,7 @@ fn gas_bench_claim_dividend() {
     );
 
     env.budget().reset_default();
-    dividend.claim_dividend(&admin, &1u64);
+    dividend.claim_dividend(&1u64, &admin);
     let gas = get_gas_consumed(&env);
 
     check_gas_regression("claim_dividend", gas);
@@ -441,7 +428,8 @@ fn gas_bench_create_distribution() {
 
     let dividend_id = env.register_contract(None, DividendDistributor);
     let dividend = DividendDistributorClient::new(&env, &dividend_id);
-    dividend.initialize(&admin, &token_addr);
+    dividend.initialize(&admin, &admin, &Vec::from_array(&env, [Symbol::new(&env, "USDC")]));
+    dividend.register_currency_token(&admin, &Symbol::new(&env, "USDC"), &admin);
 
     env.budget().reset_default();
     dividend.create_distribution(
@@ -461,6 +449,9 @@ fn gas_bench_create_distribution() {
 
 #[test]
 fn gas_bench_submit_attestation() {
+    use soroban_sdk::BytesN;
+    use crate::custody_validator::CustodyAttestation;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -468,28 +459,30 @@ fn gas_bench_submit_attestation() {
 
     let custody_id = env.register_contract(None, CustodyValidator);
     let custody = CustodyValidatorClient::new(&env, &custody_id);
-    custody.initialize(&admin);
+    custody.initialize(&admin, &admin, &Vec::from_array(&env, [admin.clone()]));
 
     let asset_id = Address::generate(&env);
 
-    let mut proof_data = Map::new(&env);
-    proof_data.set(Symbol::new(&env, "location"), Symbol::new(&env, "vault-42"));
-    proof_data.set(Symbol::new(&env, "value"), Symbol::new(&env, "1000000"));
-    proof_data.set(
-        Symbol::new(&env, "proof_hash"),
-        Symbol::new(&env, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
-    );
-
-    let signatures = Vec::new(&env);
+    let attestation = CustodyAttestation {
+        asset_id: asset_id.clone(),
+        custodian: admin.clone(),
+        location: Symbol::new(&env, "vault-42"),
+        condition: Symbol::new(&env, "excellent"),
+        value: 1_000_000i128,
+        timestamp: env.ledger().timestamp(),
+        proof_hash: BytesN::from_array(&env, &[1u8; 32]),
+        verification_type: Symbol::new(&env, "physical"),
+        insurance_status: Symbol::new(&env, "insured"),
+        legal_title_hash: BytesN::from_array(&env, &[2u8; 32]),
+        audit_report_hash: BytesN::from_array(&env, &[3u8; 32]),
+        multi_sig_signatures: Vec::new(&env),
+        metadata: Map::new(&env),
+        is_valid: false,
+        expires_at: env.ledger().timestamp() + 86400 * 60,
+    };
 
     env.budget().reset_default();
-    custody.submit_attestation(
-        &admin,
-        &asset_id,
-        &Symbol::new(&env, "physical"),
-        proof_data,
-        signatures,
-    );
+    custody.submit_attestation(&attestation);
     let gas = get_gas_consumed(&env);
 
     check_gas_regression("submit_attestation", gas);
@@ -510,7 +503,7 @@ fn print_gas_report() {
         println!("{:<35} {:>10}", "Operation", "Gas (cpu insns)");
         println!("{:-^60}", "");
 
-        let mut entries: Vec<(&str, u64)> = baseline
+        let mut entries: std::vec::Vec<(&str, u64)> = baseline
             .as_object()
             .unwrap()
             .iter()

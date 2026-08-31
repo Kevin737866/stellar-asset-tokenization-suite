@@ -38,18 +38,115 @@ pub enum GovernanceError {
 ///
 /// NOTE: This is intentionally generic and uses a `proposal_payload_hash` to bind params.
 #[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum ProposalType {
+    Normal = 1,
+    Emergency = 2,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum ProposalCategory {
+    General = 1,
+    ParameterChange = 2,
+    Emergency = 3,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct QuorumConfig {
+    pub min_participation_bps: u32,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum VotingModel {
+    Linear = 1,
+    Quadratic = 2,
+    Delegated = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VotePowerInfo {
+    pub raw_votes: i128,
+    pub effective_votes: i128,
+    pub voting_model: VotingModel,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalSimulationResult {
+    pub affected_contracts: soroban_sdk::Vec<Symbol>,
+    pub state_changes: u32,
+    pub estimated_gas: u64,
+    pub requires_migration: bool,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct Proposal {
     pub id: u64,
     pub proposal_key: Symbol,
+    pub category: ProposalCategory,
     pub payload_hash: soroban_sdk::BytesN<32>,
     pub created_at: u64,
     pub review_until: u64,
     pub executable_after: u64,
-    pub approvals: Vec<Address>,
+    pub approvals: soroban_sdk::Vec<Address>,
     pub executed: bool,
     pub vetoed: bool,
     pub veto_votes: soroban_sdk::Vec<Address>,
+    pub proposal_type: ProposalType,
+    pub voting_model: VotingModel,
+}
+
+pub fn integer_sqrt(n: i128) -> i128 {
+    if n <= 0 {
+        return 0;
+    }
+    let mut x0 = n / 2;
+    if x0 == 0 {
+        return 1;
+    }
+    let mut x1 = (x0 + n / x0) / 2;
+    while x1 < x0 {
+        x0 = x1;
+        x1 = (x0 + n / x0) / 2;
+    }
+    x0
+}
+
+pub fn calculate_voting_power(balance: i128, model: VotingModel) -> i128 {
+    match model {
+        VotingModel::Linear | VotingModel::Delegated => balance,
+        VotingModel::Quadratic => integer_sqrt(balance),
+    }
+}
+
+fn get_category_review_period(env: &Env, category: &ProposalCategory) -> u64 {
+    match category {
+        ProposalCategory::General => 86400,
+        ProposalCategory::ParameterChange => 172800,
+        ProposalCategory::Emergency => 3600,
+    }
+}
+
+fn read_quorum_config(env: &Env) -> QuorumConfig {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "gov_quorum_config"))
+        .unwrap_or(QuorumConfig {
+            min_participation_bps: 2000,
+        })
+}
+
+fn quorum_bps(env: &Env, votes_cast: usize) -> u32 {
+    let owners = read_owners(env);
+    if owners.len() == 0 {
+        return 0;
+    }
+    ((votes_cast as u32) * 10000) / (owners.len() as u32)
 }
 
 pub fn write_governance(
@@ -220,11 +317,13 @@ fn proposer_unlocked_stake(env: &Env, token: &Address, proposer: &Address) -> i1
     balance.amount.saturating_sub(balance.locked_amount).max(0)
 }
 
-pub fn create_proposal(
+pub fn create_proposal_with_model(
     env: Env,
     proposer: Address,
     proposal_key: Symbol,
+    category: ProposalCategory,
     payload_hash: soroban_sdk::BytesN<32>,
+    voting_model: VotingModel,
 ) -> u64 {
     proposer.require_auth();
 
@@ -232,7 +331,6 @@ pub fn create_proposal(
         panic_with_error!(&env, GovernanceError::Unauthorized);
     }
 
-    // Issue #189: require a minimum unlocked token balance to deter spam.
     let min_balance = read_min_proposal_balance(&env);
     if min_balance > 0 {
         let stake_token = read_stake_token(&env);
@@ -260,11 +358,14 @@ pub fn create_proposal(
         category,
         payload_hash,
         created_at: now,
-        executable_after: now + timelock,
-        approvals: Vec::<Address>::new(&env),
+        review_until,
+        executable_after,
+        approvals: soroban_sdk::Vec::<Address>::new(&env),
         executed: false,
         vetoed: false,
         veto_votes: soroban_sdk::Vec::<Address>::new(&env),
+        proposal_type: ProposalType::Normal,
+        voting_model,
     };
 
     let proposals_key = Symbol::new(&env, "gov_proposals");
@@ -280,7 +381,7 @@ pub fn create_proposal(
 
     env.storage()
         .instance()
-        .set(&Symbol::new(&env, "gov_proposal_count"), &(id));
+        .set(&Symbol::new(&env, "gov_proposal_count"), &id);
 
     env.events().publish(
         (
@@ -294,13 +395,27 @@ pub fn create_proposal(
     id
 }
 
-/// Create an emergency proposal. Emergency proposals undergo a short review
-/// window, require a much higher threshold, and expire if not executed in time.
+pub fn create_proposal(
+    env: Env,
+    proposer: Address,
+    proposal_key: Symbol,
+    payload_hash: soroban_sdk::BytesN<32>,
+) -> u64 {
+    create_proposal_with_model(
+        env,
+        proposer,
+        proposal_key,
+        ProposalCategory::General,
+        payload_hash,
+        VotingModel::Linear,
+    )
+}
+
 pub fn create_emergency_proposal(
     env: Env,
     proposer: Address,
     proposal_key: Symbol,
-    payload_hash: Bytes,
+    payload_hash: soroban_sdk::BytesN<32>,
 ) -> u64 {
     proposer.require_auth();
 
@@ -314,8 +429,6 @@ pub fn create_emergency_proposal(
         .get(&Symbol::new(&env, "gov_proposal_count"))
         .unwrap_or(0u64);
 
-    // Emergency proposals require the configured review window regardless of
-    // the configured timelock, and auto-expire after 48h if not executed.
     let emergency_review_seconds: u64 = env
         .storage()
         .instance()
@@ -323,16 +436,22 @@ pub fn create_emergency_proposal(
         .unwrap_or(3600u64);
 
     let now = env.ledger().timestamp();
+    let review_until = now + emergency_review_seconds;
 
     let proposal = Proposal {
         id: proposal_count + 1,
         proposal_key,
+        category: ProposalCategory::Emergency,
         payload_hash,
         created_at: now,
-        executable_after: now + emergency_review_seconds,
-        approvals: Vec::<Address>::new(&env),
+        review_until,
+        executable_after: review_until,
+        approvals: soroban_sdk::Vec::<Address>::new(&env),
         executed: false,
+        vetoed: false,
+        veto_votes: soroban_sdk::Vec::<Address>::new(&env),
         proposal_type: ProposalType::Emergency,
+        voting_model: VotingModel::Linear,
     };
 
     let proposals_key = Symbol::new(&env, "gov_proposals");
@@ -348,7 +467,7 @@ pub fn create_emergency_proposal(
 
     env.storage()
         .instance()
-        .set(&Symbol::new(&env, "gov_proposal_count"), &(id));
+        .set(&Symbol::new(&env, "gov_proposal_count"), &id);
 
     env.events().publish(
         (
@@ -820,5 +939,27 @@ pub fn get_effective_voting_power(env: &Env, address: &Address, own_voting_power
         received
     } else {
         own_voting_power + received
+    }
+}
+
+
+
+pub fn get_proposal_vote_power(
+    env: &Env,
+    proposal_id: u64,
+    address: &Address,
+    balance: i128,
+) -> VotePowerInfo {
+    let proposal = read_proposal(env, proposal_id);
+    let effective_votes = match proposal.voting_model {
+        VotingModel::Linear => balance,
+        VotingModel::Quadratic => integer_sqrt(balance),
+        VotingModel::Delegated => get_effective_voting_power(env, address, balance),
+    };
+
+    VotePowerInfo {
+        raw_votes: balance,
+        effective_votes,
+        voting_model: proposal.voting_model,
     }
 }

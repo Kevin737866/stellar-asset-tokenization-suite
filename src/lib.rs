@@ -1,13 +1,13 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, String};
 
-mod asset_factory;
-mod asset_class_handlers;
-mod auth;
-mod compliance_registry;
-mod custody_validator;
-mod dividend_distributor;
-mod rwa_token;
-mod secondary_market;
+pub mod asset_factory;
+pub mod asset_class_handlers;
+pub mod auth;
+pub mod compliance_registry;
+pub mod custody_validator;
+pub mod dividend_distributor;
+pub mod rwa_token;
+pub mod secondary_market;
 pub mod shared_admin;
 pub mod shared_governance;
 pub mod real_estate;
@@ -16,6 +16,7 @@ pub mod invoice;
 pub mod security;
 pub mod art;
 pub mod carbon_credit;
+pub mod renewable_energy;
 
 #[cfg(test)]
 mod tests;

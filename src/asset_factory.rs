@@ -1,3 +1,4 @@
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map, Symbol, Vec, BytesN, String,
 };
@@ -36,6 +37,7 @@ pub enum AssetClass {
     Security = 3,
     Art = 4,
     CarbonCredit = 5,
+    RenewableEnergy = 6,
 }
 
 #[contracttype]
@@ -49,7 +51,7 @@ pub struct ComplianceRules {
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DividendSchedule {
     pub frequency_days: u32,
     pub next_distribution_date: u64,
@@ -66,7 +68,7 @@ pub struct AssetConfig {
     pub total_supply: i128,
     pub asset_class: AssetClass,
     pub compliance_rules: ComplianceRules,
-    pub dividend_schedule: Option<DividendSchedule>,
+    pub dividend_schedule: soroban_sdk::Vec<DividendSchedule>,
     pub metadata: Map<Symbol, String>,
 }
 
@@ -195,7 +197,7 @@ impl AssetFactory {
         }
 
         // Validate dividend schedule if present
-        if let Some(schedule) = &config.dividend_schedule {
+        if let Some(schedule) = config.dividend_schedule.get(0) {
             if schedule.frequency_days == 0 || schedule.next_distribution_date < env.ledger().timestamp() {
                 panic_with_error!(&env, AssetFactoryError::InvalidParameters);
             }
@@ -211,7 +213,7 @@ impl AssetFactory {
             .get(&Symbol::new(&env, "registry"))
             .unwrap_or(Map::new(&env));
         
-        if registry.has(&config.symbol) {
+        if registry.contains_key(config.symbol.clone()) {
             panic_with_error!(&env, AssetFactoryError::AssetAlreadyExists);
         }
 
@@ -237,15 +239,11 @@ impl AssetFactory {
         let asset_type_sym = Symbol::new(&env, &asset_class_str);
 
         // Deploy token with deterministic address using salt
-        let salt = env.crypto().sha256(&(
-            &config.symbol,
-            &config.name,
-            &env.ledger().timestamp()
-        ).into());
+        let salt = env.crypto().sha256(&config.symbol.to_xdr(&env));
         
         let token_address = env.deployer()
             .with_current_contract(salt)
-            .deploy_v2(template.wasm_hash);
+            .deploy_v2(template.wasm_hash, soroban_sdk::Vec::<soroban_sdk::Val>::new(&env));
 
         // Initialize token
         let token_client = RWATokenClient::new(&env, &token_address);
@@ -257,8 +255,8 @@ impl AssetFactory {
             &config.decimals,
             &asset_type_sym,
             &config.metadata,
-            &Address::from_contract_id(&[0u8; 32]), // Placeholder compliance registry
-            &Address::from_contract_id(&[0u8; 32]), // Placeholder dividend distributor
+            &env.current_contract_address(), // Placeholder compliance registry
+            &env.current_contract_address(), // Placeholder dividend distributor
         );
 
         // Create asset info
@@ -269,8 +267,8 @@ impl AssetFactory {
             decimals: config.decimals,
             asset_class: config.asset_class,
             metadata: config.metadata.clone(),
-            compliance_registry: Address::from_contract_id(&[0u8; 32]),
-            dividend_distributor: Address::from_contract_id(&[0u8; 32]),
+            compliance_registry: env.current_contract_address(),
+            dividend_distributor: env.current_contract_address(),
             token_address: token_address.clone(),
             created_at: env.ledger().timestamp(),
             is_paused: false,
@@ -338,7 +336,7 @@ impl AssetFactory {
             .get(&Symbol::new(&env, "registry"))
             .unwrap_or(Map::new(&env));
 
-        if registry.has(&spec.asset_symbol) {
+        if registry.contains_key(spec.asset_symbol.clone()) {
             panic_with_error!(&env, AssetFactoryError::AssetAlreadyExists);
         }
 
@@ -447,7 +445,7 @@ impl AssetFactory {
             .get(&Symbol::new(&env, "templates"))
             .unwrap_or(Map::new(&env));
         
-        templates.set(template.asset_class, template);
+        templates.set(template.asset_class.clone(), template.clone());
         env.storage().instance().set(&Symbol::new(&env, "templates"), &templates);
 
         env.events().publish(
@@ -500,16 +498,11 @@ impl AssetFactory {
         // In production, this would involve actual voting mechanism
 
         // Deploy new contract version
-        let salt = env.crypto().sha256(&(
-            &symbol,
-            &asset_info.name,
-            &env.ledger().timestamp(),
-            &new_wasm_hash
-        ).into());
+        let salt = env.crypto().sha256(&symbol.to_xdr(&env));
         
         let new_token_address = env.deployer()
             .with_current_contract(salt)
-            .deploy_v2(new_wasm_hash);
+            .deploy_v2(new_wasm_hash, soroban_sdk::Vec::<soroban_sdk::Val>::new(&env));
 
         // Update asset info
         asset_info.token_address = new_token_address;

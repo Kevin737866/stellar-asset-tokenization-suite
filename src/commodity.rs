@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, Vec, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::AssetClassError;
+use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -24,6 +24,9 @@ pub fn create_commodity_config(
     base_config: AssetConfig,
     commodity_config: CommodityConfig,
 ) -> AssetConfig {
+    validate_address_not_zero(&env, &commodity_config.custody_vault);
+    validate_metadata_size(&env, base_config.metadata.len(), 100);
+
     let valid_grades = Vec::from_array(&env, [
         Symbol::new(&env, "999"),
         Symbol::new(&env, "995"),

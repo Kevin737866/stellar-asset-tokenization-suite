@@ -118,7 +118,7 @@ fn place_buy_order_returns_order_id() {
     let t = setup();
     let buyer = Address::generate(&t.env);
     // Fund buyer with base currency
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     let order_id = t.market.place_order(
@@ -137,7 +137,7 @@ fn place_buy_order_returns_order_id() {
 fn place_multiple_orders_increments_ids() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
 
     let id1 = t.market.place_order(
@@ -156,7 +156,7 @@ fn place_multiple_orders_increments_ids() {
 fn place_order_below_min_size_panics() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     // amount = 5, min_order_size = 10
@@ -171,7 +171,7 @@ fn place_order_below_min_size_panics() {
 fn place_order_with_zero_price_panics() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     t.market.place_order(
@@ -185,7 +185,7 @@ fn place_order_with_zero_price_panics() {
 fn place_order_with_expired_expiry_panics() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     // expiry in the past
@@ -200,7 +200,7 @@ fn place_order_with_expired_expiry_panics() {
 fn place_order_with_invalid_side_panics() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     t.market.place_order(
@@ -232,7 +232,7 @@ fn place_sell_order_escrows_rwa_tokens() {
 fn cancel_buy_order_refunds_base_currency() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     let balance_before = t.base_token.balance(&buyer);
@@ -267,7 +267,7 @@ fn cancel_order_by_non_maker_panics() {
     let t = setup();
     let buyer = Address::generate(&t.env);
     let attacker = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     let order_id = t.market.place_order(
@@ -293,7 +293,7 @@ fn fill_buy_order_settles_correctly() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &200i128);
 
@@ -322,7 +322,7 @@ fn fill_order_exceeding_remaining_amount_panics() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &500i128);
 
@@ -358,7 +358,7 @@ fn get_vwap_reflects_trade_price_after_fill() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &200i128);
 
@@ -440,7 +440,7 @@ fn concurrent_fill_same_order_partial_fills_settle_correctly() {
     let seller1 = Address::generate(&t.env);
     let seller2 = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller1, &200i128);
     t.token.transfer(&t.admin, &seller2, &200i128);
@@ -469,7 +469,7 @@ fn concurrent_fill_same_order_no_double_fill() {
     let seller1 = Address::generate(&t.env);
     let seller2 = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller1, &200i128);
     t.token.transfer(&t.admin, &seller2, &200i128);
@@ -500,7 +500,7 @@ fn concurrent_fill_exceeding_remaining_panics_no_double_spend() {
     let seller1 = Address::generate(&t.env);
     let seller2 = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller1, &200i128);
     t.token.transfer(&t.admin, &seller2, &200i128);
@@ -531,7 +531,7 @@ fn rapid_place_cancel_fill_sequence_maintains_integrity() {
     let user_a = Address::generate(&t.env);
     let user_b = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&user_a, &100_000i128);
     base_admin.mint(&user_b, &100_000i128);
     t.token.transfer(&t.admin, &user_a, &500i128);
@@ -566,7 +566,7 @@ fn rapid_fill_on_multiple_orders_same_account_no_lost_funds() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
     t.token.transfer(&t.admin, &seller, &500i128);
 
@@ -602,7 +602,7 @@ fn order_created_and_filled_same_ledger() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &200i128);
 
@@ -623,7 +623,7 @@ fn multiple_orders_placed_filled_same_ledger() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
     t.token.transfer(&t.admin, &seller, &500i128);
 
@@ -648,7 +648,7 @@ fn escrow_balances_correct_after_multiple_fills() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
     t.token.transfer(&t.admin, &seller, &500i128);
 
@@ -683,7 +683,7 @@ fn escrow_returns_correctly_after_full_cancellation() {
     let t = setup();
     let buyer = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
 
     let base_before = t.base_token.balance(&buyer);
@@ -715,7 +715,7 @@ fn flash_crash_scenario_buy_sell_oscillation() {
     let trader1 = Address::generate(&t.env);
     let trader2 = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&trader1, &1_000_000i128);
     base_admin.mint(&trader2, &1_000_000i128);
     t.token.transfer(&t.admin, &trader1, &2000i128);
@@ -767,7 +767,7 @@ fn stress_test_100_orders_rapid_matching() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &1_000_000i128);
     base_admin.mint(&seller, &1_000_000i128);
     t.token.transfer(&t.admin, &seller, &10_000i128);
@@ -806,7 +806,7 @@ fn stress_test_interleaved_buy_sell_orders() {
     let trader_a = Address::generate(&t.env);
     let trader_b = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&trader_a, &1_000_000i128);
     base_admin.mint(&trader_b, &1_000_000i128);
     t.token.transfer(&t.admin, &trader_a, &5000i128);
@@ -847,7 +847,7 @@ fn no_double_fill_on_partially_filled_order() {
     let seller = Address::generate(&t.env);
     let third_party = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &200i128);
     t.token.transfer(&t.admin, &third_party, &200i128);
@@ -885,7 +885,7 @@ fn migrate_preserves_market_config() {
     // Place an order and verify VWAP works
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &200i128);
 
@@ -905,7 +905,7 @@ fn migrate_preserves_market_config() {
 fn migrate_preserves_order_book_state() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
 
     // Place 3 orders at different prices
@@ -942,7 +942,7 @@ fn migrate_preserves_vwap_twap_after_multiple_trades() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
     t.token.transfer(&t.admin, &seller, &500i128);
 
@@ -983,7 +983,7 @@ fn migrate_with_empty_order_book() {
 
     // Placing a new order still works
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
 
     let order_id = t.market.place_order(
@@ -999,7 +999,7 @@ fn migrate_preserves_escrow_integrity() {
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
 
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &100_000i128);
     t.token.transfer(&t.admin, &seller, &500i128);
 
@@ -1041,7 +1041,7 @@ fn test_fill_expired_order_rejection() {
     let t = setup();
     let buyer = Address::generate(&t.env);
     let seller = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     t.token.transfer(&t.admin, &seller, &100i128);
 
@@ -1062,7 +1062,7 @@ fn test_fill_expired_order_rejection() {
 fn test_cancel_expired_order_success() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     let balance_before = t.base_token.balance(&buyer);
 
@@ -1086,7 +1086,7 @@ fn test_cancel_expired_order_success() {
 fn test_auto_pruning_expired_orders() {
     let t = setup();
     let buyer = Address::generate(&t.env);
-    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address);
     base_admin.mint(&buyer, &10_000i128);
     let balance_before = t.base_token.balance(&buyer);
 

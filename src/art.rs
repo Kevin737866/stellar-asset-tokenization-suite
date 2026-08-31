@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, Symbol, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::AssetClassError;
+use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -24,6 +24,9 @@ pub fn create_art_config(
     base_config: AssetConfig,
     art_config: ArtConfig,
 ) -> AssetConfig {
+    validate_address_not_zero(&env, &art_config.authenticity_certificate);
+    validate_metadata_size(&env, base_config.metadata.len(), 100);
+
     if art_config.provenance_hash == BytesN::from_array(&env, &[0u8; 32]) {
         panic_with_error!(&env, AssetClassError::InvalidProvenance);
     }
