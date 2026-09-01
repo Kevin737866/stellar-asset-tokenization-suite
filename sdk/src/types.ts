@@ -682,3 +682,99 @@ export interface WebhookConfig {
   events: string[];
   active: boolean;
 }
+
+// Real-time Event Streaming Types (Issue #190)
+
+/** Event types delivered over the WebSocket event stream. */
+export type StreamEventType =
+  | 'Transfer'
+  | 'Trade'
+  | 'DividendClaim'
+  | 'KYCUpdate'
+  | 'CustodyAttestation';
+
+/** A single event delivered to a stream subscriber. */
+export interface StreamEvent<T = Record<string, any>> {
+  type: StreamEventType;
+  /** Contract address of the token the event relates to, if applicable. */
+  tokenAddress?: string;
+  /** Address of the user the event relates to, if applicable. */
+  userAddress?: string;
+  /** Raw event payload as delivered by the relay. */
+  data: T;
+  /** Unix epoch milliseconds. */
+  timestamp: number;
+  txHash?: string;
+  ledger?: number;
+}
+
+/** Per-subscription filter. Values may be a single address or a list. */
+export interface EventFilter {
+  tokenAddress?: string | string[];
+  userAddress?: string | string[];
+}
+
+/** Minimal structural type for a WebSocket instance (browser + `ws` compatible). */
+export interface MinimalWebSocket {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  readyState: number;
+  onopen: ((ev: any) => void) | null;
+  onclose: ((ev: any) => void) | null;
+  onerror: ((ev: any) => void) | null;
+  onmessage: ((ev: { data: any }) => void) | null;
+}
+
+export type WebSocketConstructor = new (
+  url: string,
+  protocols?: string | string[]
+) => MinimalWebSocket;
+
+export interface EventStreamConfig {
+  /** WebSocket URL of the event relay (ws:// or wss://). */
+  url: string;
+  /** Optional subprotocols passed to the WebSocket constructor. */
+  protocols?: string | string[];
+  /** Injected WebSocket implementation (e.g. the `ws` package, or a mock). */
+  webSocketImpl?: WebSocketConstructor;
+  /** Reconnect automatically after an unexpected close (default: true). */
+  autoReconnect?: boolean;
+  /** Maximum reconnect attempts before giving up (default: Infinity). */
+  maxReconnectAttempts?: number;
+  /** Base delay for exponential backoff, in ms (default: 1000). */
+  baseReconnectDelayMs?: number;
+  /** Maximum backoff delay, in ms (default: 30000). */
+  maxReconnectDelayMs?: number;
+  /** Backoff multiplier (default: 2). */
+  backoffMultiplier?: number;
+  /** Jitter fraction applied to backoff, 0..1 (default: 0.25). */
+  reconnectJitter?: number;
+  /** Interval between outgoing pings, in ms (default: 15000; 0 disables). */
+  heartbeatIntervalMs?: number;
+  /** Grace period after a missed heartbeat before the connection is stale (default: 10000). */
+  heartbeatTimeoutMs?: number;
+  /** How long to wait for the socket to open before retrying, in ms (default: 10000). */
+  connectTimeoutMs?: number;
+}
+
+export type EventStreamStatus =
+  | 'idle'
+  | 'connecting'
+  | 'open'
+  | 'reconnecting'
+  | 'closed';
+
+export interface EventStreamState {
+  status: EventStreamStatus;
+  url: string;
+  reconnectAttempts: number;
+  subscriptionCount: number;
+  lastMessageAt?: number;
+}
+
+export type EventStreamLifecycleEvent =
+  | { type: 'open' }
+  | { type: 'close'; code?: number; reason?: string }
+  | { type: 'error'; error: Error }
+  | { type: 'reconnecting'; attempt: number; delayMs: number }
+  | { type: 'stale' };
