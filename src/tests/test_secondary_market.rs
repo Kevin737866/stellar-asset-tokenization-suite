@@ -1030,3 +1030,78 @@ fn migrate_preserves_escrow_integrity() {
     // sell1 active: seller has 40 RWA in escrow
     assert_eq!(t.token.get_balance(&seller).amount, seller_rwa_before - 20 - 40);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #143: Order Expiry Enforcement & Auto-pruning Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[should_panic]
+fn test_fill_expired_order_rejection() {
+    let t = setup();
+    let buyer = Address::generate(&t.env);
+    let seller = Address::generate(&t.env);
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    base_admin.mint(&buyer, &10_000i128);
+    t.token.transfer(&t.admin, &seller, &100i128);
+
+    let expiry = t.env.ledger().timestamp() + 100;
+    let order_id = t.market.place_order(
+        &buyer, &t.token.address, &Symbol::new(&t.env, "buy"),
+        &10i128, &50i128, &expiry, &0i128,
+    );
+
+    // Advance time past expiry
+    t.env.ledger().set_timestamp(expiry + 10);
+
+    // Attempting to fill should panic with OrderExpired
+    t.market.fill_order(&seller, &order_id, &50i128);
+}
+
+#[test]
+fn test_cancel_expired_order_success() {
+    let t = setup();
+    let buyer = Address::generate(&t.env);
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    base_admin.mint(&buyer, &10_000i128);
+    let balance_before = t.base_token.balance(&buyer);
+
+    let expiry = t.env.ledger().timestamp() + 100;
+    let order_id = t.market.place_order(
+        &buyer, &t.token.address, &Symbol::new(&t.env, "buy"),
+        &10i128, &50i128, &expiry, &0i128,
+    );
+
+    assert_eq!(t.base_token.balance(&buyer), balance_before - 500);
+
+    // Advance time past expiry
+    t.env.ledger().set_timestamp(expiry + 10);
+
+    // Cancelling expired order recovers escrow
+    t.market.cancel_order(&buyer, &order_id);
+    assert_eq!(t.base_token.balance(&buyer), balance_before);
+}
+
+#[test]
+fn test_auto_pruning_expired_orders() {
+    let t = setup();
+    let buyer = Address::generate(&t.env);
+    let base_admin = StellarAssetClient::new(&t.env, &t.base_token.address());
+    base_admin.mint(&buyer, &10_000i128);
+    let balance_before = t.base_token.balance(&buyer);
+
+    let expiry = t.env.ledger().timestamp() + 50;
+    let order_id = t.market.place_order(
+        &buyer, &t.token.address, &Symbol::new(&t.env, "buy"),
+        &10i128, &50i128, &expiry, &0i128,
+    );
+
+    // Advance ledger timestamp past expiry
+    t.env.ledger().set_timestamp(expiry + 20);
+
+    // Explicitly call prune_expired_orders
+    t.market.prune_expired_orders();
+
+    // Escrow should be refunded automatically
+    assert_eq!(t.base_token.balance(&buyer), balance_before);
+}
