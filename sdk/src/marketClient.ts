@@ -8,7 +8,7 @@ import {
   xdr,
   ScInt
 } from 'stellar-sdk';
-import { 
+import type { 
   Order, 
   OrderType, 
   Trade, 
@@ -16,10 +16,18 @@ import {
   MarketConfig, 
   OrderOptions, 
   TransactionOptions, 
-  RWASDKConfig, 
-  RWASDKError
+  RWASDKConfig,
 } from './types';
-import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, ContractError, TransactionError } from './errors';
+import {
+  RWASDKError,
+  contractErrorToCode,
+  TimeoutError,
+  InsufficientBalanceError,
+  UnauthorizedError,
+  ContractError,
+  TransactionError,
+  InvalidParametersError,
+} from './errors';
 import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT, DEFAULT_ORDER_EXPIRY_HOURS, DEFAULT_PRICE_HISTORY_LIMIT, DEFAULT_MARKET_DEPTH } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
@@ -248,6 +256,8 @@ export class MarketClient {
     tokenAddress: Address,
     limit: number = DEFAULT_PAGINATION_LIMIT
   ): Promise<Trade[]> {
+    validateAddress(tokenAddress, 'tokenAddress');
+    validatePositiveInteger(limit, 'limit');
     try {
       const result = await this.contract.call(
         'get_recent_trades', 
@@ -301,6 +311,7 @@ export class MarketClient {
     paused: boolean,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
     this.logger.info('Setting pause status', { paused });
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -334,6 +345,8 @@ export class MarketClient {
     config: MarketConfig,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    if (config.feeRate != null) validateRange(config.feeRate, 0, 10000, 'config.feeRate');
     this.logger.info('Updating market config');
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -415,6 +428,8 @@ export class MarketClient {
     totalFee: string;
     feeCurrency: string;
   }> {
+    validateAmount(amount, 'amount');
+    validateAmount(price, 'price');
     try {
       return {
         baseFee: '100',
@@ -434,6 +449,8 @@ export class MarketClient {
     bids: Array<{ price: string; amount: string; total: string }>;
     asks: Array<{ price: string; amount: string; total: string }>;
   }> {
+    validateAddress(tokenAddress, 'tokenAddress');
+    validatePositiveInteger(depth, 'depth');
     try {
       const orderBook = await this.getOrderBook(tokenAddress);
       
@@ -500,8 +517,8 @@ export class MarketClient {
     throw new ContractError('signTransaction not implemented');
   }
 
-  private handleError(error: unknown): RWASDKErrorClass {
-    if (error instanceof RWASDKErrorClass) {
+  private handleError(error: unknown): RWASDKError {
+    if (error instanceof RWASDKError) {
       return error;
     }
 
@@ -522,7 +539,7 @@ export class MarketClient {
     const match = message.match(/ContractError\((\d+)\)/);
     if (match) {
       const code = contractErrorToCode(parseInt(match[1]));
-      return new RWASDKErrorClass(code, message);
+      return new RWASDKError(code, message);
     }
 
     return new ContractError(message);

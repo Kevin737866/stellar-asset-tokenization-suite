@@ -8,15 +8,27 @@ import {
   xdr,
   ScInt
 } from 'stellar-sdk';
-import { 
+import type { 
   AssetInfo, 
   Balance, 
   TransferOptions, 
   TransactionOptions, 
-  RWASDKConfig, 
-  RWASDKError
+  RWASDKConfig,
+  ErrorCode,
 } from './types';
-import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, TransactionError, ContractError } from './errors';
+// RWASDKError is imported as the class (not the interface) from errors.ts.
+// The interface RWASDKError in types.ts is not imported here to avoid
+// the same-name confusion. All runtime usage uses the class.
+import {
+  RWASDKError,
+  contractErrorToCode,
+  TimeoutError,
+  InsufficientBalanceError,
+  UnauthorizedError,
+  TransactionError,
+  ContractError,
+  InvalidParametersError,
+} from './errors';
 import { DEFAULT_DECIMALS, DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
@@ -48,6 +60,7 @@ export class TokenClient {
   }
 
   async getBalance(address: Address): Promise<Balance> {
+    validateAddress(address, 'address');
     try {
       const result = await this.contract.call('get_balance', new Address(address));
       const balance = this.convertScValToBalance(result.result);
@@ -236,6 +249,8 @@ export class TokenClient {
     amount: string,
     options: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(owner, 'owner');
+    validateAmount(amount, 'amount');
     this.logger.info('Unlocking tokens', { owner: owner.toString(), amount });
     try {
       const account = await this.server.getAccount(owner.toString());
@@ -425,6 +440,8 @@ export class TokenClient {
     hasMore: boolean;
     nextCursor?: string;
   }> {
+    validateAddress(address, 'address');
+    validatePositiveInteger(limit, 'limit');
     try {
       const payments = await this.server.payments()
         .forAccount(address.toString())
@@ -445,7 +462,7 @@ export class TokenClient {
         hasMore: payments.records.length > 0,
         nextCursor: payments.records.length > 0 ? payments.records[payments.records.length - 1].paging_token : undefined
       };
-      throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'getTransferHistory not implemented');
+      throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'getTransferHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
@@ -461,6 +478,9 @@ export class TokenClient {
     totalFee: string;
     feeCurrency: string;
   }> {
+    validateAddress(from, 'from');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
     try {
       const baseFee = (this.config.defaultFeeRate || DEFAULT_FEE_RATE).toString();
       return {
@@ -483,6 +503,9 @@ export class TokenClient {
     reason?: string;
     restrictions?: string[];
   }> {
+    validateAddress(from, 'from');
+    validateAddress(to, 'to');
+    validateAmount(amount, 'amount');
     try {
       const result = await this.contract.call(
         'check_transfer_compliance', 
@@ -533,8 +556,8 @@ export class TokenClient {
     throw new UnauthorizedError('signTransaction requires a configured secretKey in the SDK config');
   }
 
-  private handleError(error: unknown): RWASDKErrorClass {
-    if (error instanceof RWASDKErrorClass) {
+  private handleError(error: unknown): RWASDKError {
+    if (error instanceof RWASDKError) {
       return error;
     }
 
@@ -557,7 +580,7 @@ export class TokenClient {
     const match = message.match(/ContractError\((\d+)\)/);
     if (match) {
       const code = contractErrorToCode(parseInt(match[1]));
-      return new RWASDKErrorClass(code, message);
+      return new RWASDKError(code, message);
     }
 
     return new ContractError(message);
