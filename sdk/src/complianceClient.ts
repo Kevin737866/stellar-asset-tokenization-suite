@@ -8,17 +8,29 @@ import {
   xdr,
   ScInt
 } from 'stellar-sdk';
-import { 
+import type { 
   KYCStatus, 
   VerificationLevel, 
   TransferLimits, 
   ComplianceRule, 
   ComplianceOptions, 
   TransactionOptions, 
-  RWASDKConfig, 
-  RWASDKError
+  RWASDKConfig,
+  AuditLogEntry,
+  ErrorCode,
 } from './types';
-import { RWASDKError as RWASDKErrorClass, contractErrorToCode, TimeoutError, InsufficientBalanceError, UnauthorizedError, ContractError } from './errors';
+// Use the RWASDKError class from errors.ts (not the interface from types.ts)
+// to maintain a clean one-way dependency.
+import {
+  RWASDKError,
+  contractErrorToCode,
+  TimeoutError,
+  InsufficientBalanceError,
+  UnauthorizedError,
+  ContractError,
+  InvalidParametersError,
+  TransactionError,
+} from './errors';
 import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateBoolean, validateRange } from './validation';
@@ -320,6 +332,7 @@ export class ComplianceClient {
     user: Address,
     amount: string
   ): Promise<boolean> {
+    validateAddress(user, 'user');
     try {
       const result = await this.contract.call(
         'check_transfer_limits',
@@ -341,6 +354,9 @@ export class ComplianceClient {
   ): Promise<string> {
     validateAddress(admin, 'admin');
     validateAddress(user, 'user');
+    if (limits.dailyLimit) validateAmount(limits.dailyLimit, 'limits.dailyLimit');
+    if (limits.monthlyLimit) validateAmount(limits.monthlyLimit, 'limits.monthlyLimit');
+    if (limits.annualLimit) validateAmount(limits.annualLimit, 'limits.annualLimit');
     this.logger.info('Setting transfer limits', { user: user.toString() });
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -390,6 +406,9 @@ export class ComplianceClient {
     rule: ComplianceRule,
     txOptions: TransactionOptions = {}
   ): Promise<string> {
+    validateAddress(admin, 'admin');
+    validateNonEmptyString(rule.ruleId, 'rule.ruleId');
+    validateNonEmptyString(rule.name, 'rule.name');
     this.logger.info('Updating compliance rule', { ruleId: rule.ruleId });
     try {
       const account = await this.server.getAccount(admin.toString());
@@ -454,7 +473,7 @@ export class ComplianceClient {
     nextCursor?: string;
   }> {
     try {
-      throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'getUserComplianceHistory not implemented');
+      throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'getUserComplianceHistory not implemented');
     } catch (error) {
       throw this.handleError(error);
     }
@@ -468,6 +487,9 @@ export class ComplianceClient {
     validateAddress(admin, 'admin');
     if (!updates || !Array.isArray(updates) || updates.length === 0) {
       throw new InvalidParametersError('updates must be a non-empty array');
+    }
+    for (const update of updates) {
+      validateAddress(update.user, 'update.user');
     }
     this.logger.info('Batch updating KYC status', { count: updates.length });
     try {
@@ -561,31 +583,31 @@ export class ComplianceClient {
   }
 
   private convertKYCStatusToScVal(kycStatus: KYCStatus): xdr.ScVal {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertKYCStatusToScVal not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertKYCStatusToScVal not implemented');
   }
 
   private convertTransferLimitsToScVal(limits: TransferLimits): xdr.ScVal {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertTransferLimitsToScVal not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertTransferLimitsToScVal not implemented');
   }
 
   private convertComplianceRuleToScVal(rule: ComplianceRule): xdr.ScVal {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertComplianceRuleToScVal not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertComplianceRuleToScVal not implemented');
   }
 
   private convertScValToKYCStatus(scVal: xdr.ScVal): KYCStatus {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToKYCStatus not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertScValToKYCStatus not implemented');
   }
 
   private convertScValToComplianceRuleArray(scVal: xdr.ScVal): ComplianceRule[] {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'convertScValToComplianceRuleArray not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'convertScValToComplianceRuleArray not implemented');
   }
 
   private async signTransaction(transaction: any, signer: Address): Promise<any> {
-    throw new RWASDKErrorClass(ErrorCode.CONTRACT_ERROR, 'signTransaction not implemented');
+    throw new RWASDKError(ErrorCode.CONTRACT_ERROR, 'signTransaction not implemented');
   }
 
-  private handleError(error: unknown): RWASDKErrorClass {
-    if (error instanceof RWASDKErrorClass) {
+  private handleError(error: unknown): RWASDKError {
+    if (error instanceof RWASDKError) {
       return error;
     }
 
@@ -606,7 +628,7 @@ export class ComplianceClient {
     const match = message.match(/ContractError\((\d+)\)/);
     if (match) {
       const code = contractErrorToCode(parseInt(match[1]));
-      return new RWASDKErrorClass(code, message);
+      return new RWASDKError(code, message);
     }
 
     return new ContractError(message);

@@ -878,6 +878,158 @@ fn voting_power_remains_after_transfer() {
 
 // ── metadata handling ─────────────────────────────────────────────────────────
 
+// ── delegated voting (liquid democracy) ──────────────────────────────────────
+
+#[test]
+fn delegate_votes_transfers_power_to_delegate() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+
+    t.token.lock_tokens(&t.admin, &t.admin, &100_000i128, &3600u64);
+    t.token.delegate_votes(&t.admin, &rep);
+
+    // The representative now holds the delegator's voting power.
+    assert_eq!(t.token.get_effective_voting_power(&rep), 100_000);
+    // The delegator no longer votes directly.
+    assert_eq!(t.token.get_effective_voting_power(&t.admin), 0);
+    // Delegation bookkeeping.
+    assert_eq!(t.token.get_delegation(&t.admin), Some(rep.clone()));
+    assert_eq!(t.token.get_delegated_count(&rep), 1);
+    assert_eq!(t.token.get_delegated_voting_power(&rep), 100_000);
+}
+
+#[test]
+fn undelegate_votes_restores_own_power() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+
+    t.token.lock_tokens(&t.admin, &t.admin, &100_000i128, &3600u64);
+    t.token.delegate_votes(&t.admin, &rep);
+    assert_eq!(t.token.get_effective_voting_power(&rep), 100_000);
+
+    t.token.undelegate_votes(&t.admin);
+
+    assert_eq!(t.token.get_effective_voting_power(&t.admin), 100_000);
+    assert_eq!(t.token.get_effective_voting_power(&rep), 0);
+    assert_eq!(t.token.get_delegation(&t.admin), None);
+    assert_eq!(t.token.get_delegated_count(&rep), 0);
+}
+
+#[test]
+fn effective_power_combines_own_and_delegated() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+
+    // Representative receives tokens and locks its own voting power.
+    t.token.transfer(&t.admin, &rep, &50_000i128);
+    t.token.lock_tokens(&rep, &rep, &50_000i128, &3600u64);
+    // Delegator locks tokens and delegates them.
+    t.token.lock_tokens(&t.admin, &t.admin, &100_000i128, &3600u64);
+    t.token.delegate_votes(&t.admin, &rep);
+
+    // own 50_000 + delegated 100_000
+    assert_eq!(t.token.get_effective_voting_power(&rep), 150_000);
+}
+
+#[test]
+fn delegated_count_tracks_multiple_delegators() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+    let second = Address::generate(&t.env);
+
+    t.token.lock_tokens(&t.admin, &t.admin, &10_000i128, &3600u64);
+    t.token.transfer(&t.admin, &second, &50_000i128);
+    t.token.lock_tokens(&second, &second, &20_000i128, &3600u64);
+
+    t.token.delegate_votes(&t.admin, &rep);
+    t.token.delegate_votes(&second, &rep);
+
+    assert_eq!(t.token.get_delegated_count(&rep), 2);
+    assert_eq!(t.token.get_delegated_voting_power(&rep), 30_000);
+    assert_eq!(t.token.get_effective_voting_power(&rep), 30_000);
+
+    t.token.undelegate_votes(&second);
+    assert_eq!(t.token.get_delegated_count(&rep), 1);
+    assert_eq!(t.token.get_delegated_voting_power(&rep), 10_000);
+}
+
+#[test]
+#[should_panic]
+fn self_delegation_prevented() {
+    let t = setup();
+    t.token.delegate_votes(&t.admin, &t.admin);
+}
+
+#[test]
+#[should_panic]
+fn chain_delegation_prevented() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+    let third = Address::generate(&t.env);
+
+    t.token.lock_tokens(&t.admin, &t.admin, &100_000i128, &3600u64);
+    t.token.delegate_votes(&t.admin, &rep);
+    // The representative may not re-delegate the power it received.
+    t.token.delegate_votes(&rep, &third);
+}
+
+#[test]
+#[should_panic]
+fn delegating_to_an_address_that_already_delegated_prevented() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+    let third = Address::generate(&t.env);
+
+    t.token.lock_tokens(&rep, &rep, &10_000i128, &3600u64);
+    t.token.delegate_votes(&rep, &third);
+
+    t.token.lock_tokens(&t.admin, &t.admin, &10_000i128, &3600u64);
+    t.token.delegate_votes(&t.admin, &rep);
+}
+
+#[test]
+#[should_panic]
+fn undelegate_without_delegation_panics() {
+    let t = setup();
+    t.token.undelegate_votes(&t.admin);
+}
+
+#[test]
+fn re_delegation_replaces_previous_delegate() {
+    let t = setup();
+    let rep1 = Address::generate(&t.env);
+    let rep2 = Address::generate(&t.env);
+
+    t.token.lock_tokens(&t.admin, &t.admin, &100_000i128, &3600u64);
+    t.token.delegate_votes(&t.admin, &rep1);
+    assert_eq!(t.token.get_delegated_count(&rep1), 1);
+    assert_eq!(t.token.get_effective_voting_power(&rep1), 100_000);
+
+    t.token.delegate_votes(&t.admin, &rep2);
+
+    assert_eq!(t.token.get_delegation(&t.admin), Some(rep2.clone()));
+    assert_eq!(t.token.get_delegated_count(&rep1), 0);
+    assert_eq!(t.token.get_delegated_voting_power(&rep1), 0);
+    assert_eq!(t.token.get_effective_voting_power(&rep1), 0);
+    assert_eq!(t.token.get_delegated_count(&rep2), 1);
+    assert_eq!(t.token.get_delegated_voting_power(&rep2), 100_000);
+    assert_eq!(t.token.get_effective_voting_power(&rep2), 100_000);
+}
+
+#[test]
+fn delegate_zero_power_still_records_delegation() {
+    let t = setup();
+    let rep = Address::generate(&t.env);
+
+    // No locked tokens => zero voting power, but the delegation is recorded.
+    t.token.delegate_votes(&t.admin, &rep);
+
+    assert_eq!(t.token.get_delegation(&t.admin), Some(rep.clone()));
+    assert_eq!(t.token.get_delegated_count(&rep), 1);
+    assert_eq!(t.token.get_delegated_voting_power(&rep), 0);
+    assert_eq!(t.token.get_effective_voting_power(&rep), 0);
+}
+
 #[test]
 fn initialize_with_metadata_succeeds() {
     let env = Env::default();

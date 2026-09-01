@@ -1,4 +1,4 @@
-import { ErrorCode } from './types';
+import { ErrorCode, type ParsedHorizonError } from './types';
 
 export interface ErrorInfo {
   code: ErrorCode;
@@ -312,6 +312,11 @@ export const ERROR_DESCRIPTIONS: Record<ErrorCode, string> = {
 
   // Simulation errors (Issue #208)
   [ErrorCode.SIMULATION_FAILED]: 'Transaction simulation failed',
+
+  // Batch transaction errors
+  [ErrorCode.BATCH_EMPTY]: 'The batch contains no operations',
+  [ErrorCode.BATCH_PARTIAL_FAILURE]: 'One or more operations in the batch failed; the entire batch was reverted',
+  [ErrorCode.BATCH_SIZE_EXCEEDED]: 'The batch exceeds the maximum allowed number of operations',
 };
 
 /**
@@ -438,11 +443,16 @@ export const SUGGESTED_ACTIONS: Record<ErrorCode, string> = {
   [ErrorCode.TX_NO_SOURCE_ACCOUNT]: 'Verify the source account exists.',
   [ErrorCode.TX_NO_ACCOUNT]: 'The account does not exist on this network.',
   [ErrorCode.TX_INSUFFICIENT_BALANCE]: 'Fund the account for fees and reserves.',
-  [ErrorCode.TX_BAD_SEQ': 'Refresh the account sequence number and try again.',
+  [ErrorCode.TX_BAD_SEQ]: 'Refresh the account sequence number and try again.',
   [ErrorCode.TX_MEMO_TOO_LONG]: 'Shorten the transaction memo.',
 
   // Simulation errors
   [ErrorCode.SIMULATION_FAILED]: 'Review the transaction before resubmitting.',
+
+  // Batch transaction errors
+  [ErrorCode.BATCH_EMPTY]: 'Add at least one operation via add() before calling build() or submit().',
+  [ErrorCode.BATCH_PARTIAL_FAILURE]: 'Identify the failing operation and fix it, then resubmit the entire batch.',
+  [ErrorCode.BATCH_SIZE_EXCEEDED]: 'Split the operations into smaller batches (max 50 per batch).',
 };
 
 /**
@@ -671,6 +681,9 @@ export function describeHorizonError(responseBody: any): string {
  */
 export function describeContractError(errorNumber: number): string {
   const code = contractErrorToCode(errorNumber);
+  if (code === ErrorCode.CONTRACT_ERROR) {
+    return 'Unknown contract error';
+  }
   return ERROR_DESCRIPTIONS[code] ?? 'Unknown contract error';
 }
 

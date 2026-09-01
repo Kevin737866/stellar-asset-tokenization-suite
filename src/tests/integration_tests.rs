@@ -924,3 +924,125 @@ fn test_deploy_kyc_dividend_custody_workflow() {
     let admin_balance = t.rwa_token.get_balance(&t.admin);
     assert_eq!(admin_balance.amount, 900_000);
 }
+
+// ── Integration Test 13: Custody Attestation Expiry & Invalidation ─────────────
+
+#[test]
+fn test_custody_attestation_expiry_and_invalidation() {
+    let t = setup_integration_test();
+
+    let attestation = CustodyAttestation {
+        asset_id: t.rwa_token.address.clone(),
+        custodian: t.admin.clone(),
+        location: Symbol::new(&t.env, "Vault London"),
+        condition: Symbol::new(&t.env, "good"),
+        value: 500_000i128,
+        timestamp: t.env.ledger().timestamp(),
+        proof_hash: BytesN::from_array(&t.env, &[8u8; 32]),
+        verification_type: Symbol::new(&t.env, "commodities"),
+        insurance_status: Symbol::new(&t.env, "insured"),
+        legal_title_hash: BytesN::from_array(&t.env, &[9u8; 32]),
+        audit_report_hash: BytesN::from_array(&t.env, &[10u8; 32]),
+        multi_sig_signatures: Vec::from_array(&t.env, [BytesN::from_array(&t.env, &[11u8; 64])]),
+        metadata: Map::new(&t.env),
+        is_valid: false,
+        expires_at: t.env.ledger().timestamp() + 100,
+    };
+
+    let attestation_id = t.custody_validator.submit_attestation(&attestation);
+    assert!(t.custody_validator.is_attestation_valid(&attestation_id));
+
+    // Admin invalidates attestation
+    t.custody_validator.invalidate_attestation(&t.admin, &attestation_id);
+    assert!(!t.custody_validator.is_attestation_valid(&attestation_id));
+    let retrieved = t.custody_validator.get_attestation(&attestation_id);
+    assert!(!retrieved.is_valid);
+}
+
+#[test]
+fn test_custody_attestation_auto_expiry_check() {
+    let t = setup_integration_test();
+
+    let attestation = CustodyAttestation {
+        asset_id: t.rwa_token.address.clone(),
+        custodian: t.admin.clone(),
+        location: Symbol::new(&t.env, "Vault NY"),
+        condition: Symbol::new(&t.env, "good"),
+        value: 500_000i128,
+        timestamp: t.env.ledger().timestamp(),
+        proof_hash: BytesN::from_array(&t.env, &[8u8; 32]),
+        verification_type: Symbol::new(&t.env, "commodities"),
+        insurance_status: Symbol::new(&t.env, "insured"),
+        legal_title_hash: BytesN::from_array(&t.env, &[9u8; 32]),
+        audit_report_hash: BytesN::from_array(&t.env, &[10u8; 32]),
+        multi_sig_signatures: Vec::from_array(&t.env, [BytesN::from_array(&t.env, &[11u8; 64])]),
+        metadata: Map::new(&t.env),
+        is_valid: false,
+        expires_at: t.env.ledger().timestamp() + 100,
+    };
+
+    let attestation_id = t.custody_validator.submit_attestation(&attestation);
+
+    // Fast forward ledger timestamp past expiry
+    t.env.ledger().set_timestamp(t.env.ledger().timestamp() + 200);
+
+    // get_attestation checks expiry and updates stored is_valid to false
+    let retrieved = t.custody_validator.get_attestation(&attestation_id);
+    assert!(!retrieved.is_valid);
+    assert!(!t.custody_validator.is_attestation_valid(&attestation_id));
+}
+
+// ── Integration Test 14: Oracle Reputation Decay ───────────────────────────────
+
+#[test]
+fn test_oracle_reputation_decay() {
+    let t = setup_integration_test();
+
+    let oracle_info = t.custody_validator.get_oracle_info(&t.oracle1);
+    let initial_score = oracle_info.reputation_score;
+
+    // Fast forward 14 days (2 decay periods of 7 days each)
+    t.env.ledger().set_timestamp(t.env.ledger().timestamp() + 14 * 86400);
+
+    let decayed_info = t.custody_validator.get_oracle_info(&t.oracle1);
+    assert_eq!(decayed_info.reputation_score, initial_score - 2);
+
+    // Reset reputation
+    t.custody_validator.update_oracle_reputation(&t.admin, &t.oracle1, &90u32);
+    let updated_info = t.custody_validator.get_oracle_info(&t.oracle1);
+    assert_eq!(updated_info.reputation_score, 90);
+}
+
+// ── Integration Test 15: Governance Proposal Categorization & Timelocks ────────
+
+#[test]
+fn test_governance_proposal_categorization_and_timelock() {
+    let env = Env::default();
+    env.mock_all_signatures();
+
+    let owner1 = Address::generate(&env);
+    let owner2 = Address::generate(&env);
+    let owners = Vec::from_array(&env, [owner1.clone(), owner2.clone()]);
+
+    crate::shared_governance::write_governance(&env, &owner1, &owners, 2, 3600);
+
+    // Create ContractUpgrade proposal (14 day review period + 3600s timelock)
+    let payload = [1u8; 32];
+    let cat = Symbol::new(&env, "ContractUpgrade");
+    let prop_key = Symbol::new(&env, "upgrade_v2");
+
+    let pid = crate::shared_governance::create_proposal(env.clone(), owner1.clone(), prop_key.clone(), cat, payload);
+    assert_eq!(pid, 1);
+
+    crate::shared_governance::approve(env.clone(), owner1.clone(), pid);
+    crate::shared_governance::approve(env.clone(), owner2.clone(), pid);
+
+    // Cannot execute immediately because review period & timelock haven't expired
+    assert!(!crate::shared_governance::can_execute(&env, pid, prop_key.clone(), payload));
+
+    // Fast forward past review period (14 days = 1_209_600s) + 3600s timelock
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1_209_600 + 3601);
+
+    assert!(crate::shared_governance::can_execute(&env, pid, prop_key.clone(), payload));
+    crate::shared_governance::execute_mark(env.clone(), owner1, pid);
+}
