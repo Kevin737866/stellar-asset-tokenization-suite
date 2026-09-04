@@ -130,7 +130,7 @@ fn test_complete_asset_lifecycle() {
         total_supply: 1_000_000i128,
         asset_class: AssetClass::RealEstate,
         compliance_rules: compliance_rules.clone(),
-        dividend_schedule: None,
+        dividend_schedule: Vec::new(&t.env),
         metadata: Map::new(&t.env),
     };
 
@@ -576,7 +576,7 @@ fn test_asset_factory_emergency_pause_all() {
                 holding_period_days: 0,
                 transfer_limits: 1_000_000i128,
             },
-            dividend_schedule: None,
+            dividend_schedule: Vec::new(&t.env),
             metadata: Map::new(&t.env),
         };
 

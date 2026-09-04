@@ -65,45 +65,6 @@ pub struct ComplianceRule {
 #[contract]
 pub struct ComplianceRegistry;
 
-pub struct ComplianceRegistryClient<'a> {
-    env: &'a Env,
-    id: Address,
-}
-
-impl<'a> ComplianceRegistryClient<'a> {
-    pub fn new(env: &'a Env, id: &Address) -> Self {
-        Self { env, id: id.clone() }
-    }
-
-    pub fn initialize(&self, auth: &Address, admin: &Address, kyc_required: bool, transfer_restrictions: bool) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "initialize"), &(auth, admin, kyc_required, transfer_restrictions));
-    }
-
-    pub fn update_kyc_status(&self, auth: &Address, user: &Address, kyc_status: KYCStatus) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "update_kyc_status"), &(auth, user, kyc_status));
-    }
-
-    pub fn get_kyc_status(&self, user: &Address) -> KYCStatus {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "get_kyc_status"), &(user))
-    }
-
-    pub fn add_to_blacklist(&self, auth: &Address, address: &Address, reason: Symbol) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "add_to_blacklist"), &(auth, address, reason));
-    }
-
-    pub fn remove_from_blacklist(&self, auth: &Address, address: &Address) {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "remove_from_blacklist"), &(auth, address));
-    }
-
-    pub fn check_compliance(&self, from: &Address, to: &Address, amount: i128) -> bool {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "check_compliance"), &(from, to, amount))
-    }
-
-    pub fn check_outbound_participant(&self, participant: &Address, amount: i128) -> bool {
-        self.env.invoke_contract(self.id.clone(), &Symbol::new(self.env, "check_outbound_participant"), &(participant, amount))
-    }
-}
-
 #[contractimpl]
 
 impl ComplianceRegistry {
@@ -677,7 +638,7 @@ impl ComplianceRegistry {
             .instance()
             .get(&map_key)
             .unwrap_or(Map::new(&env));
-        map.set(user, limits);
+        map.set(user.clone(), limits.clone());
         env.storage().instance().set(&map_key, &map);
 
         env.events().publish(

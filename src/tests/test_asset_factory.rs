@@ -30,7 +30,7 @@ fn default_asset_config(env: &Env) -> AssetConfig {
         total_supply: 1_000_000i128,
         asset_class: AssetClass::RealEstate,
         compliance_rules: default_compliance_rules(env),
-        dividend_schedule: None,
+        dividend_schedule: Vec::new(env),
         metadata: Map::new(env),
     }
 }

@@ -540,6 +540,19 @@ impl RWAToken {
         );
     }
 
+    pub fn calculate_voting_power(env: Env, balance: i128, model: crate::shared_governance::VotingModel) -> i128 {
+        crate::shared_governance::calculate_voting_power(balance, model)
+    }
+
+    pub fn get_proposal_vote_power(
+        env: Env,
+        proposal_id: u64,
+        address: Address,
+    ) -> crate::shared_governance::VotePowerInfo {
+        let balance = Self::get_balance(env.clone(), address.clone()).amount;
+        crate::shared_governance::get_proposal_vote_power(&env, proposal_id, &address, balance)
+    }
+
     fn check_transfer_compliance(env: Env, from: Address, to: Address, amount: i128) -> bool {
         let token_info: TokenInfo = env
             .storage()

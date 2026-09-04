@@ -487,7 +487,7 @@ fn migrate_preserves_multiple_distributions() {
             &t.admin,
             &t.token.address,
             &t.currency_symbol,
-            &(100 * (i + 1)) as i128,
+            &((100 * (i + 1)) as i128),
             &deadline,
             &Map::new(&t.env),
         );

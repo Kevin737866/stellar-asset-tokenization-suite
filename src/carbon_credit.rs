@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Env, Map, Symbol, Vec, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::AssetClassError;
+use crate::asset_class_handlers::{AssetClassError, validate_metadata_size};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -25,6 +25,8 @@ pub fn create_carbon_credit_config(
     base_config: AssetConfig,
     carbon_config: CarbonCreditConfig,
 ) -> AssetConfig {
+    validate_metadata_size(&env, base_config.metadata.len(), 100);
+
     let current_year = (env.ledger().timestamp() / 31536000) + 1970;
     if carbon_config.vintage_year < 1990 || carbon_config.vintage_year > current_year {
         panic_with_error!(&env, AssetClassError::InvalidVintage);
