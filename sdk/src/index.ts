@@ -914,3 +914,4 @@ export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS)
 
 // ─── Default export ───────────────────────────────────────────────────────────
 export default StellarRWASDK;
+export { MetricsCollector, ConsoleExporter, PrometheusExporter, NoopExporter, createMetricsCollector } from './telemetry';
