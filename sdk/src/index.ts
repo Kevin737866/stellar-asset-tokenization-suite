@@ -384,6 +384,31 @@ export class StellarRWASDK {
   }
 
   /**
+   * Serialize any value (SDK result, portfolio, order book, …) to a
+   * JSON-safe structure with every BigInt rendered as a decimal string.
+   * Use this when returning SDK data from a JSON HTTP API. (Issue #193)
+   */
+  toJSONSafe<T = any>(value: T): any {
+    return serializeBigInts(value);
+  }
+
+  /**
+   * `JSON.stringify` with lossless BigInt support (tagged `{"$bigint":"n"}`
+   * format restored by {@link StellarRWASDK.parseJSON}). (Issue #193)
+   */
+  stringifyJSON(value: any, space?: string | number): string {
+    return stringifyJSON(value, space);
+  }
+
+  /**
+   * `JSON.parse` that restores BigInt values produced by
+   * {@link StellarRWASDK.stringifyJSON}. (Issue #193)
+   */
+  parseJSON<T = any>(text: string): T {
+    return parseJSON<T>(text);
+  }
+
+  /**
    * Create a token client for a specific RWA token
    */
   createTokenClient(tokenAddress: Address): TokenClient {
