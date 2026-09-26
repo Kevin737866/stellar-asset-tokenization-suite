@@ -108,6 +108,7 @@ export interface DividendConfig {
   maxDistributionFrequency: number; // in seconds
   feeRate: number; // basis points (100 = 1%)
   feeRecipient: Address;
+  minClaimWindow?: number; // in seconds; minimum claim window enforced on new distributions (default 3600)
 }
 
 export interface Order {
