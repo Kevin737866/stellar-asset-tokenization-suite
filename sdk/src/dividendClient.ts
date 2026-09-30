@@ -144,6 +144,13 @@ export class DividendClient {
     }
   }
 
+  /**
+   * Claims all eligible dividend distributions for a user in a single transaction.
+   * Gas comparison: batching N claims into one claim_all_dividends call costs
+   * roughly one base transaction fee plus N operation fees, versus N full
+   * transaction fees when claiming individually — batching saves the
+   * per-transaction base overhead (N-1) times.
+   */
   async claimAllDividends(
     claimer: Address,
     txOptions: TransactionOptions = {}
