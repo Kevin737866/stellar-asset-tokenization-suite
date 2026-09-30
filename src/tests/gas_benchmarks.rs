@@ -461,6 +461,19 @@ fn gas_bench_submit_attestation() {
     let custody = CustodyValidatorClient::new(&env, &custody_id);
     custody.initialize(&admin, &admin, &Vec::from_array(&env, [admin.clone()]));
 
+    // `submit_attestation` rejects custodians that are not registered, so the
+    // benchmark must register the acting custodian first.
+    custody.register_custodian(
+        &admin,
+        &admin,
+        &Symbol::new(&env, "BenchCustodian"),
+        &Symbol::new(&env, "US"),
+        &Symbol::new(&env, "LIC_BENCH"),
+        &Vec::from_array(&env, [Symbol::new(&env, "physical")]),
+        &0i128,
+        &Symbol::new(&env, "Insurer"),
+    );
+
     let asset_id = Address::generate(&env);
 
     let attestation = CustodyAttestation {

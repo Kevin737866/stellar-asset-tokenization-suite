@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation},
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _},
     Address, BytesN, Env, Map, Symbol, Vec,
 };
 
@@ -29,6 +29,7 @@ struct IntegrationTestEnv {
     rwa_token: RWATokenClient<'static>,
     custody_validator: CustodyValidatorClient<'static>,
     base_currency: Address,
+    oracle1: Address,
 }
 
 fn setup_integration_test() -> IntegrationTestEnv {
@@ -38,6 +39,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
     let admin = Address::generate(&env);
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
+    let oracle1 = Address::generate(&env);
 
     // Deploy Compliance Registry
     let compliance_id = env.register_contract(None, ComplianceRegistry);
@@ -75,7 +77,26 @@ fn setup_integration_test() -> IntegrationTestEnv {
     // Deploy Custody Validator
     let custody_id = env.register_contract(None, CustodyValidator);
     let custody_validator = CustodyValidatorClient::new(&env, &custody_id);
-    custody_validator.initialize(&admin, &admin, &Vec::from_array(&env, [Address::generate(&env)]));
+    custody_validator.initialize(&admin, &admin, &Vec::from_array(&env, [oracle1.clone()]));
+
+    // The custody attestation flows below submit as `admin`, so it must be a
+    // registered, active custodian authorised for the verification types used.
+    custody_validator.register_custodian(
+        &admin,
+        &admin,
+        &Symbol::new(&env, "SuiteCustodian"),
+        &Symbol::new(&env, "US"),
+        &Symbol::new(&env, "LIC_CUSTODY"),
+        &Vec::from_array(
+            &env,
+            [
+                Symbol::new(&env, "commodities"),
+                Symbol::new(&env, "real_estate"),
+            ],
+        ),
+        &0i128,
+        &Symbol::new(&env, "Insurer"),
+    );
 
     // Deploy RWA Token
     let token_id = env.register_contract(None, RWAToken);
@@ -104,6 +125,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
         rwa_token,
         custody_validator,
         base_currency,
+        oracle1,
     }
 }
 

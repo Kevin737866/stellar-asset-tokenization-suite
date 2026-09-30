@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN,
+    Env, Map, Symbol, Vec,
 };
 
 use crate::auth::assert_admin;
@@ -46,6 +46,16 @@ pub enum CustodyError {
     InvalidAttestation = 29,
     CustodianNotFound = 30,
     InvalidParameters = 31,
+    MultiSigConfigNotFound = 32,
+    DuplicateSigner = 33,
+    SensorNotFound = 34,
+    SensorInactive = 35,
+    InvalidSensorData = 36,
+    ThresholdNotFound = 37,
+    BridgeNotFound = 38,
+    BridgeAlreadyRegistered = 39,
+    CrossChainProofNotFound = 40,
+    InvalidCrossChainProof = 41,
 }
 
 #[contracttype]
@@ -193,6 +203,95 @@ pub struct ValidationConfig {
     pub audit_required: bool,
     pub multi_oracle_required: bool,
     pub oracle_consensus_threshold: u32,
+}
+
+/// Issue #155: M-of-N multi-signature policy for a single custodian.
+///
+/// `signer_keys` holds the authorised Ed25519 public keys and `signer_addresses`
+/// the matching account addresses (same order, used for event payloads). A
+/// multi-signature attestation is only accepted when at least
+/// `required_signatures` distinct authorised signers have produced a valid
+/// Ed25519 signature over the attestation's proof hash.
+#[contracttype]
+#[derive(Clone)]
+pub struct MultiSigConfig {
+    pub required_signatures: u32,
+    pub total_signers: u32,
+    pub signer_keys: Vec<BytesN<32>>,
+    pub signer_addresses: Vec<Address>,
+}
+
+/// Issue #157: a single IoT reading submitted for a custodied asset.
+#[contracttype]
+#[derive(Clone)]
+pub struct IoTSensorData {
+    pub sensor_id: Symbol,
+    pub asset_id: Address,
+    pub metric_type: Symbol,
+    pub value: i128,
+    pub timestamp: u64,
+    pub signature: BytesN<64>,
+}
+
+/// Issue #157: an IoT sensor authorised to report on an asset.
+#[contracttype]
+#[derive(Clone)]
+pub struct IoTSensorRegistration {
+    pub sensor_id: Symbol,
+    pub asset_id: Address,
+    pub custodian: Address,
+    pub metric_type: Symbol,
+    pub is_active: bool,
+}
+
+/// Issue #157: alerting band for a metric type. Readings outside
+/// `[min_value, max_value]` raise an alert.
+#[contracttype]
+#[derive(Clone)]
+pub struct SensorThreshold {
+    pub metric_type: Symbol,
+    pub min_value: i128,
+    pub max_value: i128,
+}
+
+/// Issue #159: custody proof for an asset held on another chain, anchored by a
+/// registered bridge's Merkle root.
+#[contracttype]
+#[derive(Clone)]
+pub struct CrossChainProof {
+    pub proof_id: u64,
+    pub source_chain: Symbol,
+    pub block_number: u64,
+    pub tx_hash: BytesN<32>,
+    pub bridge_contract: Address,
+    pub merkle_proof: Vec<BytesN<32>>,
+    pub asset_id: Address,
+    pub custodian: Address,
+    pub timestamp: u64,
+    pub is_valid: bool,
+}
+
+/// Issue #159: a supported source chain and the bridge that anchors it.
+#[contracttype]
+#[derive(Clone)]
+pub struct BridgeRegistration {
+    pub source_chain: Symbol,
+    pub bridge_contract: Address,
+    pub merkle_root: BytesN<32>,
+    pub block_number: u64,
+    pub is_active: bool,
+}
+
+/// Issue #158: how an upheld dispute is slashed and redistributed.
+///
+/// Shares are expressed in basis points and must sum to 10_000 (100%).
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashingConfig {
+    pub challenger_share_bps: u32,
+    pub insurance_share_bps: u32,
+    pub platform_share_bps: u32,
+    pub reputation_penalty_points: u32,
 }
 
 #[contract]
@@ -368,6 +467,64 @@ impl CustodyValidator {
             &Symbol::new(&env, "insurance_integrations"),
             &Map::<Address, InsuranceIntegration>::new(&env),
         );
+        // Issue #155: per-custodian multi-signature policies.
+        env.storage().instance().set(
+            &Symbol::new(&env, "multisig_configs"),
+            &Map::<Address, MultiSigConfig>::new(&env),
+        );
+        // Issue #157: IoT sensor registry, readings, thresholds and alert counter.
+        env.storage().instance().set(
+            &Symbol::new(&env, "iot_sensors"),
+            &Map::<Symbol, IoTSensorRegistration>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "sensor_readings"),
+            &Map::<Symbol, Vec<IoTSensorData>>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "sensor_thresholds"),
+            &Map::<Symbol, SensorThreshold>::new(&env),
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "sensor_alert_count"), &0u64);
+        // Issue #159: supported-chain registry and cross-chain proofs.
+        env.storage().instance().set(
+            &Symbol::new(&env, "bridges"),
+            &Map::<Symbol, BridgeRegistration>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "cross_chain_proofs"),
+            &Map::<u64, CrossChainProof>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "cross_chain_proof_count"),
+            &0u64,
+        );
+        // Issue #158: custodian bonds, redistribution balances and slashing policy.
+        env.storage().instance().set(
+            &Symbol::new(&env, "custodian_bonds"),
+            &Map::<Address, i128>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "reward_balances"),
+            &Map::<Address, i128>::new(&env),
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "insurance_pool"), &0i128);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "platform_balance"), &0i128);
+        env.storage().instance().set(
+            &Symbol::new(&env, "slashing_config"),
+            &SlashingConfig {
+                challenger_share_bps: 7000,
+                insurance_share_bps: 2000,
+                platform_share_bps: 1000,
+                reputation_penalty_points: 25,
+            },
+        );
     }
 
     fn init_default_oracles(env: &Env, oracle_addresses: &Vec<Address>) {
@@ -396,6 +553,35 @@ impl CustodyValidator {
         if Self::read_version(env) < STORAGE_VERSION {
             panic_with_error!(env, CustodyError::StorageOutdated);
         }
+    }
+
+    /// Shared admin gate for the issue #155 / #157 / #158 / #159 entry points.
+    fn assert_admin_auth(env: &Env, auth: &Address) {
+        crate::shared_admin::require_admin(env, auth);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "admin"))
+            .unwrap_or_else(|| panic_with_error!(env, CustodyError::NotInitialized));
+        assert_admin(env, auth, &admin);
+    }
+
+    fn read_multi_sig_config(env: &Env, custodian: &Address) -> Option<MultiSigConfig> {
+        let configs: Map<Address, MultiSigConfig> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "multisig_configs"))
+            .unwrap_or_else(|| Map::new(env));
+        configs.get(custodian.clone())
+    }
+
+    fn read_alert_threshold(env: &Env, metric_type: &Symbol) -> Option<SensorThreshold> {
+        let thresholds: Map<Symbol, SensorThreshold> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "sensor_thresholds"))
+            .unwrap_or_else(|| Map::new(env));
+        thresholds.get(metric_type.clone())
     }
 
     pub fn migrate(env: Env, auth: Address) {
@@ -699,14 +885,20 @@ impl CustodyValidator {
 
         dispute.resolved_at = env.ledger().timestamp();
         dispute.resolution = resolution.clone();
-        dispute.penalty_applied = penalty_amount > 0;
-        dispute.penalty_amount = penalty_amount;
 
         if resolution == Symbol::new(&env, "upheld") {
+            // Issue #158: an upheld dispute automatically slashes the custodian's
+            // bond (capped at the total posted bond) and redistributes it.
+            // The challenger's own bond is returned since they prevailed.
             dispute.bond_returned = true;
-            Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), true);
+            let slashed = Self::apply_bond_slash(&env, &dispute, penalty_amount);
+            dispute.penalty_applied = slashed > 0;
+            dispute.penalty_amount = slashed;
         } else {
+            // Rejected / settled disputes never slash the custodian's bond.
             dispute.bond_returned = false;
+            dispute.penalty_applied = false;
+            dispute.penalty_amount = 0;
             Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), false);
         }
 
@@ -763,6 +955,12 @@ impl CustodyValidator {
             panic_with_error!(&env, CustodyError::InvalidParameters);
         }
 
+        // Issue #155: a custodian with an M-of-N policy must use
+        // `submit_multisig_attestation`, which enforces the Ed25519 signatures.
+        if Self::read_multi_sig_config(&env, &attestation.custodian).is_some() {
+            panic_with_error!(&env, CustodyError::MultiSigThresholdNotMet);
+        }
+
         if !Self::verify_attestation(&env, &attestation) {
             panic_with_error!(&env, CustodyError::InvalidAttestation);
         }
@@ -798,7 +996,12 @@ impl CustodyValidator {
         attestation_id
     }
 
-    fn verify_attestation(env: &Env, attestation: &CustodyAttestation) -> bool {
+    /// Checks shared by every attestation path (active custodian, authorised
+    /// verification type, insurance requirement and expiry). The multi-signature
+    /// requirement is deliberately excluded: `submit_attestation` enforces the
+    /// verification-type signature count while `submit_multisig_attestation`
+    /// enforces the custodian's M-of-N policy (issue #155).
+    fn verify_attestation_basics(env: &Env, attestation: &CustodyAttestation) -> bool {
         let custodian_info = match Self::read_custodian(env, &attestation.custodian) {
             Some(info) => info,
             None => return false,
@@ -822,12 +1025,6 @@ impl CustodyValidator {
             .unwrap_or(Map::new(&env));
 
         if let Some(config) = verification_configs.get(attestation.verification_type.clone()) {
-            if config.multi_sig_required {
-                if (attestation.multi_sig_signatures.len() as u32) < config.sig_threshold {
-                    return false;
-                }
-            }
-
             if config.insurance_required
                 && attestation.insurance_status == Symbol::new(&env, "uninsured")
             {
@@ -838,6 +1035,28 @@ impl CustodyValidator {
         let current_time = env.ledger().timestamp();
         if current_time > attestation.expires_at {
             return false;
+        }
+
+        true
+    }
+
+    fn verify_attestation(env: &Env, attestation: &CustodyAttestation) -> bool {
+        if !Self::verify_attestation_basics(env, attestation) {
+            return false;
+        }
+
+        let verification_configs: Map<Symbol, VerificationTypeConfig> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "verification_configs"))
+            .unwrap_or(Map::new(&env));
+
+        if let Some(config) = verification_configs.get(attestation.verification_type.clone()) {
+            if config.multi_sig_required
+                && (attestation.multi_sig_signatures.len() as u32) < config.sig_threshold
+            {
+                return false;
+            }
         }
 
         true
@@ -1454,5 +1673,852 @@ impl CustodyValidator {
         stats.set(Symbol::new(&env, "valid_proofs"), valid_proofs);
         stats.set(Symbol::new(&env, "expired_proofs"), expired_proofs);
         stats
+    }
+
+    // ── Issue #155: multi-party custody / threshold signatures ───────────────
+
+    /// Register (or replace) the M-of-N multi-signature policy for a custodian.
+    /// Admin only. Once set, the custodian can no longer submit single-signer
+    /// attestations; `submit_multisig_attestation` is required instead.
+    pub fn set_multi_sig_config(
+        env: Env,
+        auth: Address,
+        custodian: Address,
+        config: MultiSigConfig,
+    ) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        if Self::read_custodian(&env, &custodian).is_none() {
+            panic_with_error!(&env, CustodyError::CustodianNotFound);
+        }
+
+        if config.total_signers == 0
+            || config.required_signatures == 0
+            || config.required_signatures > config.total_signers
+            || config.signer_keys.len() != config.total_signers
+            || config.signer_addresses.len() != config.total_signers
+        {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+
+        // Reject duplicate signer keys: a signer must not count twice.
+        let mut seen = Vec::<BytesN<32>>::new(&env);
+        for key in config.signer_keys.iter() {
+            if seen.contains(&key) {
+                panic_with_error!(&env, CustodyError::DuplicateSigner);
+            }
+            seen.push_back(key);
+        }
+
+        let mut configs: Map<Address, MultiSigConfig> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "multisig_configs"))
+            .unwrap_or_else(|| Map::new(&env));
+        configs.set(custodian.clone(), config.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "multisig_configs"), &configs);
+
+        env.events().publish(
+            (Symbol::new(&env, "multisig_config_set"), custodian),
+            (config.required_signatures, config.total_signers),
+        );
+    }
+
+    pub fn get_multi_sig_config(env: Env, custodian: Address) -> MultiSigConfig {
+        Self::read_multi_sig_config(&env, &custodian)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::MultiSigConfigNotFound))
+    }
+
+    /// Verify that `signer_keys` / `signatures` satisfy `config`, checking the
+    /// Ed25519 signatures over `message`. Returns the matching signer addresses.
+    fn verify_threshold_signatures(
+        env: &Env,
+        config: &MultiSigConfig,
+        signer_keys: &Vec<BytesN<32>>,
+        signatures: &Vec<BytesN<64>>,
+        message: &Bytes,
+    ) -> Vec<Address> {
+        if signer_keys.len() != signatures.len() {
+            panic_with_error!(env, CustodyError::InvalidParameters);
+        }
+
+        if signatures.len() < config.required_signatures {
+            panic_with_error!(env, CustodyError::MultiSigThresholdNotMet);
+        }
+
+        let mut signer_addresses = Vec::<Address>::new(env);
+        let mut used_keys = Vec::<BytesN<32>>::new(env);
+        let mut index = 0u32;
+
+        for key in signer_keys.iter() {
+            let signature = signatures.get(index).unwrap();
+            index += 1;
+
+            // Duplicate signers do not count towards the threshold.
+            if used_keys.contains(&key) {
+                panic_with_error!(env, CustodyError::DuplicateSigner);
+            }
+            used_keys.push_back(key.clone());
+
+            // The signer must be authorised by the custodian's policy.
+            let mut authorised_index: Option<u32> = None;
+            let mut position = 0u32;
+            for authorised_key in config.signer_keys.iter() {
+                if authorised_key == key {
+                    authorised_index = Some(position);
+                    break;
+                }
+                position += 1;
+            }
+            let position = authorised_index
+                .unwrap_or_else(|| panic_with_error!(env, CustodyError::InvalidSignature));
+
+            // Cryptographic check: a valid Ed25519 signature over `message`.
+            env.crypto().ed25519_verify(&key, message, &signature);
+
+            signer_addresses.push_back(config.signer_addresses.get(position).unwrap());
+        }
+
+        signer_addresses
+    }
+
+    /// Submit an attestation backed by M-of-N Ed25519 signatures. The signed
+    /// message is the attestation's `proof_hash`. Multi-signature events carry
+    /// the resolved signer addresses.
+    pub fn submit_multisig_attestation(
+        env: Env,
+        attestation: CustodyAttestation,
+        signer_keys: Vec<BytesN<32>>,
+        signatures: Vec<BytesN<64>>,
+    ) -> u64 {
+        Self::check_version(&env);
+
+        if attestation.value < 0 {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+
+        let config = Self::read_multi_sig_config(&env, &attestation.custodian)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::MultiSigConfigNotFound));
+
+        let message: Bytes = attestation.proof_hash.clone().into();
+        let signer_addresses =
+            Self::verify_threshold_signatures(&env, &config, &signer_keys, &signatures, &message);
+
+        if !Self::verify_attestation_basics(&env, &attestation) {
+            panic_with_error!(&env, CustodyError::InvalidAttestation);
+        }
+
+        let attestation_count: u64 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "attestation_count"))
+            .unwrap_or(0u64);
+        let attestation_id = attestation_count + 1;
+
+        let mut valid_attestation = attestation;
+        valid_attestation.multi_sig_signatures = signatures;
+        valid_attestation.is_valid = true;
+        valid_attestation.expires_at = env.ledger().timestamp() + 86400 * 30;
+
+        let custodian = valid_attestation.custodian.clone();
+        let asset_id = valid_attestation.asset_id.clone();
+        let value = valid_attestation.value;
+
+        Self::write_attestation(&env, &attestation_id, &valid_attestation);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "attestation_count"), &attestation_id);
+
+        Self::update_custodian_stats(env.clone(), custodian.clone());
+
+        env.events().publish(
+            (Symbol::new(&env, "multisig_attestation"), asset_id),
+            (
+                attestation_id,
+                custodian,
+                signer_addresses,
+                value,
+                env.ledger().timestamp(),
+            ),
+        );
+
+        attestation_id
+    }
+
+    // ── Issue #157: IoT sensor data integration ──────────────────────────────
+
+    /// Authorise an IoT sensor to report a metric for an asset. Admin only.
+    pub fn register_iot_sensor(
+        env: Env,
+        auth: Address,
+        custodian: Address,
+        sensor_id: Symbol,
+        asset_id: Address,
+        metric_type: Symbol,
+    ) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        if Self::read_custodian(&env, &custodian).is_none() {
+            panic_with_error!(&env, CustodyError::CustodianNotFound);
+        }
+
+        let mut sensors: Map<Symbol, IoTSensorRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "iot_sensors"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        if sensors.contains_key(sensor_id.clone()) {
+            panic_with_error!(&env, CustodyError::InvalidSensorData);
+        }
+
+        sensors.set(
+            sensor_id.clone(),
+            IoTSensorRegistration {
+                sensor_id: sensor_id.clone(),
+                asset_id: asset_id.clone(),
+                custodian: custodian.clone(),
+                metric_type,
+                is_active: true,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "iot_sensors"), &sensors);
+
+        env.events().publish(
+            (Symbol::new(&env, "iot_sensor_registered"), asset_id),
+            (sensor_id, custodian, auth, env.ledger().timestamp()),
+        );
+    }
+
+    /// Enable or disable a registered sensor. Admin only.
+    pub fn set_iot_sensor_status(env: Env, auth: Address, sensor_id: Symbol, is_active: bool) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        let mut sensors: Map<Symbol, IoTSensorRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "iot_sensors"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut sensor = sensors
+            .get(sensor_id.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::SensorNotFound));
+        sensor.is_active = is_active;
+
+        sensors.set(sensor_id, sensor);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "iot_sensors"), &sensors);
+    }
+
+    /// Configure the alerting band for a metric type. Admin only.
+    pub fn set_alert_threshold(
+        env: Env,
+        auth: Address,
+        metric_type: Symbol,
+        min_value: i128,
+        max_value: i128,
+    ) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        if min_value > max_value {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+
+        let mut thresholds: Map<Symbol, SensorThreshold> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "sensor_thresholds"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        thresholds.set(
+            metric_type.clone(),
+            SensorThreshold {
+                metric_type,
+                min_value,
+                max_value,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "sensor_thresholds"), &thresholds);
+    }
+
+    pub fn get_alert_threshold(env: Env, metric_type: Symbol) -> SensorThreshold {
+        Self::read_alert_threshold(&env, &metric_type)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::ThresholdNotFound))
+    }
+
+    /// Record a sensor reading. The custodian that owns the sensor must
+    /// authorise the call. Returns `true` when the value breaches the metric's
+    /// configured alert threshold.
+    pub fn submit_sensor_reading(
+        env: Env,
+        custodian: Address,
+        sensor_data: IoTSensorData,
+    ) -> bool {
+        custodian.require_auth();
+        Self::check_version(&env);
+
+        let sensors: Map<Symbol, IoTSensorRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "iot_sensors"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let sensor = sensors
+            .get(sensor_data.sensor_id.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::SensorNotFound));
+
+        if !sensor.is_active {
+            panic_with_error!(&env, CustodyError::SensorInactive);
+        }
+        if sensor.custodian != custodian {
+            panic_with_error!(&env, CustodyError::Unauthorized);
+        }
+        if sensor.asset_id != sensor_data.asset_id
+            || sensor.metric_type != sensor_data.metric_type
+        {
+            panic_with_error!(&env, CustodyError::InvalidSensorData);
+        }
+        // A reading must carry a non-empty sensor signature.
+        if sensor_data.signature == BytesN::from_array(&env, &[0u8; 64]) {
+            panic_with_error!(&env, CustodyError::InvalidSignature);
+        }
+
+        let mut readings: Map<Symbol, Vec<IoTSensorData>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "sensor_readings"))
+            .unwrap_or_else(|| Map::new(&env));
+        let mut entries = readings
+            .get(sensor_data.sensor_id.clone())
+            .unwrap_or_else(|| Vec::new(&env));
+        entries.push_back(sensor_data.clone());
+        readings.set(sensor_data.sensor_id.clone(), entries);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "sensor_readings"), &readings);
+
+        let mut alert_triggered = false;
+        if let Some(threshold) = Self::read_alert_threshold(&env, &sensor_data.metric_type) {
+            if sensor_data.value < threshold.min_value || sensor_data.value > threshold.max_value {
+                alert_triggered = true;
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "sensor_reading"), sensor_data.asset_id.clone()),
+            (
+                sensor_data.sensor_id.clone(),
+                sensor_data.metric_type.clone(),
+                sensor_data.value,
+                sensor_data.timestamp,
+                alert_triggered,
+            ),
+        );
+
+        if alert_triggered {
+            let alerts: u64 = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&env, "sensor_alert_count"))
+                .unwrap_or(0u64);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "sensor_alert_count"), &(alerts + 1));
+
+            env.events().publish(
+                (Symbol::new(&env, "sensor_alert"), sensor_data.asset_id),
+                (
+                    sensor_data.sensor_id,
+                    sensor_data.metric_type,
+                    sensor_data.value,
+                    env.ledger().timestamp(),
+                ),
+            );
+        }
+
+        alert_triggered
+    }
+
+    pub fn get_sensor_readings(env: Env, sensor_id: Symbol) -> Vec<IoTSensorData> {
+        let readings: Map<Symbol, Vec<IoTSensorData>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "sensor_readings"))
+            .unwrap_or_else(|| Map::new(&env));
+        readings
+            .get(sensor_id)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    pub fn get_sensor_alert_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "sensor_alert_count"))
+            .unwrap_or(0u64)
+    }
+
+    // ── Issue #158: custodian bond slashing ──────────────────────────────────
+
+    /// Post collateral for a registered custodian.
+    pub fn deposit_bond(env: Env, custodian: Address, amount: i128) {
+        custodian.require_auth();
+        Self::check_version(&env);
+
+        if amount <= 0 {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+        if Self::read_custodian(&env, &custodian).is_none() {
+            panic_with_error!(&env, CustodyError::CustodianNotFound);
+        }
+
+        let mut bonds: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "custodian_bonds"))
+            .unwrap_or_else(|| Map::new(&env));
+        let current = bonds.get(custodian.clone()).unwrap_or(0);
+        bonds.set(custodian.clone(), current + amount);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "custodian_bonds"), &bonds);
+
+        env.events().publish(
+            (Symbol::new(&env, "bond_deposited"), custodian),
+            (amount, env.ledger().timestamp()),
+        );
+    }
+
+    pub fn get_bond_balance(env: Env, custodian: Address) -> i128 {
+        let bonds: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "custodian_bonds"))
+            .unwrap_or_else(|| Map::new(&env));
+        bonds.get(custodian).unwrap_or(0)
+    }
+
+    pub fn get_reward_balance(env: Env, account: Address) -> i128 {
+        let rewards: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "reward_balances"))
+            .unwrap_or_else(|| Map::new(&env));
+        rewards.get(account).unwrap_or(0)
+    }
+
+    pub fn get_insurance_pool(env: Env) -> i128 {
+        let pool: i128 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "insurance_pool"))
+            .unwrap_or(0);
+        pool
+    }
+
+    pub fn get_platform_balance(env: Env) -> i128 {
+        let balance: i128 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "platform_balance"))
+            .unwrap_or(0);
+        balance
+    }
+
+    /// Update how upheld disputes are slashed. Shares must sum to 100%.
+    pub fn set_slashing_config(env: Env, auth: Address, config: SlashingConfig) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        let total = config.challenger_share_bps + config.insurance_share_bps
+            + config.platform_share_bps;
+        if total != 10000 {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "slashing_config"), &config);
+    }
+
+    pub fn get_slashing_config(env: Env) -> SlashingConfig {
+        let config: SlashingConfig = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "slashing_config"))
+            .unwrap_or(SlashingConfig {
+                challenger_share_bps: 7000,
+                insurance_share_bps: 2000,
+                platform_share_bps: 1000,
+                reputation_penalty_points: 25,
+            });
+        config
+    }
+
+    /// Slash `penalty_amount` from the accused custodian's bond, capped at the
+    /// total posted bond, and redistribute it 70/20/10 to the challenger, the
+    /// insurance pool and the platform. Returns the amount actually slashed.
+    fn apply_bond_slash(env: &Env, dispute: &DisputeRecord, penalty_amount: i128) -> i128 {
+        if penalty_amount <= 0 {
+            return 0;
+        }
+
+        let config = Self::get_slashing_config(env.clone());
+
+        let mut bonds: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "custodian_bonds"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let bond = bonds.get(dispute.custodian.clone()).unwrap_or(0);
+        let slashed = if penalty_amount < bond {
+            penalty_amount
+        } else {
+            bond
+        };
+        if slashed <= 0 {
+            return 0;
+        }
+
+        let challenger_cut = slashed * config.challenger_share_bps as i128 / 10000;
+        let insurance_cut = slashed * config.insurance_share_bps as i128 / 10000;
+        let platform_cut = slashed - challenger_cut - insurance_cut;
+
+        bonds.set(dispute.custodian.clone(), bond - slashed);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "custodian_bonds"), &bonds);
+
+        let mut rewards: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "reward_balances"))
+            .unwrap_or_else(|| Map::new(env));
+        let challenger_reward = rewards.get(dispute.challenger.clone()).unwrap_or(0);
+        rewards.set(
+            dispute.challenger.clone(),
+            challenger_reward + challenger_cut,
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "reward_balances"), &rewards);
+
+        let insurance_pool: i128 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "insurance_pool"))
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &Symbol::new(env, "insurance_pool"),
+            &(insurance_pool + insurance_cut),
+        );
+
+        let platform_balance: i128 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "platform_balance"))
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &Symbol::new(env, "platform_balance"),
+            &(platform_balance + platform_cut),
+        );
+
+        // Reputation is reduced by the policy's penalty points.
+        if let Some(mut custodian) = Self::read_custodian(env, &dispute.custodian) {
+            custodian.failed_disputes += 1;
+            custodian.reputation_score = custodian
+                .reputation_score
+                .saturating_sub(config.reputation_penalty_points);
+            if custodian.reputation_score < 50 {
+                custodian.is_active = false;
+            }
+            Self::write_custodian(env, &dispute.custodian, &custodian);
+        }
+
+        env.events().publish(
+            (Symbol::new(env, "bond_slashed"), dispute.custodian.clone()),
+            (
+                dispute.dispute_id,
+                slashed,
+                challenger_cut,
+                insurance_cut,
+                platform_cut,
+            ),
+        );
+
+        slashed
+    }
+
+    // ── Issue #159: cross-chain asset verification ───────────────────────────
+
+    /// Register a supported source chain and its bridge anchor. Admin only.
+    pub fn add_supported_chain(
+        env: Env,
+        auth: Address,
+        source_chain: Symbol,
+        bridge_contract: Address,
+        merkle_root: BytesN<32>,
+        block_number: u64,
+    ) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        let mut bridges: Map<Symbol, BridgeRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "bridges"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        if let Some(existing) = bridges.get(source_chain.clone()) {
+            if existing.is_active {
+                panic_with_error!(&env, CustodyError::BridgeAlreadyRegistered);
+            }
+        }
+
+        bridges.set(
+            source_chain.clone(),
+            BridgeRegistration {
+                source_chain: source_chain.clone(),
+                bridge_contract: bridge_contract.clone(),
+                merkle_root: merkle_root.clone(),
+                block_number,
+                is_active: true,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "bridges"), &bridges);
+
+        env.events().publish(
+            (Symbol::new(&env, "bridge_registered"), source_chain),
+            (
+                bridge_contract,
+                merkle_root,
+                block_number,
+                env.ledger().timestamp(),
+            ),
+        );
+    }
+
+    /// Deactivate a supported source chain. Admin only.
+    pub fn remove_supported_chain(env: Env, auth: Address, source_chain: Symbol) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        let mut bridges: Map<Symbol, BridgeRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "bridges"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut bridge = bridges
+            .get(source_chain.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::BridgeNotFound));
+        bridge.is_active = false;
+        bridges.set(source_chain.clone(), bridge);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "bridges"), &bridges);
+
+        env.events().publish(
+            (Symbol::new(&env, "bridge_removed"), source_chain),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Advance a bridge's anchored Merkle root. Admin only.
+    pub fn update_bridge_root(
+        env: Env,
+        auth: Address,
+        source_chain: Symbol,
+        merkle_root: BytesN<32>,
+        block_number: u64,
+    ) {
+        Self::assert_admin_auth(&env, &auth);
+        Self::check_version(&env);
+
+        let mut bridges: Map<Symbol, BridgeRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "bridges"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut bridge = bridges
+            .get(source_chain.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::BridgeNotFound));
+        if block_number < bridge.block_number {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+
+        bridge.merkle_root = merkle_root;
+        bridge.block_number = block_number;
+        bridges.set(source_chain, bridge);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "bridges"), &bridges);
+    }
+
+    pub fn get_bridge_registration(env: Env, source_chain: Symbol) -> BridgeRegistration {
+        let bridges: Map<Symbol, BridgeRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "bridges"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        bridges
+            .get(source_chain)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::BridgeNotFound))
+    }
+
+    /// Order-independent Merkle node hash: sha256(min(a,b) || max(a,b)).
+    fn merkle_hash_pair(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+        let a_array = a.to_array();
+        let b_array = b.to_array();
+        let mut buffer = [0u8; 64];
+        if a_array <= b_array {
+            buffer[..32].copy_from_slice(&a_array);
+            buffer[32..].copy_from_slice(&b_array);
+        } else {
+            buffer[..32].copy_from_slice(&b_array);
+            buffer[32..].copy_from_slice(&a_array);
+        }
+        let digest: BytesN<32> = env
+            .crypto()
+            .sha256(&Bytes::from_array(env, &buffer))
+            .into();
+        digest
+    }
+
+    fn verify_merkle_proof(
+        env: &Env,
+        leaf: &BytesN<32>,
+        proof: &Vec<BytesN<32>>,
+        root: &BytesN<32>,
+    ) -> bool {
+        let mut computed = leaf.clone();
+        for sibling in proof.iter() {
+            computed = Self::merkle_hash_pair(env, &computed, &sibling);
+        }
+        computed == *root
+    }
+
+    /// Submit a proof that an asset is custodied on another chain. The bridge
+    /// must be registered for `proof.source_chain` and the Merkle proof must
+    /// resolve to the bridge's anchored root. Returns the new proof id.
+    pub fn submit_cross_chain_proof(
+        env: Env,
+        custodian: Address,
+        proof: CrossChainProof,
+    ) -> u64 {
+        custodian.require_auth();
+        Self::check_version(&env);
+
+        let custodian_info = Self::read_custodian(&env, &custodian)
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::CustodianNotFound));
+        if !custodian_info.is_active {
+            panic_with_error!(&env, CustodyError::Unauthorized);
+        }
+
+        let bridges: Map<Symbol, BridgeRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "bridges"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let bridge = bridges
+            .get(proof.source_chain.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::BridgeNotFound));
+        if !bridge.is_active {
+            panic_with_error!(&env, CustodyError::BridgeNotFound);
+        }
+        if bridge.bridge_contract != proof.bridge_contract
+            || proof.block_number > bridge.block_number
+        {
+            panic_with_error!(&env, CustodyError::InvalidCrossChainProof);
+        }
+        if !Self::verify_merkle_proof(
+            &env,
+            &proof.tx_hash,
+            &proof.merkle_proof,
+            &bridge.merkle_root,
+        ) {
+            panic_with_error!(&env, CustodyError::InvalidMerkleProof);
+        }
+
+        let proof_count: u64 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "cross_chain_proof_count"))
+            .unwrap_or(0u64);
+        let proof_id = proof_count + 1;
+
+        let mut valid_proof = proof;
+        valid_proof.proof_id = proof_id;
+        valid_proof.is_valid = true;
+        valid_proof.timestamp = env.ledger().timestamp();
+
+        let source_chain = valid_proof.source_chain.clone();
+        let asset_id = valid_proof.asset_id.clone();
+
+        let mut proofs: Map<u64, CrossChainProof> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "cross_chain_proofs"))
+            .unwrap_or_else(|| Map::new(&env));
+        proofs.set(proof_id, valid_proof);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "cross_chain_proofs"), &proofs);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "cross_chain_proof_count"), &proof_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "cross_chain_proof"), source_chain),
+            (
+                proof_id,
+                asset_id,
+                custodian,
+                env.ledger().timestamp(),
+            ),
+        );
+
+        proof_id
+    }
+
+    pub fn get_cross_chain_proof(env: Env, proof_id: u64) -> CrossChainProof {
+        let proofs: Map<u64, CrossChainProof> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "cross_chain_proofs"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        proofs.get(proof_id).unwrap_or_else(|| {
+            panic_with_error!(&env, CustodyError::CrossChainProofNotFound)
+        })
+    }
+
+    pub fn is_cross_chain_proof_valid(env: Env, proof_id: u64) -> bool {
+        let proofs: Map<u64, CrossChainProof> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "cross_chain_proofs"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        match proofs.get(proof_id) {
+            Some(proof) => proof.is_valid,
+            None => false,
+        }
     }
 }
