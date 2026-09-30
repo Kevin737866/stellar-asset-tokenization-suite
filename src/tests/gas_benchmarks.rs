@@ -460,6 +460,16 @@ fn gas_bench_submit_attestation() {
     let custody_id = env.register_contract(None, CustodyValidator);
     let custody = CustodyValidatorClient::new(&env, &custody_id);
     custody.initialize(&admin, &admin, &Vec::from_array(&env, [admin.clone()]));
+    custody.register_custodian(
+        &admin,
+        &admin,
+        &Symbol::new(&env, "BenchCustodian"),
+        &Symbol::new(&env, "US"),
+        &Symbol::new(&env, "LIC_BENCH"),
+        &Vec::from_array(&env, [Symbol::new(&env, "physical")]),
+        &0i128,
+        &Symbol::new(&env, "BenchInsurer"),
+    );
 
     let asset_id = Address::generate(&env);
 
