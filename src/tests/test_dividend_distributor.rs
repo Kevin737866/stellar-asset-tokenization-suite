@@ -3,13 +3,14 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token::{StellarAssetClient, TokenClient},
-    Address, Env, Map, Symbol, Vec,
+    Address, Env, InvokeError, Map, Symbol, Vec,
 };
 
 use crate::{
     compliance_registry::{ComplianceRegistry, ComplianceRegistryClient},
     dividend_distributor::{
         DividendConfig, DividendDistributor, DividendDistributorClient, DividendError,
+        DEFAULT_MIN_CLAIM_WINDOW,
     },
     rwa_token::{RWAToken, RWATokenClient},
 };
@@ -198,6 +199,136 @@ fn create_distribution_by_non_admin_panics() {
     );
 }
 
+// ── minimum claim window (issue #132) ────────────────────────────────────────
+
+#[test]
+fn default_min_claim_window_is_one_hour() {
+    assert_eq!(DEFAULT_MIN_CLAIM_WINDOW, 3600);
+}
+
+#[test]
+fn create_distribution_with_too_soon_deadline_returns_claim_deadline_too_soon() {
+    let t = setup();
+    // 1s under the default 3600s minimum window
+    let deadline = t.env.ledger().timestamp() + DEFAULT_MIN_CLAIM_WINDOW - 1;
+    let res = t.distributor.try_create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+    match res {
+        Err(Ok(e)) => assert_eq!(
+            InvokeError::from(e),
+            InvokeError::Contract(DividendError::ClaimDeadlineTooSoon as u32),
+            "expected ClaimDeadlineTooSoon error"
+        ),
+        _ => panic!("expected ClaimDeadlineTooSoon contract error"),
+    }
+}
+
+#[test]
+#[should_panic]
+fn create_distribution_with_too_soon_deadline_panics() {
+    let t = setup();
+    let deadline = t.env.ledger().timestamp() + 60; // well under the 1h window
+    t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+}
+
+#[test]
+fn create_distribution_with_deadline_at_minimum_window_succeeds() {
+    let t = setup();
+    // Exactly the minimum window is accepted (boundary is inclusive)
+    let deadline = t.env.ledger().timestamp() + DEFAULT_MIN_CLAIM_WINDOW;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+    assert_eq!(id, 1);
+    let dist = t.distributor.get_distribution(&id);
+    assert_eq!(dist.claim_deadline, deadline);
+}
+
+#[test]
+fn create_distribution_with_normal_deadline_succeeds() {
+    let t = setup();
+    let deadline = t.env.ledger().timestamp() + 86400;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &deadline,
+        &Map::new(&t.env),
+    );
+    assert_eq!(id, 1);
+    let dist = t.distributor.get_distribution(&id);
+    assert!(dist.is_active);
+}
+
+#[test]
+fn min_claim_window_is_configurable_via_update_config() {
+    let t = setup();
+    let mut currencies = Vec::new(&t.env);
+    currencies.push_back(t.currency_symbol.clone());
+    t.distributor.update_config(
+        &t.admin,
+        &DividendConfig {
+            supported_currencies: currencies,
+            auto_distribute: false,
+            min_distribution_amount: 1000,
+            max_distribution_frequency: 86400,
+            fee_rate: 50,
+            fee_recipient: t.admin.clone(),
+            min_claim_window: 7200, // custom 2h window
+        },
+    );
+
+    // A 1h deadline no longer satisfies the custom 2h window
+    let short_deadline = t.env.ledger().timestamp() + 3600;
+    let res = t.distributor.try_create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &short_deadline,
+        &Map::new(&t.env),
+    );
+    match res {
+        Err(Ok(e)) => assert_eq!(
+            InvokeError::from(e),
+            InvokeError::Contract(DividendError::ClaimDeadlineTooSoon as u32),
+            "expected ClaimDeadlineTooSoon error under custom window"
+        ),
+        _ => panic!("expected ClaimDeadlineTooSoon contract error under custom window"),
+    }
+
+    // A 2h deadline satisfies the custom window
+    let ok_deadline = t.env.ledger().timestamp() + 7200;
+    let id = t.distributor.create_distribution(
+        &t.admin,
+        &t.token.address,
+        &t.currency_symbol,
+        &1000i128,
+        &ok_deadline,
+        &Map::new(&t.env),
+    );
+    assert_eq!(id, 1);
+}
+
 // ── get_distribution ─────────────────────────────────────────────────────────
 
 #[test]
@@ -279,7 +410,9 @@ fn claim_dividend_after_deadline_panics() {
     let claimer = Address::generate(&t.env);
     t.token.transfer(&t.admin, &claimer, &100_000i128);
 
-    let deadline = t.env.ledger().timestamp() + 10;
+    // Must satisfy the minimum claim window (#132) — expiry is tested by
+    // advancing past the deadline below, not by creating a short window.
+    let deadline = t.env.ledger().timestamp() + 7200;
     let id = t.distributor.create_distribution(
         &t.admin,
         &t.token.address,
@@ -290,7 +423,7 @@ fn claim_dividend_after_deadline_panics() {
     );
 
     // Advance past deadline
-    advance_ledger(&t.env, 100);
+    advance_ledger(&t.env, 7300);
     t.distributor.claim_dividend(&id, &claimer);
 }
 
@@ -394,6 +527,7 @@ fn update_config_changes_fee_rate() {
         max_distribution_frequency: 86400,
         fee_rate: 100, // changed from 50 to 100 bps
         fee_recipient: t.admin.clone(),
+        min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
     };
     t.distributor.update_config(&t.admin, &new_config);
     // Verify by creating a distribution and checking the claimed amount reflects new fee
@@ -553,6 +687,7 @@ fn migrate_preserves_auto_distribution_config() {
         max_distribution_frequency: 3600,
         fee_rate: 50,
         fee_recipient: t.admin.clone(),
+        min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
     };
     t.distributor.update_config(&t.admin, &config);
 

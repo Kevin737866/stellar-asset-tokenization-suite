@@ -7,6 +7,11 @@ use crate::rwa_token::RWATokenClient;
 
 const STORAGE_VERSION: u32 = 1;
 
+/// Default minimum claim window (seconds) enforced on new distributions.
+/// Guarantees holders at least a 1-hour window to claim (issue #132).
+/// Configurable per-deployment via `DividendConfig.min_claim_window`.
+pub const DEFAULT_MIN_CLAIM_WINDOW: u64 = 3600;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum DividendError {
@@ -31,6 +36,7 @@ pub enum DividendError {
     AlreadyAtLatestVersion = 19,
     InvalidParameters = 20,
     NoAccrualConfigured = 21,
+    ClaimDeadlineTooSoon = 22,
 }
 
 #[contracttype]
@@ -91,6 +97,11 @@ pub struct DividendConfig {
     pub max_distribution_frequency: u64,
     pub fee_rate: i64,
     pub fee_recipient: Address,
+    /// Minimum seconds between distribution creation and its claim deadline.
+    /// `create_distribution` rejects deadlines sooner than
+    /// `now + min_claim_window` with `ClaimDeadlineTooSoon` (issue #132).
+    /// Set to 0 to disable the window check.
+    pub min_claim_window: u64,
 }
 
 #[contract]
@@ -115,6 +126,7 @@ impl DividendDistributor {
             max_distribution_frequency: 86400,
             fee_rate: 50,
             fee_recipient: admin.clone(),
+            min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
         };
 
         env.storage()
@@ -323,7 +335,8 @@ impl DividendDistributor {
             panic_with_error!(&env, DividendError::InvalidAmount);
         }
 
-        if claim_deadline <= env.ledger().timestamp() {
+        let now = env.ledger().timestamp();
+        if claim_deadline <= now {
             panic_with_error!(&env, DividendError::InvalidParameters);
         }
 
@@ -336,6 +349,14 @@ impl DividendDistributor {
             .instance()
             .get(&Symbol::new(&env, "config"))
             .unwrap_or_else(|| { panic_with_error!(&env, DividendError::ConfigNotFound); });
+
+        // Issue #132 — require a minimum claim window so distributions cannot
+        // be created with a deadline holders cannot realistically meet.
+        // `saturating_sub` keeps this panic-free even if the ledger timestamp
+        // ever moved backwards between the check above and here.
+        if claim_deadline.saturating_sub(now) < config.min_claim_window {
+            panic_with_error!(&env, DividendError::ClaimDeadlineTooSoon);
+        }
 
         if !config
             .supported_currencies

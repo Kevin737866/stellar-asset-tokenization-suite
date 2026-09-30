@@ -70,6 +70,7 @@ The **DividendDistributor** contract manages yield distributions across multiple
 | `max_distribution_frequency` | `u64` | Minimum seconds between distributions |
 | `fee_rate` | `i64` | Protocol fee in bps (e.g., 50 = 0.5%) |
 | `fee_recipient` | `Address` | Fee collection address |
+| `min_claim_window` | `u64` | Minimum seconds between creation and claim deadline (default 3600); shorter deadlines are rejected |
 
 ### `ClaimInfo`
 | Field | Type | Description |
@@ -161,7 +162,7 @@ Creates a single dividend distribution for a token in a specific currency.
 | `token_address` | `Address` | RWA token address |
 | `currency` | `Symbol` | Distribution currency |
 | `amount` | `i128` | Total distribution amount (> 0) |
-| `claim_deadline` | `u64` | Deadline timestamp |
+| `claim_deadline` | `u64` | Deadline timestamp (must be at least `min_claim_window` seconds in the future) |
 | `metadata` | `Map<Symbol, Symbol>` | Arbitrary metadata |
 
 **Auth:** Admin check
@@ -171,6 +172,7 @@ Creates a single dividend distribution for a token in a specific currency.
 **Errors:**
 - `InvalidAmount` — `amount <= 0`
 - `UnsupportedCurrency` — Currency not registered
+- `ClaimDeadlineTooSoon` — `claim_deadline` is less than `min_claim_window` seconds after creation
 
 **Events:**
 - `distribution_created` with topics `(distribution_id, token_address, currency, amount)`
