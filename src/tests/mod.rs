@@ -4,6 +4,7 @@ mod test_rwa_token;
 mod test_asset_factory;
 mod test_dividend_distributor;
 mod test_secondary_market;
+mod test_custody_validator;
 mod test_shared_governance;
 mod test_shared_admin;
 mod integration_tests;
