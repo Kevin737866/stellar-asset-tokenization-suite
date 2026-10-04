@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _},
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger},
     Address, BytesN, Env, Map, Symbol, Vec,
 };
 
@@ -28,6 +28,7 @@ struct IntegrationTestEnv {
     secondary_market: SecondaryMarketClient<'static>,
     rwa_token: RWATokenClient<'static>,
     custody_validator: CustodyValidatorClient<'static>,
+    oracle1: Address,
     base_currency: Address,
     oracle1: Address,
 }
@@ -77,25 +78,27 @@ fn setup_integration_test() -> IntegrationTestEnv {
     // Deploy Custody Validator
     let custody_id = env.register_contract(None, CustodyValidator);
     let custody_validator = CustodyValidatorClient::new(&env, &custody_id);
+    let oracle1 = Address::generate(&env);
     custody_validator.initialize(&admin, &admin, &Vec::from_array(&env, [oracle1.clone()]));
 
-    // The custody attestation flows below submit as `admin`, so it must be a
-    // registered, active custodian authorised for the verification types used.
+    // Register the admin as an active custodian so attestation flows work.
     custody_validator.register_custodian(
         &admin,
         &admin,
-        &Symbol::new(&env, "SuiteCustodian"),
+        &Symbol::new(&env, "IntegrationCustodian"),
         &Symbol::new(&env, "US"),
-        &Symbol::new(&env, "LIC_CUSTODY"),
+        &Symbol::new(&env, "LIC_INTEGRATION"),
         &Vec::from_array(
             &env,
             [
-                Symbol::new(&env, "commodities"),
                 Symbol::new(&env, "real_estate"),
+                Symbol::new(&env, "commodities"),
+                Symbol::new(&env, "precious_metals"),
+                Symbol::new(&env, "physical"),
             ],
         ),
         &0i128,
-        &Symbol::new(&env, "Insurer"),
+        &Symbol::new(&env, "TestInsurer"),
     );
 
     // Deploy RWA Token
@@ -124,6 +127,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
         secondary_market,
         rwa_token,
         custody_validator,
+        oracle1,
         base_currency,
         oracle1,
     }
