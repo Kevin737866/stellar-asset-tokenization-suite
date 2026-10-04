@@ -30,6 +30,7 @@ struct IntegrationTestEnv {
     custody_validator: CustodyValidatorClient<'static>,
     oracle1: Address,
     base_currency: Address,
+    oracle1: Address,
 }
 
 fn setup_integration_test() -> IntegrationTestEnv {
@@ -39,6 +40,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
     let admin = Address::generate(&env);
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
+    let oracle1 = Address::generate(&env);
 
     // Deploy Compliance Registry
     let compliance_id = env.register_contract(None, ComplianceRegistry);
@@ -127,6 +129,7 @@ fn setup_integration_test() -> IntegrationTestEnv {
         custody_validator,
         oracle1,
         base_currency,
+        oracle1,
     }
 }
 

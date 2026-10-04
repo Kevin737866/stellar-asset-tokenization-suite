@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN,
+    Env, Map, Symbol, Vec,
 };
 
 use crate::auth::assert_admin;
@@ -56,6 +56,16 @@ pub enum CustodyError {
     InvalidAttestation = 29,
     CustodianNotFound = 30,
     InvalidParameters = 31,
+    MultiSigConfigNotFound = 32,
+    DuplicateSigner = 33,
+    SensorNotFound = 34,
+    SensorInactive = 35,
+    InvalidSensorData = 36,
+    ThresholdNotFound = 37,
+    BridgeNotFound = 38,
+    BridgeAlreadyRegistered = 39,
+    CrossChainProofNotFound = 40,
+    InvalidCrossChainProof = 41,
 }
 
 #[contracttype]
@@ -1010,14 +1020,20 @@ impl CustodyValidator {
 
         dispute.resolved_at = env.ledger().timestamp();
         dispute.resolution = resolution.clone();
-        dispute.penalty_applied = penalty_amount > 0;
-        dispute.penalty_amount = penalty_amount;
 
         if resolution == Symbol::new(&env, "upheld") {
+            // Issue #158: an upheld dispute automatically slashes the custodian's
+            // bond (capped at the total posted bond) and redistributes it.
+            // The challenger's own bond is returned since they prevailed.
             dispute.bond_returned = true;
-            Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), true);
+            let slashed = Self::apply_bond_slash(&env, &dispute, penalty_amount);
+            dispute.penalty_applied = slashed > 0;
+            dispute.penalty_amount = slashed;
         } else {
+            // Rejected / settled disputes never slash the custodian's bond.
             dispute.bond_returned = false;
+            dispute.penalty_applied = false;
+            dispute.penalty_amount = 0;
             Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), false);
         }
 
@@ -1169,7 +1185,12 @@ impl CustodyValidator {
         attestation_id
     }
 
-    fn verify_attestation(env: &Env, attestation: &CustodyAttestation) -> bool {
+    /// Checks shared by every attestation path (active custodian, authorised
+    /// verification type, insurance requirement and expiry). The multi-signature
+    /// requirement is deliberately excluded: `submit_attestation` enforces the
+    /// verification-type signature count while `submit_multisig_attestation`
+    /// enforces the custodian's M-of-N policy (issue #155).
+    fn verify_attestation_basics(env: &Env, attestation: &CustodyAttestation) -> bool {
         let custodian_info = match Self::read_custodian(env, &attestation.custodian) {
             Some(info) => info,
             None => return false,
@@ -1193,12 +1214,6 @@ impl CustodyValidator {
             .unwrap_or(Map::new(&env));
 
         if let Some(config) = verification_configs.get(attestation.verification_type.clone()) {
-            if config.multi_sig_required {
-                if (attestation.multi_sig_signatures.len() as u32) < config.sig_threshold {
-                    return false;
-                }
-            }
-
             if config.insurance_required
                 && attestation.insurance_status == Symbol::new(&env, "uninsured")
             {
@@ -1209,6 +1224,28 @@ impl CustodyValidator {
         let current_time = env.ledger().timestamp();
         if current_time > attestation.expires_at {
             return false;
+        }
+
+        true
+    }
+
+    fn verify_attestation(env: &Env, attestation: &CustodyAttestation) -> bool {
+        if !Self::verify_attestation_basics(env, attestation) {
+            return false;
+        }
+
+        let verification_configs: Map<Symbol, VerificationTypeConfig> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "verification_configs"))
+            .unwrap_or(Map::new(&env));
+
+        if let Some(config) = verification_configs.get(attestation.verification_type.clone()) {
+            if config.multi_sig_required
+                && (attestation.multi_sig_signatures.len() as u32) < config.sig_threshold
+            {
+                return false;
+            }
         }
 
         true
