@@ -293,7 +293,7 @@ jobs:
         continue-on-error: true
 
       - name: Discord Notification
-        uses: tsickert/discord-webhook@v6.0.0
+        uses: tsickert/discord-webhook@v7.0.0
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
           content: ":x: **CI failed** on `main`\nRepository: ${{ github.repository }}\nWorkflow: ${{ github.workflow }}\nActor: ${{ github.actor }}\n[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
