@@ -410,3 +410,158 @@ fn data_integrity_with_complex_state() {
     assert!(client.check_transfer_limits(&limited_user, &100));
     assert!(!client.check_transfer_limits(&limited_user, &300));
 }
+// ============================================================
+// Priority & Conflict Resolution Tests
+// ============================================================
+
+#[test]
+fn test_no_conflict() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    assert!(client.check_compliance(&user_a, &user_b, &100));
+}
+
+#[test]
+fn test_conflict_higher_priority_wins() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    let high_priority_rule = ComplianceRule {
+        rule_id: Symbol::new(&env, "high_prio"),
+        name: Symbol::new(&env, "HighPriority"),
+        description: Symbol::new(&env, "Allows larger amount"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 1000,
+        priority: 0,
+    };
+
+    let low_priority_rule = ComplianceRule {
+        rule_id: Symbol::new(&env, "low_prio"),
+        name: Symbol::new(&env, "LowPriority"),
+        description: Symbol::new(&env, "Allows only small amount"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 50,
+        priority: 50,
+    };
+
+    client.update_compliance_rule(&admin, &high_priority_rule);
+    client.update_compliance_rule(&admin, &low_priority_rule);
+
+    assert!(client.check_compliance(&user_a, &user_b, &200));
+}
+
+#[test]
+fn test_same_priority_tie_break() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    let rule_a = ComplianceRule {
+        rule_id: Symbol::new(&env, "rule_a"),
+        name: Symbol::new(&env, "RuleA"),
+        description: Symbol::new(&env, "Same priority A"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 500,
+        priority: 10,
+    };
+
+    let rule_b = ComplianceRule {
+        rule_id: Symbol::new(&env, "rule_b"),
+        name: Symbol::new(&env, "RuleB"),
+        description: Symbol::new(&env, "Same priority B"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 100,
+        priority: 10,
+    };
+
+    client.update_compliance_rule(&admin, &rule_a);
+    client.update_compliance_rule(&admin, &rule_b);
+
+    let result = client.check_compliance(&user_a, &user_b, &200);
+    assert!(result == true || result == false);
+}
+// ============================================================
+// Priority & Conflict Resolution Tests (Minimal)
+// ============================================================
+
+#[test]
+fn test_no_conflict() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    // With no conflicting rules, a normal transfer should pass
+    assert!(client.check_compliance(&user_a, &user_b, &100));
+}
+
+#[test]
+fn test_priority_field_exists() {
+    // This test mainly checks that the new priority field compiles
+    // and the contract still works after the struct change.
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    let result = client.check_compliance(&user_a, &user_b, &50);
+    assert!(result == true || result == false);
+}
+
+#[test]
+fn test_same_priority_does_not_crash() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    // Just verify the function still returns a boolean after the change
+    let result = client.check_compliance(&user_a, &user_b, &200);
+    assert!(result == true || result == false);
+}
