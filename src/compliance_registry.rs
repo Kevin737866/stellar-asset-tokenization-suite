@@ -59,6 +59,8 @@ pub struct ComplianceRule {
     pub min_verification_level: u32,
     pub requires_accreditation: bool,
     pub max_amount: i128,
+    /// 0 = highest priority, 255 = lowest priority
+    pub priority: u8,
 }
 
 // ... (around line 58)
@@ -384,49 +386,92 @@ impl ComplianceRegistry {
     }
 
     fn evaluate_regulatory_rules(env: Env, from: Address, to: Address, amount: i128) -> bool {
-        let rules: Vec<ComplianceRule> = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "compliance_rules"))
-            .unwrap_or(Vec::new(&env));
+    let rules: Vec<ComplianceRule> = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(&env, "compliance_rules"))
+        .unwrap_or(Vec::new(&env));
 
-        let from_kyc = Self::get_kyc_status(env.clone(), from);
-        let to_kyc = Self::get_kyc_status(env.clone(), to);
-        let from_jurisdiction = from_kyc.jurisdiction.clone();
-        let to_jurisdiction = to_kyc.jurisdiction.clone();
+    let from_kyc = Self::get_kyc_status(env.clone(), from);
+    let to_kyc = Self::get_kyc_status(env.clone(), to);
+    let from_jurisdiction = from_kyc.jurisdiction.clone();
+    let to_jurisdiction = to_kyc.jurisdiction.clone();
 
-        for rule in rules.iter() {
-            if !rule.is_active {
-                continue;
-            }
-
-            if !Self::rule_applies_to_transfer(
+    // Collect active rules that apply to this transfer
+    let mut applicable = Vec::new(&env);
+    for rule in rules.iter() {
+        if rule.is_active
+            && Self::rule_applies_to_transfer(
                 &env,
                 &rule,
                 from_jurisdiction.clone(),
                 to_jurisdiction.clone(),
-            ) {
-                continue;
-            }
-
-            if from_kyc.verification_level < rule.min_verification_level
-                || to_kyc.verification_level < rule.min_verification_level
-            {
-                return false;
-            }
-
-            if rule.requires_accreditation && (!from_kyc.is_accredited || !to_kyc.is_accredited) {
-                return false;
-            }
-
-            if amount > rule.max_amount {
-                return false;
-            }
+            )
+        {
+            applicable.push_back(rule.clone());
         }
-
-        true
     }
 
+    if applicable.is_empty() {
+        return true;
+    }
+
+    // Sort by priority ascending (0 = highest priority first)
+    let len = applicable.len();
+    for i in 0..len {
+        for j in 0..(len - i - 1) {
+            let a = applicable.get(j).unwrap();
+            let b = applicable.get(j + 1).unwrap();
+            if a.priority > b.priority {
+                applicable.set(j, b);
+                applicable.set(j + 1, a);
+            }
+        }
+    }
+
+    // Highest priority rule decides
+    let mut final_result = true;
+    let mut winner_id: Option<Symbol> = None;
+    let mut is_first = true;
+
+    for rule in applicable.iter() {
+        let mut passes = true;
+
+        if from_kyc.verification_level < rule.min_verification_level
+            || to_kyc.verification_level < rule.min_verification_level
+        {
+            passes = false;
+        }
+
+        if rule.requires_accreditation && (!from_kyc.is_accredited || !to_kyc.is_accredited) {
+            passes = false;
+        }
+
+        if amount > rule.max_amount {
+            passes = false;
+        }
+
+        if is_first {
+            final_result = passes;
+            winner_id = Some(rule.rule_id.clone());
+            is_first = false;
+        } else if passes != final_result {
+            // Conflict detected — higher priority already won
+            if let Some(ref winner) = winner_id {
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "rule_conflict_detected"),
+                        winner.clone(),
+                        rule.rule_id.clone(),
+                    ),
+                    (rule.priority, amount),
+                );
+            }
+        }
+    }
+
+    final_result
+}
     fn rule_applies_to_transfer(
         env: &Env,
         rule: &ComplianceRule,
