@@ -38,6 +38,7 @@ pub enum AssetClass {
     Art = 4,
     CarbonCredit = 5,
     RenewableEnergy = 6,
+    IntellectualProperty = 7,
 }
 
 #[contracttype]
@@ -239,7 +240,7 @@ impl AssetFactory {
         let asset_type_sym = Symbol::new(&env, &asset_class_str);
 
         // Deploy token with deterministic address using salt
-        let salt = env.crypto().sha256(&config.symbol.to_xdr(&env));
+        let salt = env.crypto().sha256(&config.symbol.clone().to_xdr(&env));
         
         let token_address = env.deployer()
             .with_current_contract(salt)
@@ -260,6 +261,7 @@ impl AssetFactory {
         );
 
         // Create asset info
+        let asset_symbol = config.symbol.clone();
         let asset_info = AssetInfo {
             name: config.name,
             symbol: config.symbol,
@@ -278,7 +280,7 @@ impl AssetFactory {
 
         // Update registry — single source of truth for all asset data
         let mut registry = registry;
-        registry.set(config.symbol, asset_info);
+        registry.set(asset_symbol, asset_info);
         env.storage().instance().set(&Symbol::new(&env, "registry"), &registry);
 
         token_address
@@ -498,17 +500,18 @@ impl AssetFactory {
         // In production, this would involve actual voting mechanism
 
         // Deploy new contract version
-        let salt = env.crypto().sha256(&symbol.to_xdr(&env));
+        let salt = env.crypto().sha256(&symbol.clone().to_xdr(&env));
         
         let new_token_address = env.deployer()
             .with_current_contract(salt)
             .deploy_v2(new_wasm_hash, soroban_sdk::Vec::<soroban_sdk::Val>::new(&env));
 
         // Update asset info
-        asset_info.token_address = new_token_address;
+        asset_info.token_address = new_token_address.clone();
         asset_info.template_version = asset_info.template_version
             .checked_add(1)
             .unwrap_or_else(|| panic_with_error!(&env, AssetFactoryError::Overflow));
+        let new_version = asset_info.template_version;
 
         // Update registry
         let mut registry = registry;
@@ -517,7 +520,7 @@ impl AssetFactory {
 
         env.events().publish(
             (Symbol::new(&env, "asset_upgraded"), symbol, auth),
-            (new_token_address, asset_info.template_version),
+            (new_token_address, new_version),
         );
     }
 

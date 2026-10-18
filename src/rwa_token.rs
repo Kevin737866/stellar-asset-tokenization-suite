@@ -101,11 +101,11 @@ impl RWAToken {
         }
 
         let token_info = TokenInfo {
-            name,
-            symbol,
+            name: name.clone(),
+            symbol: symbol.clone(),
             total_supply,
             decimals,
-            asset_type,
+            asset_type: asset_type.clone(),
             metadata,
             compliance_registry,
             dividend_distributor,

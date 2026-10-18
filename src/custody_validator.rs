@@ -16,6 +16,21 @@ pub const MAX_ITERATIONS: u32 = 100;
 /// timeliness. Averages at or below this threshold score full marks.
 const EXPECTED_VERIFICATION_TIME: u64 = 7 * 86400;
 
+// ── Issue #169: satellite imagery verification ──────────────────────────────
+
+/// Satellite imagery older than 30 days cannot prove current custody.
+pub const MAX_SATELLITE_IMAGE_AGE: u64 = 30 * 86400;
+
+/// How far (in microdegrees, ~1.1 km) a proof may be from the coordinates
+/// registered for the asset. Imagery footprints have finite precision.
+pub const MAX_SATELLITE_COORDINATE_DEVIATION: i64 = 10_000;
+
+/// Reject imagery too coarse to verify a specific property.
+pub const MAX_SATELLITE_RESOLUTION_METERS: u32 = 100;
+
+/// Keep only the most recent proofs per asset so storage stays bounded.
+pub const MAX_SATELLITE_PROOFS_PER_ASSET: u32 = 24;
+
 #[contracttype]
 pub enum StorageKey {
     Custodian(Address),
@@ -66,6 +81,11 @@ pub enum CustodyError {
     BridgeAlreadyRegistered = 39,
     CrossChainProofNotFound = 40,
     InvalidCrossChainProof = 41,
+    SatelliteProviderNotRegistered = 42,
+    SatelliteProviderAlreadyRegistered = 43,
+    StaleSatelliteImage = 44,
+    CoordinateMismatch = 45,
+    InvalidSatelliteProof = 46,
 }
 
 #[contracttype]
@@ -173,6 +193,7 @@ pub struct VerificationTypeConfig {
     pub iot_monitoring_required: bool,
     pub satellite_verification: bool,
     pub legal_verification_required: bool,
+    pub audit_required: bool,
 }
 
 #[contracttype]
@@ -265,6 +286,37 @@ pub struct CustodianMetrics {
     pub total_latency: u64,
     pub methods_evidenced: u64,
     pub methods_possible: u64,
+}
+
+/// Issue #169: geographic footprint of an asset in microdegrees.
+#[contracttype]
+#[derive(Clone)]
+pub struct Coordinates {
+    pub latitude: i64,
+    pub longitude: i64,
+}
+
+/// Issue #169: imagery proof submitted by a registered satellite provider on
+/// behalf of a custodian.
+#[contracttype]
+#[derive(Clone)]
+pub struct SatelliteProof {
+    pub provider_address: Address,
+    pub image_hash: BytesN<32>,
+    pub coordinates: Coordinates,
+    pub timestamp: u64,
+    /// Ground resolution in metres per pixel.
+    pub resolution: u32,
+}
+
+/// Issue #169: registered satellite imagery provider.
+#[contracttype]
+#[derive(Clone)]
+pub struct SatelliteProvider {
+    pub provider_address: Address,
+    pub name: Symbol,
+    pub is_active: bool,
+    pub registered_at: u64,
 }
 
 #[contract]
@@ -733,7 +785,6 @@ impl CustodyValidator {
         name: Symbol,
         jurisdiction: Symbol,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -747,7 +798,7 @@ impl CustodyValidator {
         Self::check_version(&env);
 
         let registered_oracle = oracle_address.clone();
-        Self::put_oracle(env, oracle_address, name, jurisdiction);
+        Self::put_oracle(env.clone(), oracle_address, name, jurisdiction);
 
         // Issue #166: record the registration in the audit trail.
         Self::append_audit_event(
@@ -770,7 +821,6 @@ impl CustodyValidator {
         bond_required: i128,
         insurance_provider: Symbol,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -829,7 +879,6 @@ impl CustodyValidator {
     }
 
     pub fn setup_verification_types(env: Env, auth: Address) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -890,6 +939,7 @@ impl CustodyValidator {
             iot_monitoring_required: false,
             satellite_verification: true,
             legal_verification_required: true,
+            audit_required: true,
         }
     }
 
@@ -911,6 +961,7 @@ impl CustodyValidator {
             iot_monitoring_required: true,
             satellite_verification: false,
             legal_verification_required: false,
+            audit_required: false,
         }
     }
 
@@ -932,6 +983,7 @@ impl CustodyValidator {
             iot_monitoring_required: false,
             satellite_verification: false,
             legal_verification_required: true,
+            audit_required: false,
         }
     }
 
@@ -952,6 +1004,7 @@ impl CustodyValidator {
             iot_monitoring_required: true,
             satellite_verification: false,
             legal_verification_required: false,
+            audit_required: false,
         }
     }
 
@@ -972,7 +1025,29 @@ impl CustodyValidator {
             iot_monitoring_required: false,
             satellite_verification: false,
             legal_verification_required: true,
+            audit_required: false,
         }
+    }
+
+    /// Issue #158: slash an upheld dispute's penalty from the custodian's bond,
+    /// capped at whatever bond is still posted. Returns the amount slashed.
+    fn apply_bond_slash(env: &Env, dispute: &DisputeRecord, penalty_amount: i128) -> i128 {
+        if penalty_amount <= 0 {
+            return 0;
+        }
+
+        let Some(mut custodian) = Self::read_custodian(env, &dispute.custodian) else {
+            return 0;
+        };
+
+        let slashed = penalty_amount.min(custodian.bond_required.max(0));
+        if slashed <= 0 {
+            return 0;
+        }
+
+        custodian.bond_required -= slashed;
+        Self::write_custodian(env, &dispute.custodian, &custodian);
+        slashed
     }
 
     pub fn resolve_dispute(
@@ -982,7 +1057,6 @@ impl CustodyValidator {
         resolution: Symbol,
         penalty_amount: i128,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1029,6 +1103,7 @@ impl CustodyValidator {
             let slashed = Self::apply_bond_slash(&env, &dispute, penalty_amount);
             dispute.penalty_applied = slashed > 0;
             dispute.penalty_amount = slashed;
+            Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), true);
         } else {
             // Rejected / settled disputes never slash the custodian's bond.
             dispute.bond_returned = false;
@@ -1183,6 +1258,255 @@ impl CustodyValidator {
         );
 
         attestation_id
+    }
+
+    // ── Issue #169: satellite imagery verification ───────────────────────────
+
+    /// Register a trusted satellite imagery provider. Admin only.
+    pub fn register_satellite_provider(env: Env, auth: Address, provider: Address, name: Symbol) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "admin"))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, CustodyError::NotInitialized);
+            });
+
+        assert_admin(&env, &auth, &admin);
+        Self::check_version(&env);
+
+        let mut providers: Map<Address, SatelliteProvider> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_providers"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        if providers.contains_key(provider.clone()) {
+            panic_with_error!(&env, CustodyError::SatelliteProviderAlreadyRegistered);
+        }
+
+        providers.set(
+            provider.clone(),
+            SatelliteProvider {
+                provider_address: provider.clone(),
+                name,
+                is_active: true,
+                registered_at: env.ledger().timestamp(),
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "satellite_providers"), &providers);
+
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "satellite_provider_registered"),
+            &auth,
+            &provider,
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
+    }
+
+    /// Revoke a satellite provider. Admin only; existing proofs stay on record.
+    pub fn deregister_satellite_provider(env: Env, auth: Address, provider: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "admin"))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, CustodyError::NotInitialized);
+            });
+
+        assert_admin(&env, &auth, &admin);
+        Self::check_version(&env);
+
+        let mut providers: Map<Address, SatelliteProvider> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_providers"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut provider_info = providers.get(provider.clone()).unwrap_or_else(|| {
+            panic_with_error!(&env, CustodyError::SatelliteProviderNotRegistered);
+        });
+        provider_info.is_active = false;
+        providers.set(provider.clone(), provider_info);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "satellite_providers"), &providers);
+
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "satellite_provider_deregistered"),
+            &auth,
+            &provider,
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
+    }
+
+    /// Record the geographic footprint that satellite proofs must match.
+    /// Admin only.
+    pub fn register_asset_coordinates(
+        env: Env,
+        auth: Address,
+        asset_id: Address,
+        coordinates: Coordinates,
+    ) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "admin"))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, CustodyError::NotInitialized);
+            });
+
+        assert_admin(&env, &auth, &admin);
+        Self::check_version(&env);
+
+        Self::validate_coordinates(&env, &coordinates);
+
+        let mut asset_coordinates: Map<Address, Coordinates> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "asset_coordinates"))
+            .unwrap_or_else(|| Map::new(&env));
+        asset_coordinates.set(asset_id, coordinates);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "asset_coordinates"), &asset_coordinates);
+    }
+
+    /// Submit a satellite imagery proof for a real estate or agricultural
+    /// asset. The custodian authorises the submission and the proof must come
+    /// from an active provider, be less than 30 days old and match the asset's
+    /// registered coordinates.
+    pub fn submit_satellite_proof(
+        env: Env,
+        custodian: Address,
+        asset_id: Address,
+        proof: SatelliteProof,
+    ) -> u64 {
+        custodian.require_auth();
+        Self::check_version(&env);
+
+        let custodian_info = Self::read_custodian(&env, &custodian).unwrap_or_else(|| {
+            panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
+        });
+        if !custodian_info.is_active {
+            panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
+        }
+
+        let providers: Map<Address, SatelliteProvider> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_providers"))
+            .unwrap_or_else(|| Map::new(&env));
+        match providers.get(proof.provider_address.clone()) {
+            Some(provider) if provider.is_active => {}
+            _ => panic_with_error!(&env, CustodyError::SatelliteProviderNotRegistered),
+        }
+
+        let now = env.ledger().timestamp();
+        if proof.timestamp > now || now.saturating_sub(proof.timestamp) >= MAX_SATELLITE_IMAGE_AGE
+        {
+            panic_with_error!(&env, CustodyError::StaleSatelliteImage);
+        }
+
+        if proof.resolution == 0 || proof.resolution > MAX_SATELLITE_RESOLUTION_METERS {
+            panic_with_error!(&env, CustodyError::InvalidSatelliteProof);
+        }
+
+        Self::validate_coordinates(&env, &proof.coordinates);
+
+        let asset_coordinates: Map<Address, Coordinates> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "asset_coordinates"))
+            .unwrap_or_else(|| Map::new(&env));
+        let expected = asset_coordinates
+            .get(asset_id.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CustodyError::AssetNotRegistered));
+
+        if (proof.coordinates.latitude - expected.latitude).abs()
+            > MAX_SATELLITE_COORDINATE_DEVIATION
+            || (proof.coordinates.longitude - expected.longitude).abs()
+                > MAX_SATELLITE_COORDINATE_DEVIATION
+        {
+            panic_with_error!(&env, CustodyError::CoordinateMismatch);
+        }
+
+        let mut proofs: Map<Address, Vec<SatelliteProof>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_proofs"))
+            .unwrap_or_else(|| Map::new(&env));
+        let mut asset_proofs = proofs.get(asset_id.clone()).unwrap_or(Vec::new(&env));
+        asset_proofs.push_back(proof.clone());
+        while asset_proofs.len() > MAX_SATELLITE_PROOFS_PER_ASSET {
+            asset_proofs.remove(0);
+        }
+        proofs.set(asset_id.clone(), asset_proofs);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "satellite_proofs"), &proofs);
+
+        let proof_count: u64 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_proof_count"))
+            .unwrap_or(0u64);
+        let proof_id = proof_count + 1;
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "satellite_proof_count"), &proof_id);
+
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "satellite_proof_submitted"),
+            &custodian,
+            &asset_id.clone(),
+            &proof.image_hash,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "satellite_proof_submitted"), asset_id),
+            (proof_id, proof.provider_address, proof.timestamp),
+        );
+
+        proof_id
+    }
+
+    /// Latest satellite proofs recorded for an asset, oldest first.
+    pub fn get_satellite_proofs(env: Env, asset_id: Address) -> Vec<SatelliteProof> {
+        let proofs: Map<Address, Vec<SatelliteProof>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_proofs"))
+            .unwrap_or_else(|| Map::new(&env));
+        proofs.get(asset_id).unwrap_or(Vec::new(&env))
+    }
+
+    /// Whether a provider is currently registered and active.
+    pub fn is_satellite_provider_registered(env: Env, provider: Address) -> bool {
+        let providers: Map<Address, SatelliteProvider> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "satellite_providers"))
+            .unwrap_or_else(|| Map::new(&env));
+        providers
+            .get(provider)
+            .map(|info| info.is_active)
+            .unwrap_or(false)
+    }
+
+    fn validate_coordinates(env: &Env, coordinates: &Coordinates) {
+        if coordinates.latitude < -90_000_000
+            || coordinates.latitude > 90_000_000
+            || coordinates.longitude < -180_000_000
+            || coordinates.longitude > 180_000_000
+        {
+            panic_with_error!(env, CustodyError::InvalidParameters);
+        }
     }
 
     /// Checks shared by every attestation path (active custodian, authorised
@@ -1484,7 +1808,6 @@ impl CustodyValidator {
     }
 
     pub fn invalidate_attestation(env: Env, auth: Address, attestation_id: u64) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1607,7 +1930,6 @@ impl CustodyValidator {
         claim_reason: Symbol,
         evidence_hash: BytesN<32>,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1664,7 +1986,6 @@ impl CustodyValidator {
         asset_id: Address,
         insurance: InsuranceIntegration,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1779,7 +2100,6 @@ impl CustodyValidator {
     }
 
     pub fn update_oracle_status(env: Env, auth: Address, oracle_address: Address, is_active: bool) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1813,7 +2133,6 @@ impl CustodyValidator {
         oracle_address: Address,
         reputation_score: u32,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1859,7 +2178,6 @@ impl CustodyValidator {
     }
 
     pub fn update_config(env: Env, auth: Address, config: ValidationConfig) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -1921,13 +2239,12 @@ impl CustodyValidator {
 
     /// Update the set of asset types a registered custodian is authorised to
     /// attest for. Admin-only.
-    pub fn update_custodian_verification_types(
+    pub fn update_custodian_types(
         env: Env,
         auth: Address,
         custodian_address: Address,
         verification_types: Vec<Symbol>,
     ) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
@@ -2017,7 +2334,6 @@ impl CustodyValidator {
 
     /// Update the weights used to combine performance metrics. Admin-only.
     pub fn update_performance_weights(env: Env, auth: Address, weights: PerformanceWeights) {
-        crate::shared_admin::require_admin(&env, &auth);
         let admin: Address = env
             .storage()
             .instance()
