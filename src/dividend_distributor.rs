@@ -513,20 +513,37 @@ payout_token: currency_token_address.clone(), // or Address::generate placeholde
         let fee_amount = (claimable_amount * config.fee_rate as i128) / 10000i128;
         let net_amount = claimable_amount - fee_amount;
 
+         = distribution.currency.clone();
         let dist_currency = distribution.currency.clone();
-        let currency_token_address =
-            Self::get_currency_token_address(env.clone(), dist_currency.clone());
-        let currency_client = TokenClient::new(&env, &currency_token_address);
 
-        currency_client.transfer(&env.current_contract_address(), &claimer, &net_amount);
+if distribution.is_in_kind {
+    // In-kind: transfer the escrowed payout token directly
+    let payout_client = TokenClient::new(&env, &distribution.payout_token);
+    payout_client.transfer(&env.current_contract_address(), &claimer, &net_amount);
 
-        if fee_amount > 0 {
-            currency_client.transfer(
-                &env.current_contract_address(),
-                &config.fee_recipient,
-                &fee_amount,
-            );
-        }
+    if fee_amount > 0 {
+        payout_client.transfer(
+            &env.current_contract_address(),
+            &config.fee_recipient,
+            &fee_amount,
+        );
+    }
+} else {
+    // Normal currency path
+    let currency_token_address =
+        Self::get_currency_token_address(env.clone(), dist_currency.clone());
+    let currency_client = TokenClient::new(&env, &currency_token_address);
+
+    currency_client.transfer(&env.current_contract_address(), &claimer, &net_amount);
+
+    if fee_amount > 0 {
+        currency_client.transfer(
+            &env.current_contract_address(),
+            &config.fee_recipient,
+            &fee_amount,
+        );
+    }
+}
 
         let claim_info = ClaimInfo {
             distribution_id,
