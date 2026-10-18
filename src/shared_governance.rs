@@ -1,5 +1,5 @@
 use crate::auth::AuthError;
-use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Env, Symbol, IntoVal};
+use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Env, IntoVal, Symbol, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -141,7 +141,7 @@ fn read_quorum_config(env: &Env) -> QuorumConfig {
         })
 }
 
-fn quorum_bps(env: &Env, votes_cast: usize) -> u32 {
+fn quorum_bps(env: &Env, votes_cast: u32) -> u32 {
     let owners = read_owners(env);
     if owners.len() == 0 {
         return 0;
