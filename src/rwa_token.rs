@@ -26,7 +26,20 @@ pub enum RWATokenError {
     TokenNotInitialized = 15,
     AlreadyAtLatestVersion = 16,
     TokenPaused = 17,
+    InvalidAddress = 18,
+    SelfTransfer = 19,
+    SnapshotNotFound = 20,
 }
+
+/// Maximum number of point-in-time balance snapshots kept on chain. The oldest
+/// snapshot is evicted once this limit is reached (FIFO).
+pub const MAX_SNAPSHOTS: u32 = 10;
+
+/// Strkeys of the all-zero ed25519 account and the all-zero contract, used to
+/// reject transfers that would otherwise burn tokens by sending them to the
+/// "null" address.
+const ZERO_ADDRESS: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const ZERO_CONTRACT_ADDRESS: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 
 #[contracttype]
 #[derive(Clone)]
@@ -68,6 +81,15 @@ pub struct LockSlot {
     pub until: u64,
 }
 
+/// Metadata recorded when a point-in-time balance snapshot is taken.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotMeta {
+    pub snapshot_id: u32,
+    pub timestamp: u64,
+    pub total_supply: i128,
+}
+
 // ... (around line 61)
 #[contract]
 pub struct RWAToken;
@@ -101,11 +123,11 @@ impl RWAToken {
         }
 
         let token_info = TokenInfo {
-            name,
-            symbol,
+            name: name.clone(),
+            symbol: symbol.clone(),
             total_supply,
             decimals,
-            asset_type,
+            asset_type: asset_type.clone(),
             metadata,
             compliance_registry,
             dividend_distributor,
@@ -208,7 +230,7 @@ impl RWAToken {
         balance.amount = balance.amount
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Overflow));
-        env.storage().instance().set(&to, &balance);
+        Self::write_balance(&env, to.clone(), balance);
 
         env.events().publish(
             (Symbol::new(&env, "mint"), to.clone()),
@@ -245,7 +267,7 @@ impl RWAToken {
         balance.amount = balance.amount
             .checked_sub(amount)
             .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Underflow));
-        env.storage().instance().set(&from, &balance);
+        Self::write_balance(&env, from.clone(), balance);
 
         let mut token_info: TokenInfo = env
             .storage()
@@ -275,6 +297,14 @@ impl RWAToken {
         from.require_auth();
 
         Self::check_version(&env);
+
+        if Self::is_zero_address(&env, &to) {
+            panic_with_error!(&env, RWATokenError::InvalidAddress);
+        }
+
+        if from == to {
+            panic_with_error!(&env, RWATokenError::SelfTransfer);
+        }
 
         let token_info: TokenInfo = env
             .storage()
@@ -308,8 +338,8 @@ impl RWAToken {
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Overflow));
 
-        env.storage().instance().set(&from, &from_balance);
-        env.storage().instance().set(&to, &to_balance);
+        Self::write_balance(&env, from.clone(), from_balance);
+        Self::write_balance(&env, to.clone(), to_balance);
 
         env.events().publish(
             (Symbol::new(&env, "transfer"), from.clone()),
@@ -331,6 +361,243 @@ impl RWAToken {
             voting_power: 0,
             last_dividend_claim: 0,
         })
+    }
+
+    fn is_zero_address(env: &Env, address: &Address) -> bool {
+        *address == Address::from_str(env, ZERO_ADDRESS)
+            || *address == Address::from_str(env, ZERO_CONTRACT_ADDRESS)
+    }
+
+    // ── balance storage (lazy initialization) ────────────────────────────────
+    //
+    // Only balances holding value are persisted: an address with no entry
+    // reads as the default zero balance, and an entry that falls back to the
+    // default is removed so the storage footprint stays proportional to the
+    // number of actual holders.
+
+    fn write_balance(env: &Env, address: Address, balance: Balance) {
+        let is_default = balance.amount == 0
+            && balance.locked_amount == 0
+            && balance.voting_power == 0
+            && balance.last_dividend_claim == 0;
+
+        if is_default {
+            env.storage().instance().remove(&address);
+            Self::remove_holder(env, &address);
+            return;
+        }
+
+        env.storage().instance().set(&address, &balance);
+
+        if balance.amount > 0 || balance.locked_amount > 0 {
+            Self::add_holder(env, &address);
+        } else {
+            Self::remove_holder(env, &address);
+        }
+    }
+
+    // ── holder registry ──────────────────────────────────────────────────────
+    //
+    // Snapshot creation cannot enumerate instance storage, so the token keeps
+    // an explicit list of addresses holding a non-zero balance.
+
+    fn read_holders(env: &Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "holders"))
+            .unwrap_or(Vec::new(env))
+    }
+
+    fn add_holder(env: &Env, address: &Address) {
+        let mut holders = Self::read_holders(env);
+        if !holders.contains(address) {
+            holders.push_back(address.clone());
+            env.storage()
+                .instance()
+                .set(&Symbol::new(env, "holders"), &holders);
+        }
+    }
+
+    fn remove_holder(env: &Env, address: &Address) {
+        let mut holders = Self::read_holders(env);
+        if let Some(index) = holders.first_index_of(address) {
+            holders.remove(index);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(env, "holders"), &holders);
+        }
+    }
+
+    // ── point-in-time balance snapshots ─────────────────────────────────────
+    //
+    // Snapshots capture every holder's balance plus the total supply at the
+    // current ledger timestamp, so dividend record dates and historic voting
+    // power can be evaluated after the fact. At most `MAX_SNAPSHOTS` are kept;
+    // creating one more evicts the oldest (FIFO).
+
+    fn snapshot_meta_key(env: &Env, snapshot_id: u32) -> (Symbol, u32) {
+        (Symbol::new(env, "snapshot_meta"), snapshot_id)
+    }
+
+    fn snapshot_balances_key(env: &Env, snapshot_id: u32) -> (Symbol, u32) {
+        (Symbol::new(env, "snapshot_balances"), snapshot_id)
+    }
+
+    /// Captures the current balances and returns the new snapshot id.
+    pub fn create_snapshot(env: Env, auth: Address) -> u32 {
+        crate::shared_admin::require_admin(&env, &auth);
+        Self::check_version(&env);
+
+        let token_info = Self::read_token_info(&env);
+        let snapshot_id: u32 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_snapshot_id"))
+            .unwrap_or(1);
+
+        let mut balances = Map::<Address, i128>::new(&env);
+        for holder in Self::read_holders(&env).iter() {
+            let balance = Self::get_balance(env.clone(), holder.clone());
+            let total = balance.amount
+                .checked_add(balance.locked_amount)
+                .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Overflow));
+            if total > 0 {
+                balances.set(holder, total);
+            }
+        }
+
+        let mut snapshot_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "snapshot_ids"))
+            .unwrap_or(Vec::new(&env));
+
+        if snapshot_ids.len() >= MAX_SNAPSHOTS {
+            if let Some(oldest) = snapshot_ids.get(0) {
+                env.storage()
+                    .persistent()
+                    .remove(&Self::snapshot_meta_key(&env, oldest));
+                env.storage()
+                    .persistent()
+                    .remove(&Self::snapshot_balances_key(&env, oldest));
+                snapshot_ids.remove(0);
+            }
+        }
+
+        let meta = SnapshotMeta {
+            snapshot_id,
+            timestamp: env.ledger().timestamp(),
+            total_supply: token_info.total_supply,
+        };
+
+        let meta_key = Self::snapshot_meta_key(&env, snapshot_id);
+        env.storage().persistent().set(&meta_key, &meta);
+        env.storage().persistent().extend_ttl(&meta_key, 50_000, 535_680);
+
+        let balances_key = Self::snapshot_balances_key(&env, snapshot_id);
+        env.storage().persistent().set(&balances_key, &balances);
+        env.storage()
+            .persistent()
+            .extend_ttl(&balances_key, 50_000, 535_680);
+
+        snapshot_ids.push_back(snapshot_id);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "snapshot_ids"), &snapshot_ids);
+        env.storage().instance().set(
+            &Symbol::new(&env, "next_snapshot_id"),
+            &snapshot_id
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Overflow)),
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "snapshot_created"), auth),
+            snapshot_id,
+        );
+
+        snapshot_id
+    }
+
+    /// Total balance `address` held when `snapshot_id` was taken. Returns 0 for
+    /// addresses that held nothing at that time.
+    pub fn get_balance_at(env: Env, address: Address, snapshot_id: u32) -> i128 {
+        let balances: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&Self::snapshot_balances_key(&env, snapshot_id))
+            .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::SnapshotNotFound));
+
+        balances.get(address).unwrap_or(0)
+    }
+
+    /// Metadata (timestamp and total supply) for a stored snapshot.
+    pub fn get_snapshot_metadata(env: Env, snapshot_id: u32) -> SnapshotMeta {
+        env.storage()
+            .persistent()
+            .get(&Self::snapshot_meta_key(&env, snapshot_id))
+            .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::SnapshotNotFound))
+    }
+
+    /// Alias for [`Self::get_snapshot_metadata`].
+    pub fn get_snapshot(env: Env, snapshot_id: u32) -> SnapshotMeta {
+        Self::get_snapshot_metadata(env, snapshot_id)
+    }
+
+    /// Ids of the snapshots currently retained, oldest first.
+    pub fn get_snapshot_ids(env: Env) -> Vec<u32> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "snapshot_ids"))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ── registry / distributor addresses ────────────────────────────────────
+
+    /// Points the token at a new compliance registry. Admin-only and rejected
+    /// while the token is paused.
+    pub fn update_compliance_registry(env: Env, auth: Address, new_registry: Address) {
+        crate::shared_admin::require_admin(&env, &auth);
+        Self::check_version(&env);
+
+        let mut token_info = Self::read_token_info(&env);
+        if token_info.is_paused {
+            panic_with_error!(&env, RWATokenError::TokenPaused);
+        }
+
+        let previous = token_info.compliance_registry.clone();
+        token_info.compliance_registry = new_registry.clone();
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "token_info"), &token_info);
+
+        env.events().publish(
+            (Symbol::new(&env, "compliance_registry_updated"), auth),
+            (previous, new_registry),
+        );
+    }
+
+    /// Points the token at a new dividend distributor. Admin-only and rejected
+    /// while the token is paused.
+    pub fn update_dividend_distributor(env: Env, auth: Address, new_distributor: Address) {
+        crate::shared_admin::require_admin(&env, &auth);
+        Self::check_version(&env);
+
+        let mut token_info = Self::read_token_info(&env);
+        if token_info.is_paused {
+            panic_with_error!(&env, RWATokenError::TokenPaused);
+        }
+
+        let previous = token_info.dividend_distributor.clone();
+        token_info.dividend_distributor = new_distributor.clone();
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "token_info"), &token_info);
+
+        env.events().publish(
+            (Symbol::new(&env, "dividend_distributor_updated"), auth),
+            (previous, new_distributor),
+        );
     }
 
     pub fn lock_tokens(env: Env, auth: Address, owner: Address, amount: i128, lock_period: u64) {
@@ -360,7 +627,7 @@ impl RWAToken {
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Overflow));
 
-        env.storage().instance().set(&owner, &balance);
+        Self::write_balance(&env, owner.clone(), balance);
 
         let mut locks: Map<Address, LockSlot> = env
             .storage()
@@ -412,7 +679,7 @@ impl RWAToken {
             .checked_sub(amount)
             .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Underflow));
 
-        env.storage().instance().set(&owner, &balance);
+        Self::write_balance(&env, owner.clone(), balance);
 
         env.events().publish(
             (Symbol::new(&env, "tokens_unlocked"), owner),
