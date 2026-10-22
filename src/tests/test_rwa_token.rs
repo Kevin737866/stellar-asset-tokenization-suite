@@ -1,13 +1,13 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env, Map, Symbol, Vec,
+    testutils::{Address as _, Events as _, Ledger as _},
+    Address, Env, Map, Symbol, TryIntoVal as _, Vec,
 };
 
 use crate::{
     compliance_registry::{ComplianceRegistry, ComplianceRegistryClient, KYCStatus},
-    rwa_token::{RWAToken, RWATokenClient, RWATokenError},
+    rwa_token::{RWAToken, RWATokenClient, RWATokenError, MAX_SNAPSHOTS},
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -15,6 +15,7 @@ use crate::{
 struct TestEnv {
     env: Env,
     admin: Address,
+    token_id: Address,
     token: RWATokenClient<'static>,
     compliance: ComplianceRegistryClient<'static>,
 }
@@ -49,7 +50,7 @@ fn setup() -> TestEnv {
     let token: RWATokenClient<'static> = unsafe { core::mem::transmute(token) };
     let compliance: ComplianceRegistryClient<'static> = unsafe { core::mem::transmute(compliance) };
 
-    TestEnv { env, admin, token, compliance }
+    TestEnv { env, admin, token_id, token, compliance }
 }
 
 // ── initialize ───────────────────────────────────────────────────────────────
@@ -1060,4 +1061,313 @@ fn initialize_with_metadata_succeeds() {
     
     let info = token.get_token_info();
     assert_eq!(info.metadata.len(), 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issues #98-#101: transfer validation, snapshots, lazy balances, registries
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Strkey of the all-zero ed25519 account (the "null" address).
+const ZERO_ADDRESS_STR: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+fn zero_address(env: &Env) -> Address {
+    Address::from_str(env, ZERO_ADDRESS_STR)
+}
+
+fn event_published(env: &Env, name: &str) -> bool {
+    let wanted = Symbol::new(env, name);
+    for (_, topics, _) in env.events().all().iter() {
+        if let Some(topic) = topics.get(0) {
+            let symbol: Option<Symbol> = topic.try_into_val(env).ok();
+            if symbol == Some(wanted.clone()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_balance_entry(t: &TestEnv, address: &Address) -> bool {
+    t.env
+        .as_contract(&t.token_id, || t.env.storage().instance().has(address))
+}
+
+// ── #98: transfer recipient validation ───────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn transfer_to_zero_address_rejected() {
+    let t = setup();
+    t.token.transfer(&t.admin, &zero_address(&t.env), &100i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn transfer_to_zero_contract_rejected() {
+    let t = setup();
+    let zero_contract =
+        Address::from_str(&t.env, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4");
+    t.token.transfer(&t.admin, &zero_contract, &100i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn transfer_to_self_rejected() {
+    let t = setup();
+    t.token.transfer(&t.admin, &t.admin, &100i128);
+}
+
+#[test]
+fn valid_transfer_still_moves_tokens() {
+    let t = setup();
+    let recipient = Address::generate(&t.env);
+    t.token.transfer(&t.admin, &recipient, &100i128);
+    assert_eq!(t.token.get_balance(&recipient).amount, 100);
+}
+
+#[test]
+fn transfer_and_burn_events_are_distinct() {
+    let t = setup();
+    let recipient = Address::generate(&t.env);
+
+    t.token.transfer(&t.admin, &recipient, &100i128);
+    assert!(event_published(&t.env, "transfer"));
+    assert!(!event_published(&t.env, "burn"));
+
+    t.token.burn(&recipient, &100i128);
+    assert!(event_published(&t.env, "burn"));
+}
+
+// ── #99: point-in-time balance snapshots ─────────────────────────────────────
+
+#[test]
+fn create_snapshot_captures_balances_and_metadata() {
+    let t = setup();
+    let holder = Address::generate(&t.env);
+    let stranger = Address::generate(&t.env);
+
+    t.token.transfer(&t.admin, &holder, &1_000i128);
+    t.env.ledger().set_timestamp(1_700_000_000);
+    let supply = t.token.get_token_info().total_supply;
+    let snapshot_id = t.token.create_snapshot(&t.admin);
+    // Events are only exposed for the most recent invocation.
+    assert!(event_published(&t.env, "snapshot_created"));
+
+    let metadata = t.token.get_snapshot_metadata(&snapshot_id);
+    assert_eq!(metadata.snapshot_id, snapshot_id);
+    assert_eq!(metadata.timestamp, 1_700_000_000);
+    assert_eq!(metadata.total_supply, supply);
+    assert_eq!(t.token.get_snapshot(&snapshot_id), metadata);
+
+    assert_eq!(t.token.get_balance_at(&t.admin, &snapshot_id), 999_000);
+    assert_eq!(t.token.get_balance_at(&holder, &snapshot_id), 1_000);
+    assert_eq!(t.token.get_balance_at(&stranger, &snapshot_id), 0);
+}
+
+#[test]
+fn snapshot_is_unaffected_by_later_transfers() {
+    let t = setup();
+    let holder = Address::generate(&t.env);
+
+    t.token.transfer(&t.admin, &holder, &500i128);
+    let snapshot_id = t.token.create_snapshot(&t.admin);
+
+    // Move tokens after the record date.
+    t.token.transfer(&t.admin, &holder, &500i128);
+    t.token.transfer(&holder, &t.admin, &250i128);
+
+    assert_eq!(t.token.get_balance_at(&t.admin, &snapshot_id), 999_500);
+    assert_eq!(t.token.get_balance_at(&holder, &snapshot_id), 500);
+    // Current balances differ from the snapshot.
+    assert_eq!(t.token.get_balance(&t.admin).amount, 999_250);
+    assert_eq!(t.token.get_balance(&holder).amount, 750);
+}
+
+#[test]
+fn snapshots_are_capped_fifo() {
+    let t = setup();
+
+    let oldest = t.token.create_snapshot(&t.admin);
+    for _ in 1..MAX_SNAPSHOTS {
+        t.token.create_snapshot(&t.admin);
+    }
+
+    let mut ids = t.token.get_snapshot_ids();
+    assert_eq!(ids.len(), MAX_SNAPSHOTS);
+    assert_eq!(ids.get(0), Some(oldest));
+
+    let newest = t.token.create_snapshot(&t.admin);
+    ids = t.token.get_snapshot_ids();
+    assert_eq!(ids.len(), MAX_SNAPSHOTS);
+    assert_eq!(ids.get(0), Some(oldest + 1));
+    assert_eq!(ids.get(MAX_SNAPSHOTS - 1), Some(newest));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn evicted_snapshot_is_not_queryable() {
+    let t = setup();
+
+    let oldest = t.token.create_snapshot(&t.admin);
+    for _ in 0..MAX_SNAPSHOTS {
+        t.token.create_snapshot(&t.admin);
+    }
+
+    t.token.get_balance_at(&t.admin, &oldest);
+}
+
+#[test]
+#[should_panic]
+fn create_snapshot_by_non_admin_panics() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.token.create_snapshot(&attacker);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn unknown_snapshot_is_not_queryable() {
+    let t = setup();
+    t.token.get_balance_at(&t.admin, &99u32);
+}
+
+// ── #100: lazy balance storage ───────────────────────────────────────────────
+
+#[test]
+fn missing_balance_entry_reads_as_zero() {
+    let t = setup();
+    let stranger = Address::generate(&t.env);
+
+    assert!(!has_balance_entry(&t, &stranger));
+    let balance = t.token.get_balance(&stranger);
+    assert_eq!(balance.amount, 0);
+    assert_eq!(balance.locked_amount, 0);
+    assert_eq!(balance.voting_power, 0);
+}
+
+#[test]
+fn transfer_to_zero_removes_balance_entry() {
+    let t = setup();
+    let recipient = Address::generate(&t.env);
+
+    t.token.transfer(&t.admin, &recipient, &500i128);
+    assert!(has_balance_entry(&t, &recipient));
+
+    t.token.transfer(&recipient, &t.admin, &500i128);
+    assert!(!has_balance_entry(&t, &recipient));
+    assert_eq!(t.token.get_balance(&recipient).amount, 0);
+}
+
+#[test]
+fn burn_to_zero_removes_balance_entry() {
+    let t = setup();
+    let holder = Address::generate(&t.env);
+
+    t.token.transfer(&t.admin, &holder, &500i128);
+    assert!(has_balance_entry(&t, &holder));
+
+    t.token.burn(&holder, &500i128);
+    assert!(!has_balance_entry(&t, &holder));
+}
+
+#[test]
+fn mint_from_zero_creates_balance_entry() {
+    let t = setup();
+    let recipient = Address::generate(&t.env);
+
+    assert!(!has_balance_entry(&t, &recipient));
+    t.token.mint(&t.admin, &recipient, &10i128);
+
+    assert!(has_balance_entry(&t, &recipient));
+    assert_eq!(t.token.get_balance(&recipient).amount, 10);
+}
+
+#[test]
+fn zero_balance_holder_is_not_snapshotted() {
+    let t = setup();
+    let recipient = Address::generate(&t.env);
+
+    t.token.transfer(&t.admin, &recipient, &100i128);
+    t.token.transfer(&recipient, &t.admin, &100i128);
+
+    let snapshot_id = t.token.create_snapshot(&t.admin);
+    assert_eq!(t.token.get_balance_at(&recipient, &snapshot_id), 0);
+    // The holder list no longer tracks the emptied account.
+    let holders: Vec<Address> = t
+        .env
+        .as_contract(&t.token_id, || {
+            t.env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&t.env, "holders"))
+        })
+        .unwrap_or(Vec::new(&t.env));
+    assert!(!holders.contains(&recipient));
+}
+
+// ── #101: registry / distributor updates ─────────────────────────────────────
+
+#[test]
+fn update_compliance_registry_succeeds() {
+    let t = setup();
+    let new_registry = Address::generate(&t.env);
+
+    t.token.update_compliance_registry(&t.admin, &new_registry);
+
+    assert!(event_published(&t.env, "compliance_registry_updated"));
+    assert_eq!(t.token.get_token_info().compliance_registry, new_registry);
+}
+
+#[test]
+#[should_panic]
+fn update_compliance_registry_by_non_admin_panics() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    let new_registry = Address::generate(&t.env);
+
+    t.token.update_compliance_registry(&attacker, &new_registry);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn update_compliance_registry_when_paused_panics() {
+    let t = setup();
+    let new_registry = Address::generate(&t.env);
+
+    t.token.pause(&t.admin);
+    t.token.update_compliance_registry(&t.admin, &new_registry);
+}
+
+#[test]
+fn update_dividend_distributor_succeeds() {
+    let t = setup();
+    let new_distributor = Address::generate(&t.env);
+
+    t.token.update_dividend_distributor(&t.admin, &new_distributor);
+
+    assert!(event_published(&t.env, "dividend_distributor_updated"));
+    assert_eq!(
+        t.token.get_token_info().dividend_distributor,
+        new_distributor
+    );
+}
+
+#[test]
+#[should_panic]
+fn update_dividend_distributor_by_non_admin_panics() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    let new_distributor = Address::generate(&t.env);
+
+    t.token.update_dividend_distributor(&attacker, &new_distributor);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn update_dividend_distributor_when_paused_panics() {
+    let t = setup();
+    let new_distributor = Address::generate(&t.env);
+
+    t.token.pause(&t.admin);
+    t.token.update_dividend_distributor(&t.admin, &new_distributor);
 }
