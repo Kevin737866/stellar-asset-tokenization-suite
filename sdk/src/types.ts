@@ -108,6 +108,7 @@ export interface DividendConfig {
   maxDistributionFrequency: number; // in seconds
   feeRate: number; // basis points (100 = 1%)
   feeRecipient: Address;
+  minClaimWindow?: number; // in seconds; minimum claim window enforced on new distributions (default 3600)
 }
 
 export interface Order {
@@ -683,98 +684,128 @@ export interface WebhookConfig {
   active: boolean;
 }
 
-// Real-time Event Streaming Types (Issue #190)
+// ---------------------------------------------------------------------------
+// BigInt JSON serialization (Issue #193)
+// ---------------------------------------------------------------------------
+//
+// `JSON.stringify` throws on `bigint` values. These helpers make BigInt safe to
+// send over a JSON API and to parse back losslessly.
+//
+// Two modes:
+//   1. Plain-string mode (`bigIntReplacer`) — every BigInt becomes a decimal
+//      string. Use for external API responses where the consumer treats large
+//      integers as strings. Round-tripping requires knowing which fields are
+//      BigInt (see `createBigIntReviver`).
+//   2. Tagged mode (`stringifyJSON` / `parseJSON`) — every BigInt becomes
+//      `{"$bigint":"<decimal>"}`, which `parseJSON` restores to a real BigInt.
+//      Use for internal persistence / caches that must round-trip exactly.
 
-/** Event types delivered over the WebSocket event stream. */
-export type StreamEventType =
-  | 'Transfer'
-  | 'Trade'
-  | 'DividendClaim'
-  | 'KYCUpdate'
-  | 'CustodyAttestation';
+/** Marker key used by the tagged serialization format. */
+export const BIGINT_TAG = '$bigint' as const;
 
-/** A single event delivered to a stream subscriber. */
-export interface StreamEvent<T = Record<string, any>> {
-  type: StreamEventType;
-  /** Contract address of the token the event relates to, if applicable. */
-  tokenAddress?: string;
-  /** Address of the user the event relates to, if applicable. */
-  userAddress?: string;
-  /** Raw event payload as delivered by the relay. */
-  data: T;
-  /** Unix epoch milliseconds. */
-  timestamp: number;
-  txHash?: string;
-  ledger?: number;
+export interface TaggedBigInt {
+  [BIGINT_TAG]: string;
 }
 
-/** Per-subscription filter. Values may be a single address or a list. */
-export interface EventFilter {
-  tokenAddress?: string | string[];
-  userAddress?: string | string[];
+export function isTaggedBigInt(value: unknown): value is TaggedBigInt {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as any)[BIGINT_TAG] === 'string' &&
+    Object.keys(value as any).length === 1
+  );
 }
 
-/** Minimal structural type for a WebSocket instance (browser + `ws` compatible). */
-export interface MinimalWebSocket {
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  readyState: number;
-  onopen: ((ev: any) => void) | null;
-  onclose: ((ev: any) => void) | null;
-  onerror: ((ev: any) => void) | null;
-  onmessage: ((ev: { data: any }) => void) | null;
+/**
+ * `JSON.stringify` replacer that renders every `bigint` as a decimal string.
+ * Also normalises `BigInt`-like objects (e.g. `bignumber.js`) via `toString()`
+ * when they expose an `isBigNumber`/`_isBigNumber` flag.
+ */
+export function bigIntReplacer(_key: string, value: any): any {
+  if (typeof value === 'bigint') return value.toString();
+  if (
+    value &&
+    typeof value === 'object' &&
+    (value._isBigNumber === true || value.isBigNumber === true) &&
+    typeof value.toString === 'function'
+  ) {
+    return value.toString();
+  }
+  return value;
 }
 
-export type WebSocketConstructor = new (
-  url: string,
-  protocols?: string | string[]
-) => MinimalWebSocket;
-
-export interface EventStreamConfig {
-  /** WebSocket URL of the event relay (ws:// or wss://). */
-  url: string;
-  /** Optional subprotocols passed to the WebSocket constructor. */
-  protocols?: string | string[];
-  /** Injected WebSocket implementation (e.g. the `ws` package, or a mock). */
-  webSocketImpl?: WebSocketConstructor;
-  /** Reconnect automatically after an unexpected close (default: true). */
-  autoReconnect?: boolean;
-  /** Maximum reconnect attempts before giving up (default: Infinity). */
-  maxReconnectAttempts?: number;
-  /** Base delay for exponential backoff, in ms (default: 1000). */
-  baseReconnectDelayMs?: number;
-  /** Maximum backoff delay, in ms (default: 30000). */
-  maxReconnectDelayMs?: number;
-  /** Backoff multiplier (default: 2). */
-  backoffMultiplier?: number;
-  /** Jitter fraction applied to backoff, 0..1 (default: 0.25). */
-  reconnectJitter?: number;
-  /** Interval between outgoing pings, in ms (default: 15000; 0 disables). */
-  heartbeatIntervalMs?: number;
-  /** Grace period after a missed heartbeat before the connection is stale (default: 10000). */
-  heartbeatTimeoutMs?: number;
-  /** How long to wait for the socket to open before retrying, in ms (default: 10000). */
-  connectTimeoutMs?: number;
+/**
+ * `JSON.stringify` replacer for the tagged format: `bigint` -> `{$bigint: "n"}`.
+ */
+export function taggedBigIntReplacer(_key: string, value: any): any {
+  return typeof value === 'bigint' ? { [BIGINT_TAG]: value.toString() } : value;
 }
 
-export type EventStreamStatus =
-  | 'idle'
-  | 'connecting'
-  | 'open'
-  | 'reconnecting'
-  | 'closed';
-
-export interface EventStreamState {
-  status: EventStreamStatus;
-  url: string;
-  reconnectAttempts: number;
-  subscriptionCount: number;
-  lastMessageAt?: number;
+/**
+ * `JSON.parse` reviver for the tagged format: `{$bigint: "n"}` -> `bigint`.
+ */
+export function bigIntReviver(_key: string, value: any): any {
+  return isTaggedBigInt(value) ? BigInt(value[BIGINT_TAG]) : value;
 }
 
-export type EventStreamLifecycleEvent =
-  | { type: 'open' }
-  | { type: 'close'; code?: number; reason?: string }
-  | { type: 'error'; error: Error }
-  | { type: 'reconnecting'; attempt: number; delayMs: number }
-  | { type: 'stale' };
+const BIGINT_STRING_RE = /^-?\d+$/;
+
+/**
+ * Build a `JSON.parse` reviver that converts the string value of the named keys
+ * back into `bigint`. Use with output produced by {@link bigIntReplacer} when
+ * the BigInt-bearing field names are known.
+ *
+ * @param keys Field names whose string values should become BigInt.
+ * @param options.onlyUnsafe Only convert when the number exceeds
+ *        `Number.MAX_SAFE_INTEGER` (default: false — always convert).
+ */
+export function createBigIntReviver(
+  keys: Iterable<string>,
+  options: { onlyUnsafe?: boolean } = {}
+): (key: string, value: any) => any {
+  const keySet = new Set(keys);
+  return (key: string, value: any) => {
+    if (isTaggedBigInt(value)) return BigInt(value[BIGINT_TAG]);
+    if (typeof value === 'string' && keySet.has(key) && BIGINT_STRING_RE.test(value)) {
+      if (options.onlyUnsafe && Number.isSafeInteger(Number(value))) return value;
+      return BigInt(value);
+    }
+    return value;
+  };
+}
+
+/**
+ * Recursively convert every `bigint` in a value to a decimal string. Handles
+ * nested objects, arrays, `Map` and `Set`. Non-mutating.
+ */
+export function serializeBigInts<T = any>(input: T): any {
+  if (typeof input === 'bigint') return input.toString();
+  if (Array.isArray(input)) return input.map((v) => serializeBigInts(v));
+  if (input instanceof Map) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of input) out[String(k)] = serializeBigInts(v);
+    return out;
+  }
+  if (input instanceof Set) return [...input].map((v) => serializeBigInts(v));
+  if (input && typeof input === 'object') {
+    if (input instanceof Date) return input;
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(input)) out[k] = serializeBigInts(v);
+    return out;
+  }
+  return input;
+}
+
+/**
+ * `JSON.stringify` with lossless BigInt support (tagged format).
+ */
+export function stringifyJSON(value: any, space?: string | number): string {
+  return JSON.stringify(value, taggedBigIntReplacer, space);
+}
+
+/**
+ * `JSON.parse` that restores BigInt values written by {@link stringifyJSON}.
+ */
+export function parseJSON<T = any>(text: string): T {
+  return JSON.parse(text, bigIntReviver) as T;
+}

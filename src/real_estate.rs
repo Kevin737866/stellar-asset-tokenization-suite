@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::AssetClassError;
+use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -25,13 +25,13 @@ pub fn create_real_estate_config(
     base_config: AssetConfig,
     real_estate_config: RealEstateConfig,
 ) -> AssetConfig {
-    if real_estate_config.location_oracle == Address::from_contract_id(&[0u8; 32]) {
-        panic_with_error!(&env, AssetClassError::InvalidLocation);
-    }
+    validate_address_not_zero(&env, &real_estate_config.location_oracle);
 
     if real_estate_config.rental_yield_rate < 0 || real_estate_config.rental_yield_rate > 10000 {
         panic_with_error!(&env, AssetClassError::InvalidParameters);
     }
+
+    validate_metadata_size(&env, base_config.metadata.len(), 100);
 
     let mut metadata = base_config.metadata;
     metadata.set(Symbol::new(&env, "property_address"), String::from_str(&env, &real_estate_config.property_address.to_string()));

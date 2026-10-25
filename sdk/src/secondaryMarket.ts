@@ -99,9 +99,35 @@ export class SecondaryMarketClient {
     return [];
   }
 
+
   async getVWAP(tokenAddress: string): Promise<string> {
     validateAddress(tokenAddress, 'tokenAddress');
-    return "0";
+    try {
+      const contract = new Contract(this.contractId);
+      const result = await this.server.simulateTransaction(
+        contract.call('get_vwap', new Address(tokenAddress).toScVal())
+      );
+      return this.extractScValString(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  async getTWAP(tokenAddress: string, windowSeconds: number = 3600): Promise<string> {
+    validateAddress(tokenAddress, 'tokenAddress');
+    try {
+      const contract = new Contract(this.contractId);
+      const result = await this.server.simulateTransaction(
+        contract.call(
+          'get_twap',
+          new Address(tokenAddress).toScVal(),
+          new ScInt(windowSeconds).toU64()
+        )
+      );
+      return this.extractScValString(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
   }
 
   async getPortfolioValue(user: string): Promise<string> {

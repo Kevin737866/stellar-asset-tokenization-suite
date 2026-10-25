@@ -32,7 +32,7 @@ fn create_base_asset_config(env: &Env) -> AssetConfig {
             holding_period_days: 0,
             transfer_limits: i128::MAX,
         },
-        dividend_schedule: None,
+        dividend_schedule: Vec::new(env),
         metadata: Map::new(env),
     }
 }
@@ -404,6 +404,7 @@ proptest! {
             holding_period_days: holding_period,
             regulatory_reporting: reporting,
             isin: Symbol::new(&env, "US1234567890"),
+            dividend_rights: stellar_asset_tokenization_suite::security::DividendRights::Cumulative,
         };
 
         let result = std::panic::catch_unwind(|| {
