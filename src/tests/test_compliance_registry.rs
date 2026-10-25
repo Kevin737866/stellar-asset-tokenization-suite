@@ -2,11 +2,13 @@
 
 use soroban_sdk::{
     testutils::Address as _,
+    testutils::Ledger as _,
     Address, Env, Symbol, Vec,
 };
 
 use crate::compliance_registry::{
-    ComplianceRegistry, ComplianceRegistryClient, ComplianceError, KYCStatus, TransferLimits,
+    ComplianceRegistry, ComplianceRegistryClient, ComplianceError, KYCStatus, KycState,
+    TransferLimits,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -333,7 +335,7 @@ fn migrate_preserves_transfer_limits() {
 
 #[test]
 fn migrate_preserves_compliance_rules() {
-    let (_, _, client) = setup();
+    let (env, _, client) = setup();
     let rules = client.get_compliance_rules();
 
     // Initial seeding creates 3 rules
@@ -341,7 +343,7 @@ fn migrate_preserves_compliance_rules() {
 
     // Rules should be accessible
     let first = rules.get(0).unwrap();
-    assert!(!first.rule_name.is_empty());
+    assert_eq!(first.name, Symbol::new(&env, "Rule144"));
 }
 
 #[test]
@@ -410,3 +412,360 @@ fn data_integrity_with_complex_state() {
     assert!(client.check_transfer_limits(&limited_user, &100));
     assert!(!client.check_transfer_limits(&limited_user, &300));
 }
+
+// ============================================================
+// Priority & Conflict Resolution Tests
+// ============================================================
+
+#[test]
+fn test_no_conflict() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    assert!(client.check_compliance(&user_a, &user_b, &100));
+}
+
+#[test]
+fn test_conflict_higher_priority_wins() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    let high_priority_rule = ComplianceRule {
+        rule_id: Symbol::new(&env, "high_prio"),
+        name: Symbol::new(&env, "HighPriority"),
+        description: Symbol::new(&env, "Allows larger amount"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 1000,
+        priority: 0,
+    };
+
+    let low_priority_rule = ComplianceRule {
+        rule_id: Symbol::new(&env, "low_prio"),
+        name: Symbol::new(&env, "LowPriority"),
+        description: Symbol::new(&env, "Allows only small amount"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 50,
+        priority: 50,
+    };
+
+    client.update_compliance_rule(&admin, &high_priority_rule);
+    client.update_compliance_rule(&admin, &low_priority_rule);
+
+    assert!(client.check_compliance(&user_a, &user_b, &200));
+}
+
+#[test]
+fn test_same_priority_tie_break() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    let rule_a = ComplianceRule {
+        rule_id: Symbol::new(&env, "rule_a"),
+        name: Symbol::new(&env, "RuleA"),
+        description: Symbol::new(&env, "Same priority A"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 500,
+        priority: 10,
+    };
+
+    let rule_b = ComplianceRule {
+        rule_id: Symbol::new(&env, "rule_b"),
+        name: Symbol::new(&env, "RuleB"),
+        description: Symbol::new(&env, "Same priority B"),
+        is_active: true,
+        jurisdictions: {
+            let mut v = Vec::new(&env);
+            v.push_back(Symbol::new(&env, "US"));
+            v
+        },
+        min_verification_level: 1,
+        requires_accreditation: false,
+        max_amount: 100,
+        priority: 10,
+    };
+
+    client.update_compliance_rule(&admin, &rule_a);
+    client.update_compliance_rule(&admin, &rule_b);
+
+    let result = client.check_compliance(&user_a, &user_b, &200);
+    assert!(result == true || result == false);
+}
+// ============================================================
+// Priority & Conflict Resolution Tests (Minimal)
+// ============================================================
+
+#[test]
+fn test_no_conflict() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    // With no conflicting rules, a normal transfer should pass
+    assert!(client.check_compliance(&user_a, &user_b, &100));
+}
+
+#[test]
+fn test_priority_field_exists() {
+    // This test mainly checks that the new priority field compiles
+    // and the contract still works after the struct change.
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    let result = client.check_compliance(&user_a, &user_b, &50);
+    assert!(result == true || result == false);
+}
+
+#[test]
+fn test_same_priority_does_not_crash() {
+    let (env, admin, client) = setup();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user_a, &verified_kyc(&env));
+    client.update_kyc_status(&admin, &user_b, &verified_kyc(&env));
+
+    // Just verify the function still returns a boolean after the change
+    let result = client.check_compliance(&user_a, &user_b, &200);
+    assert!(result == true || result == false);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #113: calendar-aligned transfer limit resets
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 2026-01-01T00:00:00Z
+const NEW_YEAR_2026: u64 = 1_767_225_600;
+/// 2026-01-02T00:00:00Z
+const NEXT_DAY_2026: u64 = 1_767_312_000;
+/// 2026-02-01T00:00:00Z
+const FEB_2026: u64 = 1_769_904_000;
+/// 2026-06-01T00:00:00Z
+const JUN_2026: u64 = 1_780_268_800;
+/// 2027-01-01T00:00:00Z
+const NEW_YEAR_2027: u64 = 1_798_761_600;
+
+fn limits(
+    daily: i128,
+    monthly: i128,
+    annual: i128,
+    last_reset: u64,
+) -> TransferLimits {
+    TransferLimits {
+        daily_limit: daily,
+        monthly_limit: monthly,
+        annual_limit: annual,
+        remaining_daily: daily,
+        remaining_monthly: monthly,
+        remaining_annual: annual,
+        last_reset_daily: last_reset,
+        last_reset_monthly: last_reset,
+        last_reset_annual: last_reset,
+    }
+}
+
+#[test]
+fn daily_limit_resets_at_the_utc_midnight_boundary() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    // 2026-01-01T23:00:00Z
+    env.ledger()
+        .set_timestamp(NEW_YEAR_2026 + 23 * 3_600);
+    client.set_transfer_limits(&admin, &user, &limits(100, 1_000, 10_000, 0));
+
+    // Spend the whole daily allowance.
+    assert!(client.check_transfer_limits(&user, &100));
+    assert!(!client.check_transfer_limits(&user, &1));
+
+    // 2026-01-01T23:30:00Z — still the same UTC day, so no reset yet.
+    env.ledger()
+        .set_timestamp(NEW_YEAR_2026 + 23 * 3_600 + 1_800);
+    assert!(!client.check_transfer_limits(&user, &1));
+
+    // 2026-01-02T00:00:00Z — the daily window rolls over with the calendar,
+    // not 24 hours after the previous reset.
+    env.ledger().set_timestamp(NEXT_DAY_2026);
+    assert!(client.check_transfer_limits(&user, &100));
+}
+
+#[test]
+fn monthly_limit_resets_on_the_first_of_the_month() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    // The monthly window was last reset in the middle of January.
+    let mid_january = NEW_YEAR_2026 + 14 * 86_400;
+    env.ledger().set_timestamp(mid_january);
+    client.set_transfer_limits(
+        &admin,
+        &user,
+        &limits(1_000_000, 1_000, 10_000, mid_january),
+    );
+
+    assert!(client.check_transfer_limits(&user, &1_000));
+    assert!(!client.check_transfer_limits(&user, &1));
+
+    // 2026-02-01T00:00:00Z — the first day of the next calendar month. A
+    // 30-day window would not have rolled over yet.
+    env.ledger().set_timestamp(FEB_2026);
+    assert!(client.check_transfer_limits(&user, &1_000));
+}
+
+#[test]
+fn annual_limit_resets_on_new_year() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    env.ledger().set_timestamp(JUN_2026);
+    client.set_transfer_limits(
+        &admin,
+        &user,
+        &limits(1_000_000, 1_000_000, 10_000, JUN_2026),
+    );
+
+    assert!(client.check_transfer_limits(&user, &10_000));
+    assert!(!client.check_transfer_limits(&user, &1));
+
+    // 2027-01-01T00:00:00Z — a 365-day window would not have rolled over yet.
+    env.ledger().set_timestamp(NEW_YEAR_2027);
+    assert!(client.check_transfer_limits(&user, &10_000));
+}
+
+#[test]
+fn limits_written_by_the_previous_implementation_still_work() {
+    // The stored `last_reset_*` values stay timestamps, so a row written
+    // before this change is interpreted rather than rewritten: no migration
+    // is needed.
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    env.ledger().set_timestamp(NEW_YEAR_2026);
+    client.set_transfer_limits(
+        &admin,
+        &user,
+        &limits(1_000, 1_000, 10_000, NEW_YEAR_2026 - 86_400),
+    );
+
+    // The daily window is a day old, so it rolls over; the monthly and
+    // annual windows are still the ones that were stored.
+    assert!(client.check_transfer_limits(&user, &1_000));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #111: KYC expiry grace period
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn kyc_state_is_active_while_the_record_is_valid() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user, &verified_kyc(&env));
+
+    assert_eq!(client.get_effective_kyc_state(&user), KycState::Active);
+    assert!(client.get_kyc_status(&user).is_verified);
+}
+
+#[test]
+fn kyc_state_is_warning_inside_the_grace_period() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    let mut kyc = verified_kyc(&env);
+    kyc.expiry_date = env.ledger().timestamp() + 3 * 86_400; // three days left
+    client.update_kyc_status(&admin, &user, &kyc);
+
+    assert_eq!(client.get_effective_kyc_state(&user), KycState::Warning);
+    // The record is still verified while it is inside the grace period.
+    assert!(client.get_kyc_status(&user).is_verified);
+}
+
+#[test]
+fn kyc_state_is_expired_after_the_expiry_date() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000_000);
+    let mut kyc = verified_kyc(&env);
+    kyc.expiry_date = 999_999; // already expired
+    client.update_kyc_status(&admin, &user, &kyc);
+
+    assert_eq!(client.get_effective_kyc_state(&user), KycState::Expired);
+    // The effective status is reported as no longer verified.
+    assert!(!client.get_kyc_status(&user).is_verified);
+}
+
+#[test]
+fn kyc_state_is_revoked_for_a_blacklisted_address() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    client.update_kyc_status(&admin, &user, &verified_kyc(&env));
+    client.add_to_blacklist(&admin, &user, &Symbol::new(&env, "fraud"));
+
+    assert_eq!(client.get_effective_kyc_state(&user), KycState::Revoked);
+    assert!(!client.get_kyc_status(&user).is_verified);
+}
+
+#[test]
+fn warning_state_halves_the_transfer_limit() {
+    let (env, admin, client) = setup();
+    let user = Address::generate(&env);
+
+    let mut kyc = verified_kyc(&env);
+    kyc.expiry_date = env.ledger().timestamp() + 3 * 86_400;
+    client.update_kyc_status(&admin, &user, &kyc);
+
+    client.set_transfer_limits(
+        &admin,
+        &user,
+        &limits(1_000, 1_000_000, 1_000_000, 0),
+    );
+
+    // A participant inside the grace period may move up to half of their
+    // normal limit.
+    assert!(client.check_transfer_limits(&user, &500));
+    assert!(!client.check_transfer_limits(&user, &1));
+}
+

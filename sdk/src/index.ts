@@ -389,29 +389,28 @@ export class StellarRWASDK {
   }
 
   /**
-   * Register a listener for retry lifecycle events (retry / exhausted /
-   * succeeded) so a UI can surface backoff progress. (Issue #191)
+   * Serialize any value (SDK result, portfolio, order book, …) to a
+   * JSON-safe structure with every BigInt rendered as a decimal string.
+   * Use this when returning SDK data from a JSON HTTP API. (Issue #193)
    */
-  onRetry(listener: RetryEventListener): void {
-    this._retryListener = listener;
+  toJSONSafe<T = any>(value: T): any {
+    return serializeBigInts(value);
   }
 
   /**
-   * Run an operation with the SDK's retry policy. Transient failures
-   * (network timeout, HTTP 429, Horizon 504, mempool full) are retried with
-   * exponential backoff; deterministic failures (invalid signature,
-   * insufficient funds, contract errors) are re-thrown immediately.
-   * (Issue #191)
+   * `JSON.stringify` with lossless BigInt support (tagged `{"$bigint":"n"}`
+   * format restored by {@link StellarRWASDK.parseJSON}). (Issue #193)
    */
-  async withRetry<T>(
-    fn: (attempt: number) => Promise<T>,
-    options: WithRetryOptions = {}
-  ): Promise<T> {
-    return withRetry(fn, {
-      config: this.retryConfig,
-      onRetryEvent: this._retryListener,
-      ...options,
-    });
+  stringifyJSON(value: any, space?: string | number): string {
+    return stringifyJSON(value, space);
+  }
+
+  /**
+   * `JSON.parse` that restores BigInt values produced by
+   * {@link StellarRWASDK.stringifyJSON}. (Issue #193)
+   */
+  parseJSON<T = any>(text: string): T {
+    return parseJSON<T>(text);
   }
 
   /**
@@ -945,3 +944,4 @@ export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS)
 
 // ─── Default export ───────────────────────────────────────────────────────────
 export default StellarRWASDK;
+export { MetricsCollector, ConsoleExporter, PrometheusExporter, NoopExporter, createMetricsCollector } from './telemetry';

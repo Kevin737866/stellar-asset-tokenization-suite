@@ -1,11 +1,21 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN,
+    Env, Map, Symbol, Vec,
 };
 
 use crate::auth::assert_admin;
 
 const STORAGE_VERSION: u32 = 1;
+
+/// Issue #168: hard cap on the number of entries processed by any single
+/// iteration, keeping the worst-case gas cost of a call bounded no matter how
+/// large the underlying collections grow.
+pub const MAX_ITERATIONS: u32 = 100;
+
+/// Expected verification latency (7 days) used when scoring custodian
+/// timeliness. Averages at or below this threshold score full marks.
+const EXPECTED_VERIFICATION_TIME: u64 = 7 * 86400;
+
 #[contracttype]
 pub enum StorageKey {
     Custodian(Address),
@@ -46,6 +56,16 @@ pub enum CustodyError {
     InvalidAttestation = 29,
     CustodianNotFound = 30,
     InvalidParameters = 31,
+    MultiSigConfigNotFound = 32,
+    DuplicateSigner = 33,
+    SensorNotFound = 34,
+    SensorInactive = 35,
+    InvalidSensorData = 36,
+    ThresholdNotFound = 37,
+    BridgeNotFound = 38,
+    BridgeAlreadyRegistered = 39,
+    CrossChainProofNotFound = 40,
+    InvalidCrossChainProof = 41,
 }
 
 #[contracttype]
@@ -153,6 +173,7 @@ pub struct VerificationTypeConfig {
     pub iot_monitoring_required: bool,
     pub satellite_verification: bool,
     pub legal_verification_required: bool,
+    pub audit_required: bool,
 }
 
 #[contracttype]
@@ -193,6 +214,58 @@ pub struct ValidationConfig {
     pub audit_required: bool,
     pub multi_oracle_required: bool,
     pub oracle_consensus_threshold: u32,
+}
+
+/// Issue #166: immutable audit-trail entry. One is appended for every custody
+/// operation so compliance officers can reconstruct the full history of an
+/// asset's custody without relying on off-chain logs.
+#[contracttype]
+#[derive(Clone)]
+pub struct CustodyAuditEvent {
+    pub event_type: Symbol,
+    pub timestamp: u64,
+    pub actor: Address,
+    pub asset_id: Address,
+    pub details_hash: BytesN<32>,
+}
+
+/// Issue #167: weighted performance score for a custodian.
+///
+/// * `accuracy`     - share of attestations that were not successfully disputed.
+/// * `timeliness`   - average verification latency relative to the expected window.
+/// * `thoroughness` - verification methods evidenced vs. methods required.
+/// * `total_score`  - weighted average of the three component scores.
+#[contracttype]
+#[derive(Clone)]
+pub struct PerformanceScore {
+    pub accuracy: u32,
+    pub timeliness: u32,
+    pub thoroughness: u32,
+    pub accuracy_weight: u32,
+    pub timeliness_weight: u32,
+    pub thoroughness_weight: u32,
+    pub total_score: u32,
+}
+
+/// Issue #167: configurable weights used when combining performance metrics.
+#[contracttype]
+#[derive(Clone)]
+pub struct PerformanceWeights {
+    pub accuracy: u32,
+    pub timeliness: u32,
+    pub thoroughness: u32,
+}
+
+/// Issue #167: raw counters accumulated per custodian. Kept separate from
+/// `CustodianRegistry` so scoring can evolve without breaking the registry
+/// layout relied upon by existing migrations.
+#[contracttype]
+#[derive(Clone)]
+pub struct CustodianMetrics {
+    pub attestations_scored: u64,
+    pub total_latency: u64,
+    pub methods_evidenced: u64,
+    pub methods_possible: u64,
 }
 
 #[contract]
@@ -368,6 +441,26 @@ impl CustodyValidator {
             &Symbol::new(&env, "insurance_integrations"),
             &Map::<Address, InsuranceIntegration>::new(&env),
         );
+        env.storage().instance().set(
+            &Symbol::new(&env, "audit_trail"),
+            &Map::<Address, Vec<CustodyAuditEvent>>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "performance_scores"),
+            &Map::<Address, PerformanceScore>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "custodian_metrics"),
+            &Map::<Address, CustodianMetrics>::new(&env),
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "performance_weights"),
+            &PerformanceWeights {
+                accuracy: 50,
+                timeliness: 25,
+                thoroughness: 25,
+            },
+        );
     }
 
     fn init_default_oracles(env: &Env, oracle_addresses: &Vec<Address>) {
@@ -396,6 +489,216 @@ impl CustodyValidator {
         if Self::read_version(env) < STORAGE_VERSION {
             panic_with_error!(env, CustodyError::StorageOutdated);
         }
+    }
+
+    // ── Issue #166: audit trail ──────────────────────────────────────────────
+
+    fn append_audit_event(
+        env: &Env,
+        event_type: &Symbol,
+        actor: &Address,
+        asset_id: &Address,
+        details_hash: &BytesN<32>,
+    ) {
+        let event = CustodyAuditEvent {
+            event_type: event_type.clone(),
+            timestamp: env.ledger().timestamp(),
+            actor: actor.clone(),
+            asset_id: asset_id.clone(),
+            details_hash: details_hash.clone(),
+        };
+
+        let mut trail: Map<Address, Vec<CustodyAuditEvent>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "audit_trail"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let mut events = trail.get(asset_id.clone()).unwrap_or_else(|| Vec::new(env));
+        events.push_back(event.clone());
+        trail.set(asset_id.clone(), events);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "audit_trail"), &trail);
+
+        env.events().publish(
+            (Symbol::new(env, "custody_audit"), event_type.clone()),
+            (
+                event.timestamp,
+                actor.clone(),
+                asset_id.clone(),
+                details_hash.clone(),
+            ),
+        );
+    }
+
+    // ── Issue #167: performance scoring ─────────────────────────────────────
+
+    fn get_performance_weights(env: &Env) -> PerformanceWeights {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "performance_weights"))
+            .unwrap_or(PerformanceWeights {
+                accuracy: 50,
+                timeliness: 25,
+                thoroughness: 25,
+            })
+    }
+
+    fn performance_metrics(env: &Env, custodian: &Address) -> CustodianMetrics {
+        let metrics: Map<Address, CustodianMetrics> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "custodian_metrics"))
+            .unwrap_or_else(|| Map::new(env));
+
+        metrics.get(custodian.clone()).unwrap_or(CustodianMetrics {
+            attestations_scored: 0,
+            total_latency: 0,
+            methods_evidenced: 0,
+            methods_possible: 0,
+        })
+    }
+
+    fn attestation_thoroughness(env: &Env, attestation: &CustodyAttestation) -> (u64, u64) {
+        let configs: Map<Symbol, VerificationTypeConfig> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "verification_configs"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let (sig_required, legal_required, audit_required) =
+            match configs.get(attestation.verification_type.clone()) {
+                Some(cfg) => (
+                    if cfg.multi_sig_required {
+                        cfg.sig_threshold
+                    } else {
+                        0
+                    },
+                    cfg.legal_verification_required,
+                    cfg.audit_required,
+                ),
+                None => (0u32, false, false),
+            };
+
+        let zero = BytesN::from_array(env, &[0u8; 32]);
+        let mut used: u64 = 1; // baseline proof of possession
+        used += attestation.multi_sig_signatures.len() as u64;
+        if attestation.legal_title_hash != zero {
+            used += 1;
+        }
+        if attestation.audit_report_hash != zero {
+            used += 1;
+        }
+
+        let required: u64 = 1
+            + sig_required as u64
+            + if legal_required { 1 } else { 0 }
+            + if audit_required { 1 } else { 0 };
+        let required = required.max(1);
+
+        (used.min(required), required)
+    }
+
+    fn compute_performance(env: &Env, custodian: &CustodianRegistry) -> PerformanceScore {
+        let weights = Self::get_performance_weights(env);
+        let metrics = Self::performance_metrics(env, &custodian.custodian_address);
+
+        let accuracy: u32 = if custodian.total_attestations == 0 {
+            100
+        } else {
+            let good = custodian
+                .total_attestations
+                .saturating_sub(custodian.failed_disputes);
+            ((good * 100) / custodian.total_attestations) as u32
+        };
+
+        let timeliness: u32 = if metrics.attestations_scored == 0 {
+            100
+        } else {
+            let avg = metrics.total_latency / metrics.attestations_scored;
+            if avg == 0 {
+                100
+            } else {
+                (((EXPECTED_VERIFICATION_TIME * 100) / avg).min(100)) as u32
+            }
+        };
+
+        let thoroughness: u32 = if metrics.methods_possible == 0 {
+            100
+        } else {
+            (((metrics.methods_evidenced * 100) / metrics.methods_possible).min(100)) as u32
+        };
+
+        let total_weight = weights.accuracy + weights.timeliness + weights.thoroughness;
+        let total_score = if total_weight == 0 {
+            0
+        } else {
+            (accuracy * weights.accuracy
+                + timeliness * weights.timeliness
+                + thoroughness * weights.thoroughness)
+                / total_weight
+        };
+
+        PerformanceScore {
+            accuracy,
+            timeliness,
+            thoroughness,
+            accuracy_weight: weights.accuracy,
+            timeliness_weight: weights.timeliness,
+            thoroughness_weight: weights.thoroughness,
+            total_score,
+        }
+    }
+
+    fn refresh_performance_score(env: &Env, custodian_address: &Address) {
+        if let Some(custodian) = Self::read_custodian(env, custodian_address) {
+            let score = Self::compute_performance(env, &custodian);
+            let mut scores: Map<Address, PerformanceScore> = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(env, "performance_scores"))
+                .unwrap_or_else(|| Map::new(env));
+            scores.set(custodian_address.clone(), score);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(env, "performance_scores"), &scores);
+        }
+    }
+
+    fn record_attestation_metrics(
+        env: &Env,
+        custodian: &Address,
+        attestation: &CustodyAttestation,
+    ) {
+        let mut metrics: Map<Address, CustodianMetrics> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "custodian_metrics"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let mut entry = metrics.get(custodian.clone()).unwrap_or(CustodianMetrics {
+            attestations_scored: 0,
+            total_latency: 0,
+            methods_evidenced: 0,
+            methods_possible: 0,
+        });
+
+        let latency = env
+            .ledger()
+            .timestamp()
+            .saturating_sub(attestation.timestamp);
+        let (used, required) = Self::attestation_thoroughness(env, attestation);
+
+        entry.attestations_scored += 1;
+        entry.total_latency += latency;
+        entry.methods_evidenced += used;
+        entry.methods_possible += required;
+
+        metrics.set(custodian.clone(), entry);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "custodian_metrics"), &metrics);
     }
 
     pub fn migrate(env: Env, auth: Address) {
@@ -432,19 +735,20 @@ impl CustodyValidator {
         jurisdiction: Symbol,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
-        Self::put_oracle(env, oracle_address, name, jurisdiction);
+        let registered_oracle = oracle_address.clone();
+        Self::put_oracle(env.clone(), oracle_address, name, jurisdiction);
+
+        // Issue #166: record the registration in the audit trail.
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "registered"),
+            &auth,
+            &registered_oracle,
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
     }
 
     pub fn register_custodian(
@@ -459,15 +763,6 @@ impl CustodyValidator {
         insurance_provider: Symbol,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -505,19 +800,19 @@ impl CustodyValidator {
                 &custodian_addresses,
             );
         }
+
+        // Issue #166: record the registration in the audit trail.
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "registered"),
+            &auth,
+            &custodian_address,
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
     }
 
     pub fn setup_verification_types(env: Env, auth: Address) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -569,6 +864,7 @@ impl CustodyValidator {
             iot_monitoring_required: false,
             satellite_verification: true,
             legal_verification_required: true,
+            audit_required: true,
         }
     }
 
@@ -590,6 +886,7 @@ impl CustodyValidator {
             iot_monitoring_required: true,
             satellite_verification: false,
             legal_verification_required: false,
+            audit_required: true,
         }
     }
 
@@ -611,6 +908,7 @@ impl CustodyValidator {
             iot_monitoring_required: false,
             satellite_verification: false,
             legal_verification_required: true,
+            audit_required: true,
         }
     }
 
@@ -631,6 +929,7 @@ impl CustodyValidator {
             iot_monitoring_required: true,
             satellite_verification: false,
             legal_verification_required: false,
+            audit_required: false,
         }
     }
 
@@ -651,7 +950,21 @@ impl CustodyValidator {
             iot_monitoring_required: false,
             satellite_verification: false,
             legal_verification_required: true,
+            audit_required: true,
         }
+    }
+
+    /// Caps a dispute penalty at the bond posted for the dispute and records
+    /// the resulting slash. Token movement itself is settled by the caller /
+    /// off-chain bond custodian, which is why only the capped amount is
+    /// returned and emitted here.
+    fn apply_bond_slash(env: &Env, dispute: &DisputeRecord, penalty_amount: i128) -> i128 {
+        let slashed = penalty_amount.max(0).min(dispute.bond_amount);
+        env.events().publish(
+            (Symbol::new(env, "bond_slashed"), dispute.custodian.clone()),
+            (slashed, dispute.dispute_id),
+        );
+        slashed
     }
 
     pub fn resolve_dispute(
@@ -662,15 +975,6 @@ impl CustodyValidator {
         penalty_amount: i128,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -699,14 +1003,20 @@ impl CustodyValidator {
 
         dispute.resolved_at = env.ledger().timestamp();
         dispute.resolution = resolution.clone();
-        dispute.penalty_applied = penalty_amount > 0;
-        dispute.penalty_amount = penalty_amount;
 
         if resolution == Symbol::new(&env, "upheld") {
+            // Issue #158: an upheld dispute automatically slashes the custodian's
+            // bond (capped at the total posted bond) and redistributes it.
+            // The challenger's own bond is returned since they prevailed.
             dispute.bond_returned = true;
-            Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), true);
+            let slashed = Self::apply_bond_slash(&env, &dispute, penalty_amount);
+            dispute.penalty_applied = slashed > 0;
+            dispute.penalty_amount = slashed;
         } else {
+            // Rejected / settled disputes never slash the custodian's bond.
             dispute.bond_returned = false;
+            dispute.penalty_applied = false;
+            dispute.penalty_amount = 0;
             Self::update_custodian_dispute_stats(env.clone(), dispute.custodian.clone(), false);
         }
 
@@ -714,6 +1024,19 @@ impl CustodyValidator {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "disputes"), &disputes);
+
+        // Issue #166 + #167: audit the resolution and recompute the score.
+        let resolved_asset = Self::read_attestation(&env, &dispute.attestation_id)
+            .map(|attestation| attestation.asset_id)
+            .unwrap_or_else(|| dispute.custodian.clone());
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "resolved"),
+            &auth,
+            &resolved_asset,
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
+        Self::refresh_performance_score(&env, &dispute.custodian);
 
         env.events().publish(
             (
@@ -763,6 +1086,36 @@ impl CustodyValidator {
             panic_with_error!(&env, CustodyError::InvalidParameters);
         }
 
+        // Issue #162: a custodian may only attest for the asset types it has
+        // been authorised for by the registry.
+        let custodian_info =
+            Self::read_custodian(&env, &attestation.custodian).unwrap_or_else(|| {
+                panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
+            });
+        if !custodian_info.is_active {
+            panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
+        }
+        if !custodian_info
+            .verification_types
+            .contains(&attestation.verification_type)
+        {
+            panic_with_error!(&env, CustodyError::InvalidVerificationType);
+        }
+
+        let registered_assets: Map<Address, AssetRegistration> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "registered_assets"))
+            .unwrap_or_else(|| Map::new(&env));
+        if let Some(registration) = registered_assets.get(attestation.asset_id.clone()) {
+            if !custodian_info
+                .verification_types
+                .contains(&registration.asset_type)
+            {
+                panic_with_error!(&env, CustodyError::InvalidVerificationType);
+            }
+        }
+
         if !Self::verify_attestation(&env, &attestation) {
             panic_with_error!(&env, CustodyError::InvalidAttestation);
         }
@@ -777,7 +1130,12 @@ impl CustodyValidator {
 
         let mut valid_attestation = attestation;
         valid_attestation.is_valid = true;
-        valid_attestation.expires_at = env.ledger().timestamp() + 86400 * 30;
+        // Honour a caller-supplied expiry, but never store one longer than the
+        // default 30-day validity window.
+        let default_expiry = env.ledger().timestamp() + 86400 * 30;
+        if valid_attestation.expires_at > default_expiry {
+            valid_attestation.expires_at = default_expiry;
+        }
 
         let custodian = valid_attestation.custodian.clone();
         let asset_id = valid_attestation.asset_id.clone();
@@ -790,6 +1148,19 @@ impl CustodyValidator {
 
         Self::update_custodian_stats(env.clone(), custodian.clone());
 
+        // Issue #167: refresh the weighted performance score for this custodian.
+        Self::record_attestation_metrics(&env, &custodian, &valid_attestation);
+        Self::refresh_performance_score(&env, &custodian);
+
+        // Issue #166: append an immutable audit-trail entry.
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "attestation_submitted"),
+            &custodian,
+            &asset_id,
+            &valid_attestation.proof_hash,
+        );
+
         env.events().publish(
             (Symbol::new(&env, "attestation_submitted"), asset_id),
             (attestation_id, custodian, value, env.ledger().timestamp()),
@@ -798,7 +1169,12 @@ impl CustodyValidator {
         attestation_id
     }
 
-    fn verify_attestation(env: &Env, attestation: &CustodyAttestation) -> bool {
+    /// Checks shared by every attestation path (active custodian, authorised
+    /// verification type, insurance requirement and expiry). The multi-signature
+    /// requirement is deliberately excluded: `submit_attestation` enforces the
+    /// verification-type signature count while `submit_multisig_attestation`
+    /// enforces the custodian's M-of-N policy (issue #155).
+    fn verify_attestation_basics(env: &Env, attestation: &CustodyAttestation) -> bool {
         let custodian_info = match Self::read_custodian(env, &attestation.custodian) {
             Some(info) => info,
             None => return false,
@@ -822,12 +1198,6 @@ impl CustodyValidator {
             .unwrap_or(Map::new(&env));
 
         if let Some(config) = verification_configs.get(attestation.verification_type.clone()) {
-            if config.multi_sig_required {
-                if (attestation.multi_sig_signatures.len() as u32) < config.sig_threshold {
-                    return false;
-                }
-            }
-
             if config.insurance_required
                 && attestation.insurance_status == Symbol::new(&env, "uninsured")
             {
@@ -838,6 +1208,28 @@ impl CustodyValidator {
         let current_time = env.ledger().timestamp();
         if current_time > attestation.expires_at {
             return false;
+        }
+
+        true
+    }
+
+    fn verify_attestation(env: &Env, attestation: &CustodyAttestation) -> bool {
+        if !Self::verify_attestation_basics(env, attestation) {
+            return false;
+        }
+
+        let verification_configs: Map<Symbol, VerificationTypeConfig> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "verification_configs"))
+            .unwrap_or(Map::new(&env));
+
+        if let Some(config) = verification_configs.get(attestation.verification_type.clone()) {
+            if config.multi_sig_required
+                && (attestation.multi_sig_signatures.len() as u32) < config.sig_threshold
+            {
+                return false;
+            }
         }
 
         true
@@ -877,13 +1269,27 @@ impl CustodyValidator {
             .get(&Symbol::new(&env, "disputes"))
             .unwrap_or(Map::new(&env));
 
+        let mut inspected = 0u32;
         for dispute in disputes.iter() {
+            if inspected >= MAX_ITERATIONS {
+                break;
+            }
+            inspected += 1;
             if dispute.1.attestation_id == attestation_id
                 && dispute.1.status == Symbol::new(&env, "pending")
             {
                 panic_with_error!(&env, CustodyError::DisputeAlreadyExists);
             }
         }
+
+        // Issue #166: record the filed dispute in the audit trail.
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "dispute_filed"),
+            &challenger,
+            &attestation.asset_id,
+            &evidence_hash,
+        );
 
         let dispute_count: u64 = env
             .storage()
@@ -1045,7 +1451,10 @@ impl CustodyValidator {
                 attestation.is_valid = false;
                 Self::write_attestation(&env, &attestation_id, &attestation);
                 env.events().publish(
-                    (Symbol::new(&env, "attestation_expired"), attestation.asset_id.clone()),
+                    (
+                        Symbol::new(&env, "attestation_expired"),
+                        attestation.asset_id.clone(),
+                    ),
                     (attestation_id, now),
                 );
             }
@@ -1063,14 +1472,6 @@ impl CustodyValidator {
 
     pub fn invalidate_attestation(env: Env, auth: Address, attestation_id: u64) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -1080,8 +1481,20 @@ impl CustodyValidator {
         attestation.is_valid = false;
         Self::write_attestation(&env, &attestation_id, &attestation);
 
+        // Issue #166: append an immutable audit-trail entry.
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "invalidated"),
+            &auth,
+            &attestation.asset_id,
+            &attestation.proof_hash,
+        );
+
         env.events().publish(
-            (Symbol::new(&env, "attestation_invalidated"), attestation.asset_id.clone()),
+            (
+                Symbol::new(&env, "attestation_invalidated"),
+                attestation.asset_id.clone(),
+            ),
             (attestation_id, auth, env.ledger().timestamp()),
         );
     }
@@ -1096,8 +1509,8 @@ impl CustodyValidator {
         let mut latest_attestation: Option<CustodyAttestation> = None;
         let mut latest_timestamp = 0u64;
 
-        let start = if attestation_count > 100 {
-            attestation_count - 100
+        let start = if attestation_count > MAX_ITERATIONS as u64 {
+            attestation_count - MAX_ITERATIONS as u64
         } else {
             1
         };
@@ -1139,7 +1552,12 @@ impl CustodyValidator {
             .unwrap_or(Vec::new(&env));
 
         let mut active_custodians = Vec::<CustodianRegistry>::new(&env);
+        let mut processed = 0u32;
         for addr in custodian_addresses.iter() {
+            if processed >= MAX_ITERATIONS {
+                break;
+            }
+            processed += 1;
             if let Some(custodian) = Self::read_custodian(&env, &addr) {
                 if custodian.is_active {
                     active_custodians.push_back(custodian);
@@ -1172,15 +1590,6 @@ impl CustodyValidator {
         evidence_hash: BytesN<32>,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -1198,6 +1607,15 @@ impl CustodyValidator {
             if env.ledger().timestamp() > insurance.valid_until {
                 panic_with_error!(&env, CustodyError::InsuranceClaimFailed);
             }
+
+            // Issue #166: record the insurance claim in the audit trail.
+            Self::append_audit_event(
+                &env,
+                &Symbol::new(&env, "insurance_claimed"),
+                &auth,
+                &asset_id,
+                &evidence_hash,
+            );
 
             env.events().publish(
                 (Symbol::new(&env, "insurance_claim_triggered"), asset_id),
@@ -1220,15 +1638,6 @@ impl CustodyValidator {
         insurance: InsuranceIntegration,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -1255,7 +1664,13 @@ impl CustodyValidator {
         let mut alerts = Vec::<(Address, Symbol)>::new(&env);
         let current_time = env.ledger().timestamp();
 
-        for id in 1..=attestation_count {
+        let start = if attestation_count > MAX_ITERATIONS as u64 {
+            attestation_count - MAX_ITERATIONS as u64
+        } else {
+            1
+        };
+
+        for id in start..=attestation_count {
             if let Some(attestation) = Self::read_attestation(&env, &id) {
                 if !attestation.is_valid {
                     alerts.push_back((
@@ -1286,7 +1701,8 @@ impl CustodyValidator {
             let decay_periods = elapsed / (7 * 86400);
             if decay_periods > 0 {
                 let decay = decay_periods as u32;
-                oracle_info.reputation_score = oracle_info.reputation_score.saturating_sub(decay).max(10);
+                oracle_info.reputation_score =
+                    oracle_info.reputation_score.saturating_sub(decay).max(10);
             }
         }
         oracle_info
@@ -1313,7 +1729,12 @@ impl CustodyValidator {
             .unwrap_or(Map::new(&env));
 
         let mut active_oracles = Vec::<OracleInfo>::new(&env);
+        let mut processed = 0u32;
         for (_, oracle_info) in oracles.iter() {
+            if processed >= MAX_ITERATIONS {
+                break;
+            }
+            processed += 1;
             if oracle_info.is_active {
                 active_oracles.push_back(oracle_info.clone());
             }
@@ -1324,15 +1745,6 @@ impl CustodyValidator {
 
     pub fn update_oracle_status(env: Env, auth: Address, oracle_address: Address, is_active: bool) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -1358,15 +1770,6 @@ impl CustodyValidator {
         reputation_score: u32,
     ) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         if reputation_score > 100 {
             panic_with_error!(&env, CustodyError::VerificationFailed);
@@ -1404,15 +1807,6 @@ impl CustodyValidator {
 
     pub fn update_config(env: Env, auth: Address, config: ValidationConfig) {
         crate::shared_admin::require_admin(&env, &auth);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "admin"))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, CustodyError::NotInitialized);
-            });
-
-        assert_admin(&env, &auth, &admin);
 
         Self::check_version(&env);
 
@@ -1443,7 +1837,12 @@ impl CustodyValidator {
         let mut expired_proofs = 0u64;
         let current_time = env.ledger().timestamp();
 
+        let mut processed = 0u32;
         for proof in proofs.iter() {
+            if processed >= MAX_ITERATIONS {
+                break;
+            }
+            processed += 1;
             if proof.is_valid && current_time <= proof.expiry_timestamp {
                 valid_proofs += 1;
             } else if current_time > proof.expiry_timestamp {
@@ -1455,4 +1854,202 @@ impl CustodyValidator {
         stats.set(Symbol::new(&env, "expired_proofs"), expired_proofs);
         stats
     }
+
+    // ── Issue #162: custodian verification-type management ────────────────
+
+    /// Update the set of asset types a registered custodian is authorised to
+    /// attest for. Admin-only.
+    pub fn set_custodian_verification_types(
+        env: Env,
+        auth: Address,
+        custodian_address: Address,
+        verification_types: Vec<Symbol>,
+    ) {
+        crate::shared_admin::require_admin(&env, &auth);
+
+        Self::check_version(&env);
+
+        let mut custodian = Self::read_custodian(&env, &custodian_address).unwrap_or_else(|| {
+            panic_with_error!(&env, CustodyError::CustodianNotFound);
+        });
+        custodian.verification_types = verification_types;
+        Self::write_custodian(&env, &custodian_address, &custodian);
+
+        Self::append_audit_event(
+            &env,
+            &Symbol::new(&env, "registered"),
+            &auth,
+            &custodian_address,
+            &BytesN::from_array(&env, &[0u8; 32]),
+        );
+    }
+
+    // ── Issue #166: audit trail query ──────────────────────────────────────
+
+    /// Return the audit-trail entries for `asset_id` whose timestamp falls in
+    /// the inclusive `[start, end]` window. Pass `end = 0` for no upper bound.
+    /// Work is bounded by `MAX_ITERATIONS` to keep gas predictable.
+    pub fn get_audit_trail(
+        env: Env,
+        asset_id: Address,
+        start: u64,
+        end: u64,
+    ) -> Vec<CustodyAuditEvent> {
+        let effective_end = if end == 0 { u64::MAX } else { end };
+
+        let trail: Map<Address, Vec<CustodyAuditEvent>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "audit_trail"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let events = trail
+            .get(asset_id.clone())
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut result = Vec::<CustodyAuditEvent>::new(&env);
+        let mut processed = 0u32;
+        for event in events.iter() {
+            if processed >= MAX_ITERATIONS {
+                break;
+            }
+            processed += 1;
+            if event.timestamp >= start && event.timestamp <= effective_end {
+                result.push_back(event);
+            }
+        }
+
+        result
+    }
+
+    // ── Issue #167: performance score queries / weight management ──────────
+
+    /// Return the weighted performance score for a custodian. The score is
+    /// recomputed from raw metrics whenever a stored value is unavailable.
+    pub fn get_performance_score(env: Env, custodian_address: Address) -> PerformanceScore {
+        let custodian = Self::read_custodian(&env, &custodian_address).unwrap_or_else(|| {
+            panic_with_error!(&env, CustodyError::CustodianNotFound);
+        });
+
+        let scores: Map<Address, PerformanceScore> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "performance_scores"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        if let Some(score) = scores.get(custodian_address.clone()) {
+            return score;
+        }
+
+        Self::compute_performance(&env, &custodian)
+    }
+
+    /// Update the weights used to combine performance metrics. Admin-only.
+    pub fn update_performance_weights(env: Env, auth: Address, weights: PerformanceWeights) {
+        crate::shared_admin::require_admin(&env, &auth);
+
+        Self::check_version(&env);
+
+        if weights.accuracy > 100 || weights.timeliness > 100 || weights.thoroughness > 100 {
+            panic_with_error!(&env, CustodyError::InvalidParameters);
+        }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "performance_weights"), &weights);
+
+        // Recompute cached scores so callers immediately observe the new weights.
+        let custodian_addresses: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "custodian_addresses"))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut processed = 0u32;
+        for address in custodian_addresses.iter() {
+            if processed >= MAX_ITERATIONS {
+                break;
+            }
+            processed += 1;
+            Self::refresh_performance_score(&env, &address);
+        }
+    }
+
+    // ── Issue #168: paginated attestation listing ──────────────────────────
+
+    /// Return up to `limit` attestations ordered by id, starting immediately
+    /// after `cursor`. `limit` is clamped to `MAX_ITERATIONS`. The second tuple
+    /// element is a continuation cursor, or `None` when the page is the last.
+    pub fn get_attestations(
+        env: Env,
+        cursor: u64,
+        limit: u32,
+    ) -> (Vec<CustodyAttestation>, Option<u64>) {
+        let attestation_count: u64 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "attestation_count"))
+            .unwrap_or(0u64);
+
+        if cursor >= attestation_count {
+            return (Vec::new(&env), None);
+        }
+
+        let capped_limit = if limit == 0 || limit > MAX_ITERATIONS {
+            MAX_ITERATIONS
+        } else {
+            limit
+        };
+
+        let mut page = Vec::<CustodyAttestation>::new(&env);
+        let mut processed = 0u32;
+        let mut last_id = cursor;
+        let mut id = cursor + 1;
+
+        while id <= attestation_count && processed < capped_limit {
+            if let Some(attestation) = Self::read_attestation(&env, &id) {
+                page.push_back(attestation);
+                last_id = id;
+                processed += 1;
+            }
+            id += 1;
+        }
+
+        let next_cursor = if id <= attestation_count && processed > 0 {
+            Some(last_id)
+        } else {
+            None
+        };
+
+        (page, next_cursor)
+    }
+}
+
+// ── Issue #150: shared price-oracle helpers ──────────────────────────────────
+//
+// Both the custody validator (fair-value checks on attested collateral) and the
+// secondary market (order validation) need to agree on when an oracle price is
+// trustworthy. These helpers are the single source of truth for that policy.
+
+/// Default maximum age of an oracle price before it is considered stale.
+pub const PRICE_ORACLE_MAX_AGE_SECONDS: u64 = 3600;
+
+/// True when `timestamp` is no older than `max_age_seconds` relative to `now`.
+/// A timestamp in the future is never considered fresh.
+pub fn is_oracle_price_fresh(timestamp: u64, now: u64, max_age_seconds: u64) -> bool {
+    now >= timestamp && now - timestamp <= max_age_seconds
+}
+
+/// Absolute difference between `price` and `reference` expressed in basis
+/// points of the reference. Returns 0 when the reference is not positive.
+pub fn price_deviation_bps(price: i128, reference: i128) -> i128 {
+    if reference <= 0 {
+        return 0;
+    }
+    let deviation = if price >= reference {
+        price - reference
+    } else {
+        reference - price
+    };
+    (deviation * 10000) / reference
 }

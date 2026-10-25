@@ -296,7 +296,7 @@ jobs:
         uses: tsickert/discord-webhook@v6.0.0
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          content: ":x: **CI failed** on \`main\`\nRepository: ${{ github.repository }}\nWorkflow: ${{ github.workflow }}\nActor: ${{ github.actor }}\n[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          content: ":x: **CI failed** on `main`\nRepository: ${{ github.repository }}\nWorkflow: ${{ github.workflow }}\nActor: ${{ github.actor }}\n[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
         continue-on-error: true
 
   # ── Final Gate ────────────────────────────────────────────────────────────

@@ -7,7 +7,10 @@ use soroban_sdk::{
 
 use crate::{
     compliance_registry::{ComplianceRegistry, ComplianceRegistryClient},
-    dividend_distributor::{DividendConfig, DividendDistributor, DividendDistributorClient},
+    dividend_distributor::{
+        DividendConfig, DividendDistributor, DividendDistributorClient,
+        DEFAULT_MIN_CLAIM_WINDOW,
+    },
     rwa_token::{RWAToken, RWATokenClient},
     secondary_market::{MarketConfig, SecondaryMarket, SecondaryMarketClient},
 };
@@ -111,6 +114,7 @@ fn dividend_config(d: &Deployed) -> DividendConfig {
         max_distribution_frequency: 60,
         fee_rate: 0,
         fee_recipient: d.admin.clone(),
+        min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
     }
 }
 

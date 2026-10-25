@@ -1,6 +1,15 @@
 use soroban_sdk::{contracterror, contracttype, Env, Symbol, Vec, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::AssetClassError;
+use crate::asset_class_handlers::{AssetClassError, validate_metadata_size};
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum DividendRights {
+    Cumulative = 1,
+    NonCumulative = 2,
+    Participating = 3,
+    NonParticipating = 4,
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -17,6 +26,7 @@ pub struct SecurityConfig {
     pub holding_period_days: u32,
     pub regulatory_reporting: bool,
     pub isin: Symbol,
+    pub dividend_rights: DividendRights,
 }
 
 pub fn create_security_config(
@@ -24,6 +34,8 @@ pub fn create_security_config(
     base_config: AssetConfig,
     security_config: SecurityConfig,
 ) -> AssetConfig {
+    validate_metadata_size(&env, base_config.metadata.len(), 100);
+
     let valid_frameworks = Vec::from_array(&env, [
         Symbol::new(&env, "REG_D"),
         Symbol::new(&env, "REG_S"),
@@ -44,6 +56,14 @@ pub fn create_security_config(
     metadata.set(Symbol::new(&env, "regulation_framework"), String::from_str(&env, &security_config.regulation_framework.to_string()));
     metadata.set(Symbol::new(&env, "isin"), String::from_str(&env, &security_config.isin.to_string()));
     metadata.set(Symbol::new(&env, "regulatory_reporting"), String::from_str(&env, &security_config.regulatory_reporting.to_string()));
+
+    let rights_str = match security_config.dividend_rights {
+        DividendRights::Cumulative => "Cumulative",
+        DividendRights::NonCumulative => "NonCumulative",
+        DividendRights::Participating => "Participating",
+        DividendRights::NonParticipating => "NonParticipating",
+    };
+    metadata.set(Symbol::new(&env, "dividend_rights"), String::from_str(&env, rights_str));
 
     AssetConfig {
         compliance_rules,
