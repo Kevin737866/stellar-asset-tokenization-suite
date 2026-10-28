@@ -234,6 +234,20 @@ jobs:
         run: npm run type-check
         working-directory: ui
 
+  # ── Docs: Link Check ──────────────────────────────────────────────────────
+  docs-link-check:
+    name: Public API & Documentation Links Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Verify documentation and API links
+        run: node scripts/check-doc-links.js
+
   # ── Coverage ──────────────────────────────────────────────────────────────
   coverage:
     name: Code Coverage
@@ -279,6 +293,7 @@ jobs:
       - sdk-build
       - ui-lint
       - ui-build
+      - docs-link-check
     if: failure() && github.ref == 'refs/heads/main'
     steps:
       - name: Slack Notification
