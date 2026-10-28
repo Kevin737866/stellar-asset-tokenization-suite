@@ -203,12 +203,51 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Cache UI dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ui/node_modules
+          key: ${{ runner.os }}-ui-npm-${{ hashFiles('ui/package-lock.json', 'ui/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-npm-
+
       - name: Install UI dependencies
         run: npm ci
         working-directory: ui
 
       - name: Run UI lint
         run: npm run lint
+        working-directory: ui
+
+  # ── UI: Type Check ────────────────────────────────────────────────────────
+  ui-type-check:
+    name: UI Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache UI dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ui/node_modules
+          key: ${{ runner.os }}-ui-npm-${{ hashFiles('ui/package-lock.json', 'ui/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-npm-
+
+      - name: Install UI dependencies
+        run: npm ci
+        working-directory: ui
+
+      - name: Type check UI
+        run: npm run type-check
         working-directory: ui
 
   # ── UI: Build ─────────────────────────────────────────────────────────────
@@ -222,6 +261,16 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Cache UI dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ui/node_modules
+          key: ${{ runner.os }}-ui-npm-${{ hashFiles('ui/package-lock.json', 'ui/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-npm-
+
       - name: Install UI dependencies
         run: npm ci
         working-directory: ui
@@ -233,6 +282,17 @@ jobs:
       - name: Type check UI
         run: npm run type-check
         working-directory: ui
+
+      - name: Upload UI build output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-build-output
+          path: |
+            ui/.next
+            ui/dist
+            ui/out
+            !ui/.next/cache/**
+          if-no-files-found: warn
 
   # ── Coverage ──────────────────────────────────────────────────────────────
   coverage:
@@ -278,6 +338,7 @@ jobs:
       - sdk-test
       - sdk-build
       - ui-lint
+      - ui-type-check
       - ui-build
     if: failure() && github.ref == 'refs/heads/main'
     steps:
@@ -313,6 +374,7 @@ jobs:
       - sdk-test
       - sdk-build
       - ui-lint
+      - ui-type-check
       - ui-build
     if: always()
     steps:
