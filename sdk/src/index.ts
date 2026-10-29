@@ -359,10 +359,15 @@ export class StellarRWASDK {
 
   private _portfolioCache: Map<string, { data: Portfolio; expiry: number }> = new Map();
 
-  constructor(config: RWASDKConfig) {
+  /** Active retry policy for transient network failures (Issue #191). */
+  public retryConfig: RetryConfig;
+  private _retryListener?: RetryEventListener;
+
+  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
     this.config = config;
+    this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
     this.logger.info('Initializing SDK', { network: config.stellar.network, serverUrl: config.stellar.serverUrl });
     

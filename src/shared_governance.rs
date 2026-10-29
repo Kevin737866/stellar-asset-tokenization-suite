@@ -146,7 +146,7 @@ fn quorum_bps(env: &Env, votes_cast: u32) -> u32 {
     if owners.len() == 0 {
         return 0;
     }
-    ((votes_cast as u32) * 10000) / (owners.len() as u32)
+    (votes_cast * 10000) / owners.len()
 }
 
 pub fn write_governance(

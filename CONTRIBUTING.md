@@ -34,16 +34,22 @@ We welcome contributions to the Stellar Real-World Asset Tokenization Suite! Thi
    cargo install soroban-cli
    ```
 
-3. **Run Tests**
+3. **Run Local Verification Commands**
+
+   Before submitting your PR, run the local verification suite matching the CI gates:
+
    ```bash
-   # Run contract tests
-   cargo test
+   # Drips Wave & PR handoff verification command
+   cargo test; npm test -- --runInBand
 
-   # Run SDK tests
-   npm test
+   # Format & lint check
+   cargo fmt --all -- --check
+   cargo clippy --all-targets -- -D warnings
+   npm run lint
 
-   # Run UI tests
-   npm run test:ui
+   # SDK & UI validation
+   npm run build
+   cd ui && npm run type-check && npm run build && cd ..
    ```
 
 > For detailed troubleshooting, deployment scripts, and architecture diagrams, see [docs/developer-guide.md](docs/developer-guide.md).
@@ -247,11 +253,26 @@ describe('AssetDeployer', () => {
    - Add tests for new functionality
    - Update documentation
 
-3. **Run Tests**
+3. **Run Supported Local Verification Commands**
+   Ensure all component verification checks pass locally before opening a pull request:
+
    ```bash
-   cargo test
-   npm test
+   # 1. Smart Contracts (Rust / Soroban)
+   cargo fmt --all -- --check
+   cargo clippy --all-targets -- -D warnings
+   cargo test --all-features
+   cargo build --target wasm32-unknown-unknown --release
+
+   # 2. TypeScript SDK
    npm run lint
+   npm test -- --runInBand
+   npm run build
+
+   # 3. Web UI (Next.js / React)
+   cd ui && npm run lint && npm run type-check && npm run build && cd ..
+
+   # 4. Standard Drips Wave verification combo
+   cargo test; npm test -- --runInBand
    ```
 
 4. **Commit Changes**

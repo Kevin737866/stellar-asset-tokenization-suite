@@ -1180,9 +1180,10 @@ impl CustodyValidator {
 
         // Issue #162: a custodian may only attest for the asset types it has
         // been authorised for by the registry.
-        let custodian_info = Self::read_custodian(&env, &attestation.custodian).unwrap_or_else(|| {
-            panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
-        });
+        let custodian_info =
+            Self::read_custodian(&env, &attestation.custodian).unwrap_or_else(|| {
+                panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
+            });
         if !custodian_info.is_active {
             panic_with_error!(&env, CustodyError::CustodianNotWhitelisted);
         }
@@ -1791,7 +1792,10 @@ impl CustodyValidator {
                 attestation.is_valid = false;
                 Self::write_attestation(&env, &attestation_id, &attestation);
                 env.events().publish(
-                    (Symbol::new(&env, "attestation_expired"), attestation.asset_id.clone()),
+                    (
+                        Symbol::new(&env, "attestation_expired"),
+                        attestation.asset_id.clone(),
+                    ),
                     (attestation_id, now),
                 );
             }
@@ -1835,7 +1839,10 @@ impl CustodyValidator {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "attestation_invalidated"), attestation.asset_id.clone()),
+            (
+                Symbol::new(&env, "attestation_invalidated"),
+                attestation.asset_id.clone(),
+            ),
             (attestation_id, auth, env.ledger().timestamp()),
         );
     }
@@ -2058,7 +2065,8 @@ impl CustodyValidator {
             let decay_periods = elapsed / (7 * 86400);
             if decay_periods > 0 {
                 let decay = decay_periods as u32;
-                oracle_info.reputation_score = oracle_info.reputation_score.saturating_sub(decay).max(10);
+                oracle_info.reputation_score =
+                    oracle_info.reputation_score.saturating_sub(decay).max(10);
             }
         }
         oracle_info
