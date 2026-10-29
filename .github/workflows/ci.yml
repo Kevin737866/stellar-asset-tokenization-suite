@@ -43,6 +43,34 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  # ── Rust: Documentation ───────────────────────────────────────────────────
+  rust-doc:
+    name: Rust Documentation Build
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-doc-
+
+      - name: Build Rust documentation
+        run: cargo doc --no-deps --all-features
+
   # ── Rust: Test ────────────────────────────────────────────────────────────
   rust-test:
     name: Rust Tests
@@ -101,9 +129,9 @@ jobs:
           name: gas-baseline
           path: gas-baseline.json
 
-  # ── Contract WASM Size Check ──────────────────────────────────────────────
+  # ── Contract WASM Size & Interface Compatibility Check ────────────────────
   wasm-size-check:
-    name: Contract WASM Size Check
+    name: Contract WASM Size & Interface Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,6 +162,18 @@ jobs:
             fi
           done
           [ "$FAILED" -eq 0 ] || exit 1
+
+      - name: Check contract interface compatibility
+        run: |
+          set -e
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            [ -f "$wasm" ] || continue
+            if ! grep -aq "contractspecv0" "$wasm"; then
+              echo "::error::WASM $(basename "$wasm") is missing Soroban contractspecv0 interface metadata"
+              exit 1
+            fi
+          done
+          echo "::notice::Contract interface spec metadata verified."
 
   # ── SDK: Lint ─────────────────────────────────────────────────────────────
   sdk-lint:
@@ -173,7 +213,7 @@ jobs:
         run: npm test
         working-directory: .
 
-  # ── SDK: Build ────────────────────────────────────────────────────────────
+  # ── SDK: Build & Artifact Freshness Check ─────────────────────────────────
   sdk-build:
     name: SDK Build
     runs-on: ubuntu-latest
@@ -192,6 +232,16 @@ jobs:
         run: npm run build
         working-directory: .
 
+      - name: Verify generated SDK artifacts are up to date
+        run: |
+          set -e
+          test -f dist/index.js
+          test -f dist/index.d.ts
+          git diff --exit-code -- sdk/ src/ || {
+            echo "::error::Generated SDK artifacts are out of date with tracked sources."
+            exit 1
+          }
+
   # ── UI: Lint ──────────────────────────────────────────────────────────────
   ui-lint:
     name: UI Lint
@@ -203,12 +253,51 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Cache UI dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ui/node_modules
+          key: ${{ runner.os }}-ui-npm-${{ hashFiles('ui/package-lock.json', 'ui/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-npm-
+
       - name: Install UI dependencies
         run: npm ci
         working-directory: ui
 
       - name: Run UI lint
         run: npm run lint
+        working-directory: ui
+
+  # ── UI: Type Check ────────────────────────────────────────────────────────
+  ui-type-check:
+    name: UI Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache UI dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ui/node_modules
+          key: ${{ runner.os }}-ui-npm-${{ hashFiles('ui/package-lock.json', 'ui/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-npm-
+
+      - name: Install UI dependencies
+        run: npm ci
+        working-directory: ui
+
+      - name: Type check UI
+        run: npm run type-check
         working-directory: ui
 
   # ── UI: Build ─────────────────────────────────────────────────────────────
@@ -221,6 +310,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache UI dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ui/node_modules
+          key: ${{ runner.os }}-ui-npm-${{ hashFiles('ui/package-lock.json', 'ui/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-npm-
 
       - name: Install UI dependencies
         run: npm ci
@@ -285,6 +384,7 @@ jobs:
     needs:
       - rust-fmt
       - rust-clippy
+      - rust-doc
       - rust-test
       - rust-gas-bench
       - wasm-size-check
@@ -292,6 +392,7 @@ jobs:
       - sdk-test
       - sdk-build
       - ui-lint
+      - ui-type-check
       - ui-build
       - docs-link-check
     if: failure() && github.ref == 'refs/heads/main'
@@ -321,6 +422,7 @@ jobs:
     needs:
       - rust-fmt
       - rust-clippy
+      - rust-doc
       - rust-test
       - rust-gas-bench
       - wasm-size-check
@@ -328,6 +430,7 @@ jobs:
       - sdk-test
       - sdk-build
       - ui-lint
+      - ui-type-check
       - ui-build
     if: always()
     steps:
