@@ -333,16 +333,19 @@ jobs:
         run: npm run type-check
         working-directory: ui
 
-      - name: Upload UI build output artifact
-        uses: actions/upload-artifact@v4
+  # ── Docs: Link Check ──────────────────────────────────────────────────────
+  docs-link-check:
+    name: Public API & Documentation Links Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          name: ui-build-output
-          path: |
-            ui/.next
-            ui/dist
-            ui/out
-            !ui/.next/cache/**
-          if-no-files-found: warn
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Verify documentation and API links
+        run: node scripts/check-doc-links.js
 
   # ── Coverage ──────────────────────────────────────────────────────────────
   coverage:
@@ -391,6 +394,7 @@ jobs:
       - ui-lint
       - ui-type-check
       - ui-build
+      - docs-link-check
     if: failure() && github.ref == 'refs/heads/main'
     steps:
       - name: Slack Notification
