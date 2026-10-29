@@ -245,29 +245,51 @@ test(fuzz): add property tests for commodity config
 
 ## 6. Testing Guidelines
 
-### 6.1 Running Tests
+### 6.1 Running Tests & Local Verification Commands
+
+The repository enforces automated CI gates for smart contracts, TypeScript SDK, and Next.js UI. Contributors must run the corresponding local verification commands prior to opening a PR:
 
 ```bash
-# Run all Rust tests
-cargo test
+# ── Standard Pre-flight Verification ──────────────────────────────────────
+# Full test suite (required for Drips Wave / CI parity):
+cargo test; npm test -- --runInBand
 
-# Run a specific test module
-cargo test test_rwa_token
+# ── Smart Contracts (Rust / Soroban) ──────────────────────────────────────
+# Check formatting according to rustfmt:
+cargo fmt --all -- --check
 
-# Run with output
-cargo test -- --nocapture
+# Strict Clippy lint check with warnings as errors:
+cargo clippy --all-targets -- -D warnings
 
-# Run integration tests only
-cargo test --test integration_tests
+# Run all contract unit and property tests:
+cargo test --all-features
 
-# Run fuzz tests (proptest)
-cargo test fuzz
+# Run specific contract tests with stdout:
+cargo test test_rwa_token -- --nocapture
 
-# Run SDK tests
-npm test
+# WASM release build & size verification (< 64KB target):
+cargo build --target wasm32-unknown-unknown --release
 
-# Run SDK tests with coverage
-npm test -- --coverage
+# ── TypeScript SDK ────────────────────────────────────────────────────────
+# Lint SDK source files:
+npm run lint
+
+# Run Jest tests sequentially in-band:
+npm test -- --runInBand
+
+# Compile SDK TypeScript:
+npm run build
+
+# ── React / Next.js UI ────────────────────────────────────────────────────
+# Lint UI files:
+cd ui && npm run lint
+
+# Type-check UI components and pages:
+npm run type-check
+
+# Build UI for production:
+npm run build
+cd ..
 ```
 
 ### 6.2 Writing Tests
