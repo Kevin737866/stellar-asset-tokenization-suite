@@ -13,6 +13,7 @@ pub mod shared_governance;
 pub mod real_estate;
 pub mod commodity;
 pub mod invoice;
+pub mod intellectual_property;
 pub mod security;
 pub mod art;
 pub mod carbon_credit;

@@ -2,11 +2,17 @@ use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, panic_with_
 use crate::asset_factory::AssetConfig;
 use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
 
+/// Issue #171: allowed range for a tokenized property's appraisal value,
+/// expressed in the asset's base currency units.
+pub const MIN_APPRAISAL_VALUE: i128 = 10_000;
+pub const MAX_APPRAISAL_VALUE: i128 = 10_000_000_000;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum RealEstateError {
     InvalidLocationOracle = 1,
     InvalidRentalYieldRate = 2,
+    AppraisalValueOutOfRange = 3,
 }
 
 #[contracttype]
@@ -29,6 +35,13 @@ pub fn create_real_estate_config(
 
     if real_estate_config.rental_yield_rate < 0 || real_estate_config.rental_yield_rate > 10000 {
         panic_with_error!(&env, AssetClassError::InvalidParameters);
+    }
+
+    // Issue #171: reject appraisals that are implausible for real estate.
+    if real_estate_config.appraisal_value < MIN_APPRAISAL_VALUE
+        || real_estate_config.appraisal_value > MAX_APPRAISAL_VALUE
+    {
+        panic_with_error!(&env, RealEstateError::AppraisalValueOutOfRange);
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);

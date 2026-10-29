@@ -151,9 +151,7 @@ impl RWAToken {
         let token_info = TokenInfo {
             name: name.clone(),
             symbol: symbol.clone(),
-            // The initial supply is added to the admin balance by `mint`
-            // below, which also updates `total_supply`.
-            total_supply: 0,
+            total_supply,
             decimals,
             asset_type: asset_type.clone(),
             metadata,

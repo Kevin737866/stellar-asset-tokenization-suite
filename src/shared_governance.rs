@@ -1,7 +1,5 @@
 use crate::auth::AuthError;
-use soroban_sdk::{
-    contracterror, contracttype, panic_with_error, Address, Env, IntoVal, Symbol, Vec,
-};
+use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Env, IntoVal, Symbol, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]

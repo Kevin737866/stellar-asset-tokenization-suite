@@ -7,6 +7,7 @@ use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules, DividendSch
 pub use crate::art;
 pub use crate::carbon_credit;
 pub use crate::commodity;
+pub use crate::intellectual_property;
 pub use crate::invoice;
 pub use crate::real_estate;
 pub use crate::renewable_energy;
@@ -66,6 +67,15 @@ impl AssetClassHandlers {
         commodity::create_commodity_config(env, base_config, commodity_config)
     }
 
+    /// Issue #172: agricultural commodity sub-type with harvest cycle metadata.
+    pub fn create_agricultural_config(
+        env: Env,
+        base_config: AssetConfig,
+        agricultural_config: commodity::AgriculturalConfig,
+    ) -> AssetConfig {
+        commodity::create_agricultural_config(env, base_config, agricultural_config)
+    }
+
     pub fn create_invoice_config(
         env: Env,
         base_config: AssetConfig,
@@ -104,6 +114,16 @@ impl AssetClassHandlers {
         rec_config: renewable_energy::RECConfig,
     ) -> AssetConfig {
         renewable_energy::create_rec_config(env, base_config, rec_config)
+    }
+
+    /// Issue #170: intellectual property asset class (patents, trademarks,
+    /// copyrights and trade secrets).
+    pub fn create_ip_config(
+        env: Env,
+        base_config: AssetConfig,
+        ip_config: intellectual_property::IPConfig,
+    ) -> AssetConfig {
+        intellectual_property::create_ip_config(env, base_config, ip_config)
     }
 
     /// Get default compliance rules for asset class
@@ -165,6 +185,13 @@ impl AssetClassHandlers {
                 holding_period_days: 0,
                 transfer_limits: 10000000,
             },
+            AssetClass::IntellectualProperty => ComplianceRules {
+                kyc_required: true,
+                accredited_investor_only: false,
+                geographic_restrictions: Vec::new(&env),
+                holding_period_days: intellectual_property::IP_HOLDING_PERIOD_DAYS,
+                transfer_limits: intellectual_property::IP_TRANSFER_LIMIT,
+            },
         }
     }
 
@@ -196,6 +223,7 @@ impl AssetClassHandlers {
             AssetClass::Art => None,
             AssetClass::CarbonCredit => None,
             AssetClass::RenewableEnergy => None,
+            AssetClass::IntellectualProperty => None,
         }
     }
 }

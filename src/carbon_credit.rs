@@ -27,8 +27,8 @@ pub fn create_carbon_credit_config(
 ) -> AssetConfig {
     validate_metadata_size(&env, base_config.metadata.len(), 100);
 
-    let current_year = ((env.ledger().timestamp() / 31536000) + 1970) as u32;
-    if carbon_config.vintage_year < 1990 || carbon_config.vintage_year > current_year {
+    let current_year = (env.ledger().timestamp() / 31536000) + 1970;
+    if carbon_config.vintage_year < 1990 || (carbon_config.vintage_year as u64) > current_year {
         panic_with_error!(&env, AssetClassError::InvalidVintage);
     }
 

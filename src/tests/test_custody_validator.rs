@@ -6,8 +6,9 @@ use soroban_sdk::{
 };
 
 use crate::custody_validator::{
-    CustodyAttestation, CustodyValidator, CustodyValidatorClient, InsuranceIntegration,
-    PerformanceWeights, MAX_ITERATIONS,
+    Coordinates, CustodyAttestation, CustodyValidator, CustodyValidatorClient,
+    InsuranceIntegration, PerformanceWeights, SatelliteProof, MAX_ITERATIONS,
+    MAX_SATELLITE_IMAGE_AGE,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -140,7 +141,7 @@ fn update_verification_types_enables_new_type() {
         Vec::from_array(&env, [Symbol::new(&env, "real_estate")]),
     );
 
-    client.set_custodian_verification_types(
+    client.update_custodian_types(
         &admin,
         &custodian,
         &Vec::from_array(&env, [Symbol::new(&env, "commodities")]),
@@ -177,7 +178,7 @@ fn update_verification_types_by_non_admin_panics() {
     );
 
     let attacker = Address::generate(&env);
-    client.set_custodian_verification_types(
+    client.update_custodian_types(
         &attacker,
         &custodian,
         &Vec::from_array(&env, [Symbol::new(&env, "commodities")]),
@@ -625,4 +626,138 @@ fn pagination_cursor_past_end_returns_empty() {
     let (page, next) = client.get_attestations(&999u64, &10u32);
     assert_eq!(page.len(), 0);
     assert!(next.is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #169: satellite imagery verification
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn asset_coordinates() -> Coordinates {
+    Coordinates {
+        latitude: 37_774_900,
+        longitude: -122_419_400,
+    }
+}
+
+fn satellite_proof(
+    env: &Env,
+    provider: &Address,
+    coordinates: Coordinates,
+    timestamp: u64,
+) -> SatelliteProof {
+    SatelliteProof {
+        provider_address: provider.clone(),
+        image_hash: BytesN::from_array(env, &[9u8; 32]),
+        coordinates,
+        timestamp,
+        resolution: 1,
+    }
+}
+
+fn setup_satellite_asset(
+    env: &Env,
+    client: &CustodyValidatorClient<'static>,
+    admin: &Address,
+    custodian: &Address,
+    provider: &Address,
+) -> Address {
+    register_custodian(
+        env,
+        client,
+        admin,
+        custodian,
+        Vec::from_array(env, [Symbol::new(env, "real_estate")]),
+    );
+    client.register_satellite_provider(
+        admin,
+        provider,
+        &Symbol::new(env, "OrbitalImaging"),
+    );
+
+    let asset = Address::generate(env);
+    client.register_asset_coordinates(admin, &asset, &asset_coordinates());
+    asset
+}
+
+#[test]
+fn satellite_proof_accepted_for_registered_provider() {
+    let (env, admin, _oracle, client) = setup();
+    let custodian = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = setup_satellite_asset(&env, &client, &admin, &custodian, &provider);
+
+    assert!(client.is_satellite_provider_registered(&provider));
+
+    let proof = satellite_proof(&env, &provider, asset_coordinates(), env.ledger().timestamp());
+    let id = client.submit_satellite_proof(&custodian, &asset, &proof);
+
+    assert_eq!(id, 1);
+    let stored = client.get_satellite_proofs(&asset);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored.get(0).unwrap().provider_address, provider);
+}
+
+#[test]
+#[should_panic]
+fn satellite_proof_from_unregistered_provider_rejected() {
+    let (env, admin, _oracle, client) = setup();
+    let custodian = Address::generate(&env);
+    register_custodian(
+        &env,
+        &client,
+        &admin,
+        &custodian,
+        Vec::from_array(&env, [Symbol::new(&env, "real_estate")]),
+    );
+
+    let provider = Address::generate(&env);
+    let asset = Address::generate(&env);
+    client.register_asset_coordinates(&admin, &asset, &asset_coordinates());
+
+    let proof = satellite_proof(&env, &provider, asset_coordinates(), env.ledger().timestamp());
+    client.submit_satellite_proof(&custodian, &asset, &proof);
+}
+
+#[test]
+#[should_panic]
+fn satellite_proof_from_deregistered_provider_rejected() {
+    let (env, admin, _oracle, client) = setup();
+    let custodian = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = setup_satellite_asset(&env, &client, &admin, &custodian, &provider);
+
+    client.deregister_satellite_provider(&admin, &provider);
+    assert!(!client.is_satellite_provider_registered(&provider));
+
+    let proof = satellite_proof(&env, &provider, asset_coordinates(), env.ledger().timestamp());
+    client.submit_satellite_proof(&custodian, &asset, &proof);
+}
+
+#[test]
+#[should_panic]
+fn stale_satellite_image_rejected() {
+    let (env, admin, _oracle, client) = setup();
+    let custodian = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = setup_satellite_asset(&env, &client, &admin, &custodian, &provider);
+
+    env.ledger().set_timestamp(MAX_SATELLITE_IMAGE_AGE + 1);
+    let proof = satellite_proof(&env, &provider, asset_coordinates(), 0);
+    client.submit_satellite_proof(&custodian, &asset, &proof);
+}
+
+#[test]
+#[should_panic]
+fn satellite_coordinate_mismatch_rejected() {
+    let (env, admin, _oracle, client) = setup();
+    let custodian = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = setup_satellite_asset(&env, &client, &admin, &custodian, &provider);
+
+    let elsewhere = Coordinates {
+        latitude: 40_712_800,
+        longitude: -74_006_000,
+    };
+    let proof = satellite_proof(&env, &provider, elsewhere, env.ledger().timestamp());
+    client.submit_satellite_proof(&custodian, &asset, &proof);
 }
