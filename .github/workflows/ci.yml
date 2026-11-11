@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   NODE_VERSION: '20'
+  PROPTEST_RNG_ALGORITHM: cc
+  PROPTEST_CASES: '256'
+  CI_TEST_SEED: ${{ github.run_id }}
 
 jobs:
   # ── Rust: Format ──────────────────────────────────────────────────────────
@@ -95,7 +98,35 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --all-features
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "Deterministic property-test config: PROPTEST_RNG_ALGORITHM=${PROPTEST_RNG_ALGORITHM} PROPTEST_CASES=${PROPTEST_CASES} CI_TEST_SEED=${CI_TEST_SEED}"
+          cargo test --all-features 2>&1 | tee rust-test.log
+
+      - name: Report deterministic seed on test failure
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### Rust Property & Unit Test Failure Summary"
+            echo "- \`PROPTEST_RNG_ALGORITHM\`: \`${PROPTEST_RNG_ALGORITHM}\`"
+            echo "- \`PROPTEST_CASES\`: \`${PROPTEST_CASES}\`"
+            echo "- \`CI_TEST_SEED\`: \`${CI_TEST_SEED}\`"
+            if [ -f rust-test.log ]; then
+              echo ""
+              echo "#### Extracted Seed / Failing Input Details"
+              echo '```text'
+              grep -nE 'seed|minimal failing input|proptest:|panicked at|test .* FAILED' rust-test.log | head -n 40 || true
+              echo '```'
+            fi
+            echo ""
+            echo "#### Local Reproduction Command"
+            echo '```bash'
+            echo "PROPTEST_RNG_ALGORITHM=${PROPTEST_RNG_ALGORITHM} PROPTEST_CASES=${PROPTEST_CASES} CI_TEST_SEED=${CI_TEST_SEED} cargo test --all-features"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Rust tests failed (PROPTEST_RNG_ALGORITHM=${PROPTEST_RNG_ALGORITHM}, PROPTEST_CASES=${PROPTEST_CASES}, CI_TEST_SEED=${CI_TEST_SEED}). Reproduce locally with: PROPTEST_RNG_ALGORITHM=${PROPTEST_RNG_ALGORITHM} PROPTEST_CASES=${PROPTEST_CASES} cargo test --all-features"
 
   # ── Rust: Gas Benchmarks ──────────────────────────────────────────────────
   rust-gas-bench:
@@ -210,7 +241,34 @@ jobs:
         working-directory: .
 
       - name: Run tests
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "Deterministic SDK test seed: CI_TEST_SEED=${CI_TEST_SEED}"
+          npm test -- --runInBand 2>&1 | tee sdk-test.log
+        working-directory: .
+
+      - name: Report deterministic seed on SDK test failure
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### SDK Test Failure Summary"
+            echo "- \`CI_TEST_SEED\`: \`${CI_TEST_SEED}\`"
+            if [ -f sdk-test.log ]; then
+              echo ""
+              echo "#### Extracted Failing Suites / Seed Details"
+              echo '```text'
+              grep -nE 'FAIL |seed|Counterexample|Property failed' sdk-test.log | head -n 40 || true
+              echo '```'
+            fi
+            echo ""
+            echo "#### Local Reproduction Command"
+            echo '```bash'
+            echo "CI_TEST_SEED=${CI_TEST_SEED} npm test -- --runInBand"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::SDK tests failed (CI_TEST_SEED=${CI_TEST_SEED}). Reproduce locally with: CI_TEST_SEED=${CI_TEST_SEED} npm test -- --runInBand"
         working-directory: .
 
   # ── SDK: Build & Artifact Freshness Check ─────────────────────────────────
