@@ -1,3 +1,47 @@
+/**
+ * Stellar RWA Suite CLI
+ *
+ * Installation & Execution:
+ *   npm install
+ *   npm run build
+ *   node dist/cli.js --help
+ *   # or via npm script / global bin:
+ *   npm run cli -- <command> [options]
+ *   npx rwa-sdk <command> [options]
+ *
+ * Configuration File (`--config <path>` or `SATS_CLI_CONFIG`):
+ *   JSON document defining named network profiles and contract addresses:
+ *   {
+ *     "defaultProfile": "testnet",
+ *     "profiles": {
+ *       "testnet": {
+ *         "network": "testnet",
+ *         "horizonUrl": "https://horizon-testnet.stellar.org",
+ *         "rpcUrl": "https://soroban-testnet.stellar.org",
+ *         "contracts": {
+ *           "rwaToken": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+ *           "custodyValidator": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+ *         }
+ *       }
+ *     }
+ *   }
+ *
+ * Environment Variables:
+ *   STELLAR_SECRET   Signing secret key used when `--secret-env` is specified
+ *   SATS_CLI_CONFIG  Default path to CLI JSON config file
+ *   SATS_NETWORK     Default network name (`testnet` by default when omitted)
+ *
+ * Safe Network Selection:
+ *   - Commands default to `testnet` when `--network` / profile is omitted.
+ *   - Use `--dry-run` on `create-pool` and `liquidate` to validate parameters
+ *     and inspect planned outputs without submitting any on-chain transaction.
+ *   - Write commands targeting `mainnet` require explicit confirmation via
+ *     `--confirm-mainnet` (non-interactive) or typing `MAINNET` interactively.
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import * as readline from 'readline';
 import {
   Asset,
   LiquidityPoolAsset,
@@ -6,28 +50,143 @@ import {
   Keypair,
   Horizon
 } from 'stellar-sdk';
-import * as readline from 'readline';
 import { STELLAR_NETWORKS } from './constants';
 import { CustodyClient } from './custody';
 import { runTypeGenerator } from './typeGenerator';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CLI Errors & Exit Codes
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class CliError extends Error {
+  readonly code: string;
+  readonly exitCode: number;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    code = 'CLI_ERROR',
+    exitCode = 1,
+    details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = new.target.name;
+    this.code = code;
+    this.exitCode = exitCode;
+    this.details = details;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export class CliValidationError extends CliError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 'CLI_VALIDATION_ERROR', 2, details);
+  }
+}
+
+export class CliAuthorizationError extends CliError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 'CLI_MAINNET_CONFIRMATION_REQUIRED', 3, details);
+  }
+}
+
+export class CliNetworkError extends CliError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 'CLI_NETWORK_ERROR', 4, details);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Configuration, Output & Verification Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CliProfileConfig {
+  network?: string;
+  horizonUrl?: string;
+  rpcUrl?: string;
+  contracts?: Record<string, string>;
+}
+
+export interface CliConfigFile {
+  defaultProfile?: string;
+  profiles?: Record<string, CliProfileConfig>;
+  [key: string]: unknown;
+}
+
+export interface ResolvedCliNetwork {
+  profile: string;
+  network: string;
+  horizonUrl: string;
+  rpcUrl?: string;
+  passphrase: string;
+  contracts: Record<string, string>;
+}
+
+export interface EnvRequirement {
+  name: string;
+  description: string;
+}
+
+export interface CliTransactionResult {
+  command: 'create-pool' | 'liquidate';
+  network: string;
+  status: 'submitted' | 'dry-run' | 'skipped';
+  dryRun: boolean;
+  transactionHash: string | null;
+  ledger: number | string | null;
+  explorerUrl: string | null;
+  details: Record<string, unknown>;
+}
+
+export interface ContractVerificationEntry {
+  name: string;
+  address: string;
+  kind: 'contract' | 'account' | 'unknown';
+  valid: boolean;
+  network: string;
+  reason?: string;
+  rpcReachable?: boolean;
+}
+
+export interface VerifyContractsReport {
+  command: 'verify-contracts';
+  network: string;
+  horizonUrl: string;
+  rpcUrl?: string;
+  checkedOnline: boolean;
+  allValid: boolean;
+  total: number;
+  validCount: number;
+  invalidCount: number;
+  contracts: ContractVerificationEntry[];
+}
+
+export interface CliExecutionDeps {
+  env?: NodeJS.ProcessEnv;
+  confirmRl?: readline.Interface;
+  checkEndpoint?: (url: string) => Promise<boolean>;
+}
+
+const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
+const ACCOUNT_ID_REGEX = /^G[A-Z2-7]{55}$/;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Asset utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Helper to parse asset string
 function parseAsset(assetStr: string): Asset {
   if (assetStr.toUpperCase() === 'XLM' || assetStr.toUpperCase() === 'NATIVE') {
     return Asset.native();
   }
   const parts = assetStr.split(':');
   if (parts.length !== 2) {
-    throw new Error(`Invalid asset format: "${assetStr}". Expected "XLM" or "CODE:ISSUER"`);
+    throw new CliValidationError(
+      `Invalid asset format: "${assetStr}". Expected "XLM" or "CODE:ISSUER"`
+    );
   }
   return new Asset(parts[0], parts[1]);
 }
 
-// Compare two assets lexicographically
 function compareAssets(a: Asset, b: Asset): number {
   if (a.isNative() && b.isNative()) return 0;
   if (a.isNative()) return -1;
@@ -40,41 +199,401 @@ function compareAssets(a: Asset, b: Asset): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Help text
+// Config, Environment & Safety Guards
 // ─────────────────────────────────────────────────────────────────────────────
 
-function printHelp() {
-  console.log(`
-Stellar RWA Suite CLI
+export function validateRequiredEnv(
+  requirements: EnvRequirement[],
+  env: NodeJS.ProcessEnv = process.env
+): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  const missing: EnvRequirement[] = [];
 
-Usage:
-  node dist/cli.js <command> [options]
-  node dist/cli.js --interactive
-  node dist/cli.js -i
+  for (const req of requirements) {
+    const val = env[req.name];
+    if (typeof val !== 'string' || val.trim().length === 0) {
+      missing.push(req);
+    } else {
+      resolved[req.name] = val.trim();
+    }
+  }
 
-Commands:
-  create-pool     Create and fund a Stellar liquidity pool
-  liquidate       Liquidate an undercollateralized RWA position
-  generate-types  Generate TypeScript types from Soroban contract schemas
+  if (missing.length > 0) {
+    const names = missing.map((m) => `${m.name} (${m.description})`).join(', ');
+    throw new CliValidationError(
+      `Missing required environment variable(s): ${names}`,
+      { missing: missing.map((m) => m.name) }
+    );
+  }
 
-Global Options:
-  --interactive, -i   Launch guided interactive prompt mode
-  --help,       -h    Show this help message
-
-Run "node dist/cli.js <command> --help" for command-specific options.
-`);
+  return resolved;
 }
 
-function printGenerateTypesHelp() {
-  console.log(`
+export function loadNetworkProfile(
+  configPath: string,
+  profileName?: string
+): ResolvedCliNetwork {
+  if (!configPath || configPath.trim().length === 0) {
+    throw new CliValidationError('Config file path cannot be empty');
+  }
+  if (!fs.existsSync(configPath)) {
+    throw new CliValidationError(`CLI config file not found: ${configPath}`);
+  }
+
+  let raw: CliConfigFile;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as CliConfigFile;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new CliValidationError(`Invalid JSON in CLI config file "${configPath}": ${msg}`);
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new CliValidationError(`CLI config file "${configPath}" must export a JSON object`);
+  }
+
+  const profileMap: Record<string, CliProfileConfig> =
+    raw.profiles && typeof raw.profiles === 'object' && !Array.isArray(raw.profiles)
+      ? raw.profiles
+      : Object.fromEntries(
+          Object.entries(raw).filter(
+            ([k, v]) => k !== 'defaultProfile' && v != null && typeof v === 'object' && !Array.isArray(v)
+          ) as Array<[string, CliProfileConfig]>
+        );
+
+  const selectedName =
+    profileName ||
+    (typeof raw.defaultProfile === 'string' && raw.defaultProfile.trim().length > 0
+      ? raw.defaultProfile.trim()
+      : 'testnet');
+
+  const profile = profileMap[selectedName];
+  if (!profile || typeof profile !== 'object') {
+    const available = Object.keys(profileMap);
+    throw new CliValidationError(
+      `Network profile "${selectedName}" not found in "${configPath}". Available profiles: ${
+        available.length > 0 ? available.join(', ') : '(none)'
+      }`
+    );
+  }
+
+  const networkName = profile.network || selectedName;
+  const baseNetwork = STELLAR_NETWORKS[networkName];
+  if (!baseNetwork) {
+    throw new CliValidationError(
+      `Unsupported network "${networkName}" in profile "${selectedName}". Supported: ${Object.keys(STELLAR_NETWORKS).join(', ')}`
+    );
+  }
+
+  const horizonUrl = profile.horizonUrl || baseNetwork.horizonUrl;
+  try {
+    new URL(horizonUrl);
+  } catch {
+    throw new CliValidationError(
+      `Invalid horizonUrl "${horizonUrl}" in profile "${selectedName}"`
+    );
+  }
+
+  if (profile.rpcUrl) {
+    try {
+      new URL(profile.rpcUrl);
+    } catch {
+      throw new CliValidationError(
+        `Invalid rpcUrl "${profile.rpcUrl}" in profile "${selectedName}"`
+      );
+    }
+  }
+
+  const contracts: Record<string, string> = {};
+  if (profile.contracts && typeof profile.contracts === 'object') {
+    for (const [k, v] of Object.entries(profile.contracts)) {
+      if (typeof v === 'string' && v.trim().length > 0) {
+        contracts[k] = v.trim();
+      }
+    }
+  }
+
+  return {
+    profile: selectedName,
+    network: networkName,
+    horizonUrl,
+    rpcUrl: profile.rpcUrl,
+    passphrase: baseNetwork.passphrase,
+    contracts,
+  };
+}
+
+export function resolveNetworkSettings(
+  options: Record<string, string>,
+  env: NodeJS.ProcessEnv = process.env
+): ResolvedCliNetwork {
+  const configPath =
+    (options['config'] && options['config'] !== 'true' ? options['config'] : undefined) ??
+    (env.SATS_CLI_CONFIG && env.SATS_CLI_CONFIG.trim().length > 0 ? env.SATS_CLI_CONFIG.trim() : undefined);
+
+  const explicitProfile =
+    options['profile'] && options['profile'] !== 'true' ? options['profile'] : undefined;
+
+  let resolved: ResolvedCliNetwork;
+  if (configPath) {
+    resolved = loadNetworkProfile(configPath, explicitProfile || options['network']);
+    if (options['network'] && options['network'] !== 'true' && !explicitProfile) {
+      // Allow `--network` override if profile was resolved via `--profile` or default
+      const explicitNet = STELLAR_NETWORKS[options['network']];
+      if (!explicitNet) {
+        throw new CliValidationError(
+          `Unsupported network: "${options['network']}". Supported: ${Object.keys(STELLAR_NETWORKS).join(', ')}`
+        );
+      }
+    }
+  } else {
+    const networkName =
+      (options['network'] && options['network'] !== 'true' ? options['network'] : undefined) ||
+      (env.SATS_NETWORK && env.SATS_NETWORK.trim().length > 0 ? env.SATS_NETWORK.trim() : 'testnet');
+    const net = STELLAR_NETWORKS[networkName];
+    if (!net) {
+      throw new CliValidationError(
+        `Unsupported network: "${networkName}". Supported: ${Object.keys(STELLAR_NETWORKS).join(', ')}`
+      );
+    }
+    resolved = {
+      profile: networkName,
+      network: networkName,
+      horizonUrl: net.horizonUrl,
+      passphrase: net.passphrase,
+      contracts: {},
+    };
+  }
+
+  if (options['horizon-url'] && options['horizon-url'] !== 'true') {
+    try {
+      new URL(options['horizon-url']);
+    } catch {
+      throw new CliValidationError(`Invalid --horizon-url: "${options['horizon-url']}"`);
+    }
+    resolved = { ...resolved, horizonUrl: options['horizon-url'] };
+  }
+
+  if (options['rpc-url'] && options['rpc-url'] !== 'true') {
+    try {
+      new URL(options['rpc-url']);
+    } catch {
+      throw new CliValidationError(`Invalid --rpc-url: "${options['rpc-url']}"`);
+    }
+    resolved = { ...resolved, rpcUrl: options['rpc-url'] };
+  }
+
+  return resolved;
+}
+
+export function resolveSecretValue(
+  options: Record<string, string>,
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  if (options['secret-env']) {
+    const envVarName = options['secret-env'] === 'true' ? 'STELLAR_SECRET' : options['secret-env'];
+    const vars = validateRequiredEnv(
+      [{ name: envVarName, description: 'Stellar signing secret key' }],
+      env
+    );
+    return vars[envVarName];
+  }
+
+  const secret = options['secret'];
+  if (!secret || secret === 'true') {
+    return undefined;
+  }
+
+  if (secret.startsWith('env:')) {
+    const envVarName = secret.slice(4).trim();
+    if (!envVarName) {
+      throw new CliValidationError('Invalid env: reference in --secret');
+    }
+    const vars = validateRequiredEnv(
+      [{ name: envVarName, description: 'Stellar signing secret key' }],
+      env
+    );
+    return vars[envVarName];
+  }
+
+  return secret;
+}
+
+export async function confirmMainnetWrite(
+  command: string,
+  options: Record<string, string>,
+  deps: CliExecutionDeps = {}
+): Promise<void> {
+  if (options['confirm-mainnet'] === 'true') {
+    return;
+  }
+
+  const rl = deps.confirmRl;
+  if (!rl && !process.stdin.isTTY) {
+    throw new CliAuthorizationError(
+      `Mainnet write guard blocked "${command}". Re-run interactively or pass --confirm-mainnet to authorize live mainnet submission.`,
+      { command, network: 'mainnet' }
+    );
+  }
+
+  const ownedRl =
+    rl ??
+    readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+  try {
+    console.warn(
+      `\n⚠️  MAINNET WRITE GUARD: You are about to execute "${command}" on Stellar MAINNET.`
+    );
+    const answer = await prompt(
+      ownedRl,
+      'Type "MAINNET" to confirm live transaction submission (or anything else to abort)',
+      { defaultValue: 'abort' }
+    );
+    if (answer !== 'MAINNET') {
+      throw new CliAuthorizationError(
+        `Mainnet confirmation failed for "${command}" (expected "MAINNET", received "${answer}"). Operation aborted.`,
+        { command, network: 'mainnet' }
+      );
+    }
+  } finally {
+    if (!rl) {
+      ownedRl.close();
+    }
+  }
+}
+
+export function buildExplorerUrl(network: string, hash: string | null): string | null {
+  if (!hash) return null;
+  if (network === 'mainnet') {
+    return `https://stellar.expert/explorer/public/tx/${hash}`;
+  }
+  if (network === 'testnet') {
+    return `https://stellar.expert/explorer/testnet/tx/${hash}`;
+  }
+  return null;
+}
+
+export function formatCliOutput(payload: unknown, jsonMode: boolean): string {
+  return jsonMode ? JSON.stringify(payload, null, 2) : String(payload);
+}
+
+export function formatTransactionResult(
+  result: CliTransactionResult,
+  jsonMode: boolean
+): string {
+  if (jsonMode) {
+    return JSON.stringify(result, null, 2);
+  }
+
+  const lines: string[] = [
+    result.dryRun
+      ? `[DRY-RUN] ${result.command} validated (no transaction submitted)`
+      : `Command ${result.command} (${result.status})`,
+    `  Network:          ${result.network}`,
+    `  Status:           ${result.status}`,
+    `  Transaction Hash: ${result.transactionHash ?? 'none (dry-run)'}`,
+    `  Ledger:           ${result.ledger ?? 'pending'}`,
+  ];
+  if (result.explorerUrl) {
+    lines.push(`  Explorer URL:     ${result.explorerUrl}`);
+  }
+  return lines.join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Help text & documentation
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const CLI_HELP_METADATA = {
+  name: 'stellar-rwa-cli',
+  commands: [
+    'create-pool',
+    'liquidate',
+    'generate-types',
+    'verify-contracts',
+  ] as const,
+  defaultNetwork: 'testnet',
+  envVars: [
+    { name: 'STELLAR_SECRET', description: 'Signing secret key used with --secret-env' },
+    { name: 'SATS_CLI_CONFIG', description: 'Default JSON config file path for --config' },
+    { name: 'SATS_NETWORK', description: 'Default Stellar network (testnet, mainnet, futurenet, standalone)' },
+  ],
+};
+
+export function getCliHelpText(command?: string): string {
+  if (command === 'create-pool') {
+    return `
+Stellar RWA Suite CLI - Pool Creation Command
+
+Usage:
+  node dist/cli.js create-pool [options]
+
+Options:
+  --asset-a <asset>      First asset (e.g. "XLM" or "CODE:ISSUER") [required]
+  --asset-b <asset>      Second asset (e.g. "CODE:ISSUER") [required]
+  --amount-a <amount>    Maximum amount of Asset A to deposit [required]
+  --amount-b <amount>    Maximum amount of Asset B to deposit [required]
+  --fee <fee>            Liquidity pool fee in basis points (default: 30)
+  --secret <secret>      Secret key of the depositor (or use --secret-env) [required]
+  --secret-env [VAR]     Read signing secret from env var (default: STELLAR_SECRET)
+  --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
+  --config <file.json>   Load network profile and contract defaults from JSON config
+  --profile <name>       Profile name inside --config (default: config.defaultProfile or testnet)
+  --horizon-url <url>    Horizon server URL (optional, overrides default for network)
+  --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
+  --dry-run              Validate parameters and compute pool bounds without submitting
+  --confirm-mainnet      Acknowledge live mainnet submission without interactive prompt
+  --json                 Output structured JSON result
+  --help, -h             Show this help message
+
+Examples:
+  node dist/cli.js create-pool --asset-a XLM --asset-b USDC:GA5Z... --amount-a 100 --amount-b 10 --secret S... --dry-run
+  STELLAR_SECRET=S... node dist/cli.js create-pool --asset-a XLM --asset-b USDC:GA5Z... --amount-a 50 --amount-b 5 --secret-env --json
+  node dist/cli.js create-pool --config sats.config.json --profile mainnet --confirm-mainnet --asset-a XLM --asset-b USDC:GA5Z... --amount-a 100 --amount-b 10 --secret-env
+`;
+  }
+
+  if (command === 'liquidate') {
+    return `
+Stellar RWA Suite CLI - Liquidate Command
+
+Liquidates an undercollateralized RWA position by triggering an insurance claim
+on the Custody Validator contract. Checks collateralization unless --force is set.
+
+Usage:
+  node dist/cli.js liquidate [options]
+
+Options:
+  --asset-id <address>          On-chain contract address of the RWA token [required unless in --config]
+  --custody-validator <address> Custody Validator contract address [required unless in --config]
+  --secret <secret>             Secret key of authorized admin (or use --secret-env) [required]
+  --secret-env [VAR]            Read signing secret from env var (default: STELLAR_SECRET)
+  --reason <reason>             Short reason code for the claim (default: "undercollateralized")
+  --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
+  --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
+  --config <file.json>          Load network profile and contract defaults from JSON config
+  --profile <name>              Profile name inside --config
+  --horizon-url <url>           Horizon server URL (optional, overrides default for network)
+  --force                       Skip collateralization check and liquidate unconditionally
+  --dry-run                     Validate inputs and mainnet guards without calling contract
+  --confirm-mainnet             Acknowledge live mainnet submission without interactive prompt
+  --json                        Output structured JSON result
+  --help, -h                    Show this help message
+
+Examples:
+  node dist/cli.js liquidate --asset-id C... --custody-validator C... --evidence-hash <64-hex> --secret S... --dry-run
+  STELLAR_SECRET=S... node dist/cli.js liquidate --config sats.config.json --evidence-hash <64-hex> --secret-env --json
+`;
+  }
+
+  if (command === 'generate-types') {
+    return `
 Stellar RWA Suite CLI - Type Generator
 
-Generates a TypeScript module from Soroban contract SCHEMA (spec) entries:
-interfaces for structs, discriminated unions / enums for Soroban unions and
-enums, and a <Name>Client interface with one method signature per contract
-function. Map, Vec, Option, tuples, BytesN and custom structs/enums are all
-handled. A warning is emitted for any generated type whose name collides with
-a manually-maintained type.
+Generates a TypeScript module from Soroban contract SCHEMA (spec) entries.
 
 Usage:
   npx rwa-sdk generate-types --contracts <id[,id...]> --rpc-url <url> [options]
@@ -83,17 +602,132 @@ Usage:
 Options:
   --contracts <ids>       Comma-separated contract ids to fetch from the network
   --rpc-url <url>         Soroban RPC URL (required with --contracts)
-  --network <network>     Network passphrase preset: testnet, mainnet, futurenet,
-                          standalone (used with --contracts; default: testnet)
-  --schema <file.json>    Local schema JSON file (repeatable; array of spec
-                          entries or { "entries": [...] })
+  --network <network>     Network passphrase preset: testnet, mainnet, futurenet, standalone (default: testnet)
+  --schema <file.json>    Local schema JSON file (repeatable)
   --out <file.ts>         Write the generated module here (default: stdout)
   --manual-types <file>   Manual types module to diff generated names against
-                          (default: sdk/src/types.ts when present)
   --no-client             Do not emit the <Name>Client interface
   --dry-run               Print the result and warnings without writing --out
+  --json                  Emit structured JSON summary for generated types
   --help, -h              Show this help message
-`);
+
+Examples:
+  node dist/cli.js generate-types --schema ./spec.json --out ./sdk/src/generated.ts
+  node dist/cli.js generate-types --contracts C... --rpc-url https://soroban-testnet.stellar.org --dry-run --json
+`;
+  }
+
+  if (command === 'verify-contracts') {
+    return `
+Stellar RWA Suite CLI - Verify Contracts Command
+
+Validates configured Soroban contract IDs (and optional account IDs) from CLI
+flags or a --config network profile before deploying or running write operations.
+
+Usage:
+  node dist/cli.js verify-contracts [options]
+
+Options:
+  --config <file.json>          Load contract addresses from a JSON profile
+  --profile <name>              Profile name inside --config
+  --network <network>           Stellar network preset (default: testnet)
+  --asset-id <address>          Verify an RWA token contract address
+  --custody-validator <address> Verify a Custody Validator contract address
+  --contracts <id1,id2,...>     Comma-separated list of contract IDs to verify
+  --contract <name=address>     Named contract entry (repeatable)
+  --allow-account               Also accept G... Stellar account public keys
+  --check-rpc                   Check Horizon/RPC endpoint reachability (offline syntax-only by default)
+  --json                        Emit machine-readable JSON verification report
+  --help, -h                    Show this help message
+
+Examples:
+  node dist/cli.js verify-contracts --config sats.config.json --profile testnet --json
+  node dist/cli.js verify-contracts --contracts CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM --json
+  node dist/cli.js verify-contracts --contract rwaToken=C... --contract custody=C... --check-rpc
+`;
+  }
+
+  return `
+Stellar RWA Suite CLI
+
+Install & Setup:
+  npm install && npm run build
+  node dist/cli.js <command> [options]
+
+Usage:
+  node dist/cli.js <command> [options]
+  node dist/cli.js --interactive
+  node dist/cli.js -i
+
+Commands:
+  create-pool       Create and fund a Stellar liquidity pool
+  liquidate         Liquidate an undercollateralized RWA position
+  generate-types    Generate TypeScript types from Soroban contract schemas
+  verify-contracts  Verify configured Soroban contract addresses and endpoints
+
+Global Options:
+  --interactive, -i   Launch guided interactive prompt mode
+  --config <path>     Load named network profile & contracts JSON (or env SATS_CLI_CONFIG)
+  --profile <name>    Select profile inside --config (default: testnet)
+  --json              Output machine-readable JSON (for supported commands / --help)
+  --help, -h          Show this help message
+
+Safe Network Defaults:
+  - Defaults to "testnet" unless --network or --profile overrides it.
+  - Use --dry-run on create-pool and liquidate before live submission.
+  - Mainnet writes require explicit confirmation (--confirm-mainnet or typing MAINNET).
+
+Examples:
+  node dist/cli.js verify-contracts --config sats.config.json --json
+  node dist/cli.js create-pool --asset-a XLM --asset-b USDC:GA5Z... --amount-a 100 --amount-b 10 --secret S... --dry-run
+  node dist/cli.js liquidate --asset-id C... --custody-validator C... --evidence-hash <64-hex> --secret-env --dry-run
+  node dist/cli.js generate-types --schema ./spec.json --dry-run
+  node dist/cli.js --interactive
+`;
+}
+
+function printHelp(jsonMode = false) {
+  if (jsonMode) {
+    console.log(formatCliOutput({ ...CLI_HELP_METADATA, help: getCliHelpText() }, true));
+    return;
+  }
+  console.log(getCliHelpText());
+}
+
+function printGenerateTypesHelp(jsonMode = false) {
+  const text = getCliHelpText('generate-types');
+  if (jsonMode) {
+    console.log(formatCliOutput({ command: 'generate-types', help: text }, true));
+    return;
+  }
+  console.log(text);
+}
+
+function printCreatePoolHelp(jsonMode = false) {
+  const text = getCliHelpText('create-pool');
+  if (jsonMode) {
+    console.log(formatCliOutput({ command: 'create-pool', help: text }, true));
+    return;
+  }
+  console.log(text);
+}
+
+function printLiquidateHelp(jsonMode = false) {
+  const text = getCliHelpText('liquidate');
+  if (jsonMode) {
+    console.log(formatCliOutput({ command: 'liquidate', help: text }, true));
+    return;
+  }
+  console.log(text);
+}
+
+function printVerifyContractsHelp(jsonMode = false) {
+  const text = getCliHelpText('verify-contracts');
+  if (jsonMode) {
+    console.log(formatCliOutput({ command: 'verify-contracts', help: text }, true));
+    return;
+  }
+  console.log(text);
 }
 
 function collectRepeated(args: string[], flag: string): string[] {
@@ -107,121 +741,22 @@ function collectRepeated(args: string[], flag: string): string[] {
   return out;
 }
 
-async function runGenerateTypes(args: string[]): Promise<void> {
-  if (args.includes('--help') || args.includes('-h')) {
-    printGenerateTypesHelp();
-    process.exit(0);
-  }
-
-  const options = parseArgs(args);
-  const contracts = (options['contracts'] || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const schemaFiles = collectRepeated(args, '--schema');
-  if (options['schema'] && !schemaFiles.includes(options['schema']) && options['schema'] !== 'true') {
-    schemaFiles.push(options['schema']);
-  }
-
-  if (contracts.length === 0 && schemaFiles.length === 0) {
-    console.error('Error: provide --contracts <ids> or at least one --schema <file.json>');
-    printGenerateTypesHelp();
-    process.exit(1);
-  }
-
-  const networkName = options['network'] || 'testnet';
-  const networkConfig = STELLAR_NETWORKS[networkName];
-  if (contracts.length > 0 && !networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
-  }
-
-  let manualTypesFile = options['manual-types'];
-  if (!manualTypesFile) {
-    const candidate = require('path').join(__dirname, 'types.ts');
-    if (require('fs').existsSync(candidate)) manualTypesFile = candidate;
-  }
-
-  const result = await runTypeGenerator({
-    schemaFiles,
-    contracts,
-    rpcUrl: options['rpc-url'],
-    networkPassphrase: networkConfig?.passphrase,
-    outFile: options['out'],
-    emitClient: options['no-client'] !== 'true',
-    manualTypesFile,
-    dryRun: options['dry-run'] === 'true',
-  });
-
-  console.log(`Loaded ${result.schemasLoaded} schema(s); declared ${result.declaredTypes.length} type(s).`);
-  for (const warning of result.warnings) {
-    console.warn(`⚠️  ${warning}`);
-  }
-
-  if (result.written) {
-    console.log(`✅ Wrote ${result.outFile}`);
-  } else if (options['out'] && options['dry-run'] === 'true') {
-    console.log(`(dry run) would write ${options['out']}`);
-    console.log(result.code);
-  } else {
-    console.log(result.code);
-  }
-}
-
-function printCreatePoolHelp() {
-  console.log(`
-Stellar RWA Suite CLI - Pool Creation Command
-
-Usage:
-  node dist/cli.js create-pool [options]
-
-Options:
-  --asset-a <asset>      First asset (e.g. "XLM" or "CODE:ISSUER") [required]
-  --asset-b <asset>      Second asset (e.g. "CODE:ISSUER") [required]
-  --amount-a <amount>    Maximum amount of Asset A to deposit [required]
-  --amount-b <amount>    Maximum amount of Asset B to deposit [required]
-  --fee <fee>            Liquidity pool fee in basis points (default: 30)
-  --secret <secret>      Secret key of the depositor [required]
-  --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
-  --horizon-url <url>    Horizon server URL (optional, overrides default for network)
-  --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
-  --help, -h             Show this help message
-`);
-}
-
-function printLiquidateHelp() {
-  console.log(`
-Stellar RWA Suite CLI - Liquidate Command
-
-Liquidates an undercollateralized RWA position by triggering an insurance claim
-on the Custody Validator contract. The command first checks whether the position
-is actually undercollateralized (collateral value < total token supply). Use
---force to skip the collateralization check and proceed unconditionally.
-
-Usage:
-  node dist/cli.js liquidate [options]
-
-Options:
-  --asset-id <address>          On-chain contract address of the RWA token [required]
-  --custody-validator <address> Custody Validator contract address [required]
-  --secret <secret>             Secret key of the authorized admin account [required]
-  --reason <reason>             Short reason code for the claim (default: "undercollateralized")
-  --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
-  --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
-  --horizon-url <url>           Horizon server URL (optional, overrides default for network)
-  --force                       Skip collateralization check and liquidate unconditionally
-  --help, -h                    Show this help message
-`);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Argument parsing
 // ─────────────────────────────────────────────────────────────────────────────
 
-function parseArgs(args: string[]): Record<string, string> {
+export function parseArgs(args: string[]): Record<string, string> {
   const options: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg.startsWith('--')) {
+      const eqIdx = arg.indexOf('=');
+      if (eqIdx > 2) {
+        const key = arg.slice(2, eqIdx);
+        const val = arg.slice(eqIdx + 1);
+        options[key] = val;
+        continue;
+      }
       const key = arg.slice(2);
       const val = args[i + 1];
       if (val && !val.startsWith('--')) {
@@ -257,7 +792,7 @@ export async function prompt(
   const { description, defaultValue, validate } = opts;
 
   if (description) {
-    console.log(`  ℹ  ${description}`);
+    console.log(`\n  ℹ  ${description}`);
   }
 
   const displayQuestion = defaultValue
@@ -574,49 +1109,317 @@ export async function runInteractive(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// generate-types command
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function runGenerateTypes(args: string[]): Promise<void> {
+  const options = parseArgs(args);
+  const jsonMode = options['json'] === 'true';
+  if (args.includes('--help') || args.includes('-h')) {
+    printGenerateTypesHelp(jsonMode);
+    return;
+  }
+
+  const contracts = (options['contracts'] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const schemaFiles = collectRepeated(args, '--schema');
+  if (options['schema'] && !schemaFiles.includes(options['schema']) && options['schema'] !== 'true') {
+    schemaFiles.push(options['schema']);
+  }
+
+  if (contracts.length === 0 && schemaFiles.length === 0) {
+    throw new CliValidationError('Provide --contracts <ids> or at least one --schema <file.json>');
+  }
+
+  const networkSettings = resolveNetworkSettings(options);
+  let manualTypesFile = options['manual-types'];
+  if (!manualTypesFile) {
+    const candidate = path.join(__dirname, 'types.ts');
+    if (fs.existsSync(candidate)) manualTypesFile = candidate;
+  }
+
+  const result = await runTypeGenerator({
+    schemaFiles,
+    contracts,
+    rpcUrl: options['rpc-url'] || networkSettings.rpcUrl,
+    networkPassphrase: networkSettings.passphrase,
+    outFile: options['out'],
+    emitClient: options['no-client'] !== 'true',
+    manualTypesFile,
+    dryRun: options['dry-run'] === 'true',
+  });
+
+  if (jsonMode) {
+    console.log(
+      formatCliOutput(
+        {
+          command: 'generate-types',
+          network: networkSettings.network,
+          schemasLoaded: result.schemasLoaded,
+          declaredTypes: result.declaredTypes,
+          warnings: result.warnings,
+          written: result.written,
+          outFile: result.outFile ?? null,
+          dryRun: options['dry-run'] === 'true',
+        },
+        true
+      )
+    );
+    return;
+  }
+
+  console.log(`Loaded ${result.schemasLoaded} schema(s); declared ${result.declaredTypes.length} type(s).`);
+  for (const warning of result.warnings) {
+    console.warn(`⚠️  ${warning}`);
+  }
+
+  if (result.written) {
+    console.log(`✅ Wrote ${result.outFile}`);
+  } else if (options['out'] && options['dry-run'] === 'true') {
+    console.log(`(dry run) would write ${options['out']}`);
+    console.log(result.code);
+  } else {
+    console.log(result.code);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// verify-contracts command
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function verifyContractEntries(
+  entries: Array<{ name: string; address: string }>,
+  network: string,
+  allowAccount = false
+): ContractVerificationEntry[] {
+  return entries.map(({ name, address }) => {
+    const trimmed = address.trim();
+    if (CONTRACT_ID_REGEX.test(trimmed)) {
+      return {
+        name,
+        address: trimmed,
+        kind: 'contract',
+        valid: true,
+        network,
+      };
+    }
+    if (ACCOUNT_ID_REGEX.test(trimmed)) {
+      return {
+        name,
+        address: trimmed,
+        kind: 'account',
+        valid: allowAccount,
+        network,
+        ...(allowAccount
+          ? {}
+          : { reason: 'Address is a Stellar G... account public key; expected a C... Soroban contract ID (pass --allow-account to allow accounts)' }),
+      };
+    }
+    return {
+      name,
+      address: trimmed,
+      kind: 'unknown',
+      valid: false,
+      network,
+      reason: 'Invalid Stellar contract ID format (expected 56-character StrKey starting with "C" using Base32 A-Z, 2-7)',
+    };
+  });
+}
+
+export async function runVerifyContracts(
+  args: string[],
+  deps: CliExecutionDeps = {}
+): Promise<VerifyContractsReport> {
+  const options = parseArgs(args);
+  const jsonMode = options['json'] === 'true';
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printVerifyContractsHelp(jsonMode);
+    return {
+      command: 'verify-contracts',
+      network: 'testnet',
+      horizonUrl: STELLAR_NETWORKS.testnet.horizonUrl,
+      checkedOnline: false,
+      allValid: true,
+      total: 0,
+      validCount: 0,
+      invalidCount: 0,
+      contracts: [],
+    };
+  }
+
+  const env = deps.env ?? process.env;
+  const networkSettings = resolveNetworkSettings(options, env);
+  const allowAccount = options['allow-account'] === 'true';
+  const checkRpc = options['check-rpc'] === 'true';
+
+  const candidates: Array<{ name: string; address: string }> = [];
+  for (const [name, address] of Object.entries(networkSettings.contracts)) {
+    candidates.push({ name, address });
+  }
+  if (options['asset-id'] && options['asset-id'] !== 'true') {
+    candidates.push({ name: 'asset-id', address: options['asset-id'] });
+  }
+  if (options['custody-validator'] && options['custody-validator'] !== 'true') {
+    candidates.push({ name: 'custody-validator', address: options['custody-validator'] });
+  }
+  if (options['contracts'] && options['contracts'] !== 'true') {
+    const split = options['contracts']
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    split.forEach((address, idx) => {
+      candidates.push({ name: `contract-${idx + 1}`, address });
+    });
+  }
+  for (const raw of collectRepeated(args, '--contract')) {
+    const eq = raw.indexOf('=');
+    if (eq > 0) {
+      candidates.push({ name: raw.slice(0, eq).trim(), address: raw.slice(eq + 1).trim() });
+    } else {
+      candidates.push({ name: `contract-${candidates.length + 1}`, address: raw.trim() });
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new CliValidationError(
+      'No contract addresses provided. Supply --config, --asset-id, --custody-validator, --contract, or --contracts.'
+    );
+  }
+
+  const verified = verifyContractEntries(candidates, networkSettings.network, allowAccount);
+
+  if (checkRpc) {
+    const targetUrl = networkSettings.rpcUrl || networkSettings.horizonUrl;
+    const probe =
+      deps.checkEndpoint ??
+      (async (url: string): Promise<boolean> => {
+        if (typeof fetch !== 'function') return false;
+        const res = await fetch(url);
+        return res.ok;
+      });
+    let reachable = false;
+    try {
+      reachable = await probe(targetUrl);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new CliNetworkError(
+        `Failed to reach Stellar endpoint "${targetUrl}": ${msg}`,
+        { url: targetUrl }
+      );
+    }
+    if (!reachable) {
+      throw new CliNetworkError(`Stellar endpoint "${targetUrl}" returned unhealthy response`, {
+        url: targetUrl,
+      });
+    }
+    for (const entry of verified) {
+      entry.rpcReachable = reachable;
+    }
+  }
+
+  const validCount = verified.filter((c) => c.valid).length;
+  const invalidCount = verified.length - validCount;
+  const report: VerifyContractsReport = {
+    command: 'verify-contracts',
+    network: networkSettings.network,
+    horizonUrl: networkSettings.horizonUrl,
+    ...(networkSettings.rpcUrl ? { rpcUrl: networkSettings.rpcUrl } : {}),
+    checkedOnline: checkRpc,
+    allValid: invalidCount === 0,
+    total: verified.length,
+    validCount,
+    invalidCount,
+    contracts: verified,
+  };
+
+  if (jsonMode) {
+    console.log(formatCliOutput(report, true));
+  } else {
+    console.log(`Contract Verification (${report.network} — ${report.horizonUrl}):`);
+    for (const entry of verified) {
+      const mark = entry.valid ? '✅' : '❌';
+      const detail = entry.reason ? ` — ${entry.reason}` : ` (${entry.kind})`;
+      console.log(`  ${mark} ${entry.name}: ${entry.address}${detail}`);
+    }
+  }
+
+  if (!report.allValid) {
+    throw new CliValidationError(
+      `Contract verification failed: ${invalidCount} of ${verified.length} address(es) invalid`,
+      { report }
+    );
+  }
+
+  return report;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // create-pool command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runCreatePool(args: string[]): Promise<void> {
+export async function runCreatePool(
+  args: string[],
+  deps: CliExecutionDeps = {}
+): Promise<CliTransactionResult | void> {
+  const options = parseArgs(args);
+  const jsonMode = options['json'] === 'true';
+  const dryRun = options['dry-run'] === 'true';
+  const env = deps.env ?? process.env;
+
   if (args.includes('--help') || args.includes('-h')) {
-    printCreatePoolHelp();
-    process.exit(0);
+    printCreatePoolHelp(jsonMode);
+    return;
   }
 
-  const options = parseArgs(args);
+  const secret = resolveSecretValue(options, env);
+  if (secret) {
+    options['secret'] = secret;
+  }
+
   const required = ['asset-a', 'asset-b', 'amount-a', 'amount-b', 'secret'];
   for (const req of required) {
-    if (!options[req]) {
-      console.error(`Error: Missing required option --${req}`);
-      printCreatePoolHelp();
-      process.exit(1);
+    if (!options[req] || options[req] === 'true') {
+      if (!jsonMode) {
+        console.error(`Error: Missing required option --${req}`);
+      }
+      throw new CliValidationError(`Missing required option --${req}`);
     }
   }
+
+  const networkSettings = resolveNetworkSettings(options, env);
+  const networkName = networkSettings.network;
+  const horizonUrl = networkSettings.horizonUrl;
 
   const assetAStr = options['asset-a'];
   const assetBStr = options['asset-b'];
   const amountA = options['amount-a'];
   const amountB = options['amount-b'];
   const feeStr = options['fee'] || '30';
-  const secret = options['secret'];
-  const networkName = options['network'] || 'testnet';
   const slippageStr = options['slippage'] || '0.01';
+
+  const amountAErr = validators.positiveNumber(amountA);
+  if (amountAErr) throw new CliValidationError(`Invalid --amount-a: ${amountAErr}`);
+  const amountBErr = validators.positiveNumber(amountB);
+  if (amountBErr) throw new CliValidationError(`Invalid --amount-b: ${amountBErr}`);
+  const feeErr = validators.feeBasicPoints(feeStr);
+  if (feeErr) throw new CliValidationError(`Invalid --fee: ${feeErr}`);
+  const slippageErr = validators.slippage(slippageStr);
+  if (slippageErr) throw new CliValidationError(`Invalid --slippage: ${slippageErr}`);
+
+  let depositorKeypair: Keypair;
+  try {
+    depositorKeypair = Keypair.fromSecret(options['secret']);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new CliValidationError(`Invalid --secret key: ${msg}`);
+  }
 
   const fee = parseInt(feeStr, 10);
   const slippage = parseFloat(slippageStr);
-
-  const networkConfig = STELLAR_NETWORKS[networkName];
-  if (!networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
-  }
-
-  const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
-  console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
-  const server = new Horizon.Server(horizonUrl);
-
-  const depositorKeypair = Keypair.fromSecret(secret);
   const depositorAddress = depositorKeypair.publicKey();
-  console.log(`Depositor Account: ${depositorAddress}`);
 
   const assetA = parseAsset(assetAStr);
   const assetB = parseAsset(assetBStr);
@@ -628,7 +1431,9 @@ async function runCreatePool(args: string[]): Promise<void> {
   let sortedAmountB = amountB;
 
   if (compareAssets(assetA, assetB) > 0) {
-    console.log('Swapping assets lexicographically (Asset A must be lexicographically smaller than Asset B in Stellar LP)...');
+    if (!jsonMode) {
+      console.log('Swapping assets lexicographically (Asset A must be lexicographically smaller than Asset B in Stellar LP)...');
+    }
     sortedAssetA = assetB;
     sortedAssetB = assetA;
     sortedAmountA = amountB;
@@ -645,242 +1450,445 @@ async function runCreatePool(args: string[]): Promise<void> {
       assetB: sortedAssetB,
       fee
     }).toString('hex');
-  } catch (e) {
-    poolId = (lpAsset as any).getLiquidityPoolId?.() || (lpAsset as any).poolId || '';
-  }
-  console.log(`Liquidity Pool ID: ${poolId}`);
-
-  // Load account to check balance and trustlines
-  console.log('Fetching account details...');
-  const account = await server.loadAccount(depositorAddress);
-
-  // Check trustlines
-  const hasTrustline = (asset: Asset) => {
-    if (asset.isNative()) return true;
-    return account.balances.some((b: any) =>
-      b.asset_code === asset.getCode() && b.asset_issuer === asset.getIssuer()
-    );
-  };
-
-  const hasPoolTrustline = (pid: string) => {
-    return account.balances.some((b: any) =>
-      b.asset_type === 'liquidity_pool_shares' && b.liquidity_pool_id === pid
-    );
-  };
-
-  const networkPassphrase = networkConfig.passphrase;
-  const txBuilder = new TransactionBuilder(account, {
-    fee: '100',
-    networkPassphrase
-  });
-
-  let operationsAdded = 0;
-
-  // Add trustlines if missing
-  if (!hasTrustline(sortedAssetA)) {
-    console.log(`Adding trustline for asset: ${sortedAssetA.getCode()}:${sortedAssetA.getIssuer()}...`);
-    txBuilder.addOperation(Operation.changeTrust({ asset: sortedAssetA }));
-    operationsAdded++;
+  } catch {
+    poolId = (lpAsset as unknown as { getLiquidityPoolId?: () => string; poolId?: string }).getLiquidityPoolId?.() ||
+      (lpAsset as unknown as { poolId?: string }).poolId || '';
   }
 
-  if (!hasTrustline(sortedAssetB)) {
-    console.log(`Adding trustline for asset: ${sortedAssetB.getCode()}:${sortedAssetB.getIssuer()}...`);
-    txBuilder.addOperation(Operation.changeTrust({ asset: sortedAssetB }));
-    operationsAdded++;
-  }
-
-  if (!hasPoolTrustline(poolId)) {
-    console.log(`Adding trustline for pool shares: ${poolId}...`);
-    txBuilder.addOperation(Operation.changeTrust({ asset: lpAsset }));
-    operationsAdded++;
-  }
-
-  // Calculate slippage-adjusted price bounds
   const ratio = parseFloat(sortedAmountA) / parseFloat(sortedAmountB);
   const minPrice = (ratio * (1 - slippage)).toFixed(7);
   const maxPrice = (ratio * (1 + slippage)).toFixed(7);
 
-  console.log(`Depositing assets into pool:`);
-  console.log(`  Asset A Amount: ${sortedAmountA}`);
-  console.log(`  Asset B Amount: ${sortedAmountB}`);
-  console.log(`  Min Price Ratio: ${minPrice}`);
-  console.log(`  Max Price Ratio: ${maxPrice}`);
+  if (dryRun) {
+    const dryResult: CliTransactionResult = {
+      command: 'create-pool',
+      network: networkName,
+      status: 'dry-run',
+      dryRun: true,
+      transactionHash: null,
+      ledger: null,
+      explorerUrl: null,
+      details: {
+        horizonUrl,
+        depositorAddress,
+        poolId,
+        fee,
+        slippage,
+        minPrice,
+        maxPrice,
+        assetA: sortedAssetA.isNative() ? 'XLM' : `${sortedAssetA.getCode()}:${sortedAssetA.getIssuer()}`,
+        assetB: sortedAssetB.isNative() ? 'XLM' : `${sortedAssetB.getCode()}:${sortedAssetB.getIssuer()}`,
+        amountA: sortedAmountA,
+        amountB: sortedAmountB,
+      },
+    };
+    console.log(formatTransactionResult(dryResult, jsonMode));
+    return dryResult;
+  }
 
-  txBuilder.addOperation(
-    Operation.liquidityPoolDeposit({
-      liquidityPoolId: poolId,
-      maxAmountA: sortedAmountA,
-      maxAmountB: sortedAmountB,
-      minPrice,
-      maxPrice
-    })
-  );
-  operationsAdded++;
+  if (networkName === 'mainnet') {
+    await confirmMainnetWrite('create-pool', options, deps);
+  }
 
-  txBuilder.setTimeout(30);
-  const tx = txBuilder.build();
-  tx.sign(depositorKeypair);
+  if (!jsonMode) {
+    console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
+    console.log(`Depositor Account: ${depositorAddress}`);
+    console.log(`Liquidity Pool ID: ${poolId}`);
+    console.log('Fetching account details...');
+  }
 
-  console.log(`Submitting transaction with ${operationsAdded} operations to network...`);
-  const response = await server.submitTransaction(tx);
-  console.log('Transaction submitted successfully!');
-  console.log(`Hash: ${response.hash}`);
-  console.log(`Ledger: ${(response as any).ledger}`);
+  try {
+    const server = new Horizon.Server(horizonUrl);
+    const account = await server.loadAccount(depositorAddress);
+
+    const hasTrustline = (asset: Asset) => {
+      if (asset.isNative()) return true;
+      return account.balances.some((b: any) =>
+        b.asset_code === asset.getCode() && b.asset_issuer === asset.getIssuer()
+      );
+    };
+
+    const hasPoolTrustline = (pid: string) => {
+      return account.balances.some((b: any) =>
+        b.asset_type === 'liquidity_pool_shares' && b.liquidity_pool_id === pid
+      );
+    };
+
+    const txBuilder = new TransactionBuilder(account, {
+      fee: '100',
+      networkPassphrase: networkSettings.passphrase
+    });
+
+    let operationsAdded = 0;
+
+    if (!hasTrustline(sortedAssetA)) {
+      if (!jsonMode) {
+        console.log(`Adding trustline for asset: ${sortedAssetA.getCode()}:${sortedAssetA.getIssuer()}...`);
+      }
+      txBuilder.addOperation(Operation.changeTrust({ asset: sortedAssetA }));
+      operationsAdded++;
+    }
+
+    if (!hasTrustline(sortedAssetB)) {
+      if (!jsonMode) {
+        console.log(`Adding trustline for asset: ${sortedAssetB.getCode()}:${sortedAssetB.getIssuer()}...`);
+      }
+      txBuilder.addOperation(Operation.changeTrust({ asset: sortedAssetB }));
+      operationsAdded++;
+    }
+
+    if (!hasPoolTrustline(poolId)) {
+      if (!jsonMode) {
+        console.log(`Adding trustline for pool shares: ${poolId}...`);
+      }
+      txBuilder.addOperation(Operation.changeTrust({ asset: lpAsset }));
+      operationsAdded++;
+    }
+
+    if (!jsonMode) {
+      console.log(`Depositing assets into pool:`);
+      console.log(`  Asset A Amount: ${sortedAmountA}`);
+      console.log(`  Asset B Amount: ${sortedAmountB}`);
+      console.log(`  Min Price Ratio: ${minPrice}`);
+      console.log(`  Max Price Ratio: ${maxPrice}`);
+    }
+
+    txBuilder.addOperation(
+      Operation.liquidityPoolDeposit({
+        liquidityPoolId: poolId,
+        maxAmountA: sortedAmountA,
+        maxAmountB: sortedAmountB,
+        minPrice,
+        maxPrice
+      })
+    );
+    operationsAdded++;
+
+    txBuilder.setTimeout(30);
+    const tx = txBuilder.build();
+    tx.sign(depositorKeypair);
+
+    if (!jsonMode) {
+      console.log(`Submitting transaction with ${operationsAdded} operations to network...`);
+    }
+    const response = await server.submitTransaction(tx);
+    const ledger = (response as unknown as { ledger?: number | string }).ledger ?? 'pending';
+    const txResult: CliTransactionResult = {
+      command: 'create-pool',
+      network: networkName,
+      status: 'submitted',
+      dryRun: false,
+      transactionHash: response.hash,
+      ledger,
+      explorerUrl: buildExplorerUrl(networkName, response.hash),
+      details: {
+        poolId,
+        operationsAdded,
+        depositorAddress,
+        minPrice,
+        maxPrice,
+      },
+    };
+    console.log(formatTransactionResult(txResult, jsonMode));
+    return txResult;
+  } catch (err: unknown) {
+    if (err instanceof CliError) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new CliNetworkError(`Pool creation transaction failed on ${networkName}: ${msg}`, {
+      command: 'create-pool',
+      network: networkName,
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // liquidate command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runLiquidate(args: string[]): Promise<void> {
+export async function runLiquidate(
+  args: string[],
+  deps: CliExecutionDeps = {}
+): Promise<CliTransactionResult | void> {
+  const options = parseArgs(args);
+  const jsonMode = options['json'] === 'true';
+  const dryRun = options['dry-run'] === 'true';
+  const env = deps.env ?? process.env;
+
   if (args.includes('--help') || args.includes('-h')) {
-    printLiquidateHelp();
-    process.exit(0);
+    printLiquidateHelp(jsonMode);
+    return;
   }
 
-  const options = parseArgs(args);
+  const networkSettings = resolveNetworkSettings(options, env);
+  if (!options['asset-id'] && networkSettings.contracts.rwaToken) {
+    options['asset-id'] = networkSettings.contracts.rwaToken;
+  }
+  if (!options['custody-validator'] && networkSettings.contracts.custodyValidator) {
+    options['custody-validator'] = networkSettings.contracts.custodyValidator;
+  }
+
+  const secret = resolveSecretValue(options, env);
+  if (secret) {
+    options['secret'] = secret;
+  }
+
   const required = ['asset-id', 'custody-validator', 'secret', 'evidence-hash'];
   for (const req of required) {
-    if (!options[req]) {
-      console.error(`Error: Missing required option --${req}`);
-      printLiquidateHelp();
-      process.exit(1);
+    if (!options[req] || options[req] === 'true') {
+      if (!jsonMode) {
+        console.error(`Error: Missing required option --${req}`);
+      }
+      throw new CliValidationError(`Missing required option --${req}`);
     }
   }
 
   const assetId = options['asset-id'];
   const custodyValidatorId = options['custody-validator'];
-  const secret = options['secret'];
   const reason = options['reason'] || 'undercollateralized';
   const evidenceHash = options['evidence-hash'];
-  const networkName = options['network'] || 'testnet';
+  const networkName = networkSettings.network;
+  const horizonUrl = networkSettings.horizonUrl;
   const force = options['force'] === 'true';
 
-  // Validate evidence hash format
+  const assetErr = validators.contractAddress(assetId);
+  if (assetErr) throw new CliValidationError(`Invalid --asset-id: ${assetErr}`);
+  const validatorErr = validators.contractAddress(custodyValidatorId);
+  if (validatorErr) throw new CliValidationError(`Invalid --custody-validator: ${validatorErr}`);
+
   if (!/^[0-9a-fA-F]{64}$/.test(evidenceHash)) {
-    console.error('Error: --evidence-hash must be a 64-character hex string (32 bytes).');
-    process.exit(1);
+    throw new CliValidationError('--evidence-hash must be a 64-character hex string (32 bytes).');
   }
 
-  const networkConfig = STELLAR_NETWORKS[networkName];
-  if (!networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
+  let adminKeypair: Keypair;
+  try {
+    adminKeypair = Keypair.fromSecret(options['secret']);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new CliValidationError(`Invalid --secret key: ${msg}`);
   }
 
-  const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
-  console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
+  if (dryRun) {
+    const dryResult: CliTransactionResult = {
+      command: 'liquidate',
+      network: networkName,
+      status: 'dry-run',
+      dryRun: true,
+      transactionHash: null,
+      ledger: null,
+      explorerUrl: null,
+      details: {
+        horizonUrl,
+        adminAddress: adminKeypair.publicKey(),
+        assetId,
+        custodyValidatorId,
+        reason,
+        evidenceHash,
+        force,
+      },
+    };
+    console.log(formatTransactionResult(dryResult, jsonMode));
+    return dryResult;
+  }
 
-  const adminKeypair = Keypair.fromSecret(secret);
-  console.log(`Admin Account: ${adminKeypair.publicKey()}`);
-  console.log(`Asset ID: ${assetId}`);
-  console.log(`Custody Validator: ${custodyValidatorId}`);
+  if (networkName === 'mainnet') {
+    await confirmMainnetWrite('liquidate', options, deps);
+  }
 
-  // Instantiate CustodyClient
+  if (!jsonMode) {
+    console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
+    console.log(`Admin Account: ${adminKeypair.publicKey()}`);
+    console.log(`Asset ID: ${assetId}`);
+    console.log(`Custody Validator: ${custodyValidatorId}`);
+  }
+
   const custodyClient = new CustodyClient(
     custodyValidatorId,
     horizonUrl,
-    networkConfig.passphrase
+    networkSettings.passphrase
   );
 
-  // Check collateralization unless --force is set
   if (!force) {
-    console.log('\nChecking collateralization status...');
+    if (!jsonMode) {
+      console.log('\nChecking collateralization status...');
+    }
     try {
       const backingStatus = await custodyClient.verifyAssetBacking(assetId);
 
       if (backingStatus.isValid) {
-        console.log('✅ Asset is currently fully backed by valid custody attestation.');
-        console.log('   Use --force to liquidate anyway.');
-        process.exit(0);
-      }
-
-      // Describe why the position is undercollateralized
-      if (backingStatus.alerts.length > 0) {
-        console.log(`⚠️  Custody alerts detected:`);
-        for (const alert of backingStatus.alerts) {
-          console.log(`    - ${alert}`);
+        const skippedResult: CliTransactionResult = {
+          command: 'liquidate',
+          network: networkName,
+          status: 'skipped',
+          dryRun: false,
+          transactionHash: null,
+          ledger: null,
+          explorerUrl: null,
+          details: {
+            assetId,
+            custodyValidatorId,
+            reason: 'Asset is currently fully backed by valid custody attestation; use --force to liquidate anyway.',
+          },
+        };
+        if (jsonMode) {
+          console.log(formatTransactionResult(skippedResult, true));
+        } else {
+          console.log('✅ Asset is currently fully backed by valid custody attestation.');
+          console.log('   Use --force to liquidate anyway.');
         }
+        return skippedResult;
       }
 
-      if (!backingStatus.latestAttestation) {
-        console.log('⚠️  No valid attestation found — asset has no confirmed collateral backing.');
-      } else {
-        const expiredAt = new Date(backingStatus.latestAttestation.expiresAt);
-        console.log(`⚠️  Latest attestation expired at: ${expiredAt.toISOString()}`);
-        console.log(`   Insurance status: ${backingStatus.insuranceStatus}`);
-      }
+      if (!jsonMode) {
+        if (backingStatus.alerts.length > 0) {
+          console.log('⚠️  Custody alerts detected:');
+          for (const alert of backingStatus.alerts) {
+            console.log(`    - ${alert}`);
+          }
+        }
 
-      console.log('\n🔴 Position is undercollateralized. Proceeding with liquidation...');
-    } catch (err: any) {
-      console.warn(`Warning: Could not verify collateral on-chain (${err.message}). Proceeding with liquidation as requested...`);
+        if (!backingStatus.latestAttestation) {
+          console.log('⚠️  No valid attestation found — asset has no confirmed collateral backing.');
+        } else {
+          const expiredAt = new Date(backingStatus.latestAttestation.expiresAt);
+          console.log(`⚠️  Latest attestation expired at: ${expiredAt.toISOString()}`);
+          console.log(`   Insurance status: ${backingStatus.insuranceStatus}`);
+        }
+
+        console.log('\n🔴 Position is undercollateralized. Proceeding with liquidation...');
+      }
+    } catch (err: unknown) {
+      if (!jsonMode) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`Warning: Could not verify collateral on-chain (${msg}). Proceeding with liquidation as requested...`);
+      }
     }
-  } else {
+  } else if (!jsonMode) {
     console.log('⚡ --force flag set. Skipping collateralization check...');
   }
 
-  // Trigger the insurance claim / liquidation
-  console.log(`\nTriggering insurance claim on Custody Validator...`);
-  console.log(`  Reason: ${reason}`);
-  console.log(`  Evidence Hash: ${evidenceHash}`);
+  if (!jsonMode) {
+    console.log('\nTriggering insurance claim on Custody Validator...');
+    console.log(`  Reason: ${reason}`);
+    console.log(`  Evidence Hash: ${evidenceHash}`);
+  }
 
-  const result = await custodyClient.triggerInsuranceClaim(
-    adminKeypair,
-    assetId,
-    reason,
-    evidenceHash
-  );
-
-  console.log('\n✅ Liquidation triggered successfully!');
-  console.log(`   Transaction Hash: ${result.hash}`);
-  console.log(`   Ledger: ${(result as any).ledger ?? 'pending'}`);
-  console.log('\nThe custody contract has emitted an "insurance_claim_triggered" event.');
-  console.log('The insurance provider will now process the claim and compensate token holders.');
+  try {
+    const result = await custodyClient.triggerInsuranceClaim(
+      adminKeypair,
+      assetId,
+      reason,
+      evidenceHash
+    );
+    const ledger = (result as unknown as { ledger?: number | string }).ledger ?? 'pending';
+    const txResult: CliTransactionResult = {
+      command: 'liquidate',
+      network: networkName,
+      status: 'submitted',
+      dryRun: false,
+      transactionHash: result.hash,
+      ledger,
+      explorerUrl: buildExplorerUrl(networkName, result.hash),
+      details: {
+        assetId,
+        custodyValidatorId,
+        reason,
+        evidenceHash,
+      },
+    };
+    console.log(formatTransactionResult(txResult, jsonMode));
+    if (!jsonMode) {
+      console.log('\nThe custody contract has emitted an "insurance_claim_triggered" event.');
+      console.log('The insurance provider will now process the claim and compensate token holders.');
+    }
+    return txResult;
+  } catch (err: unknown) {
+    if (err instanceof CliError) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new CliNetworkError(`Liquidation failed on ${networkName}: ${msg}`, {
+      command: 'liquidate',
+      network: networkName,
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function runCli() {
-  const args = process.argv.slice(2);
+export async function runCli(
+  argv: string[] = process.argv.slice(2),
+  deps: CliExecutionDeps = {}
+): Promise<number> {
+  const jsonMode = argv.includes('--json');
 
-  // Interactive mode
-  if (args.includes('--interactive') || args.includes('-i')) {
+  if (argv.includes('--interactive') || argv.includes('-i')) {
     try {
       await runInteractive();
-    } catch (error: any) {
-      console.error(`\n❌ Error: ${error.message || error}`);
-      process.exit(1);
+      return 0;
+    } catch (err: unknown) {
+      const code = err instanceof CliError ? err.exitCode : 1;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Interactive mode error:', message);
+      return code;
     }
-    return;
   }
 
-  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
-    printHelp();
-    process.exit(0);
+  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h' || (argv[0]?.startsWith('--') && (argv.includes('--help') || argv.includes('-h')))) {
+    printHelp(jsonMode);
+    return 0;
   }
 
-  const command = args[0];
-  const commandArgs = args.slice(1);
+  const command = argv[0];
+  const commandArgs = argv.slice(1);
 
   try {
     if (command === 'create-pool') {
-      await runCreatePool(commandArgs);
-    } else if (command === 'liquidate') {
-      await runLiquidate(commandArgs);
-    } else if (command === 'generate-types') {
-      await runGenerateTypes(commandArgs);
-    } else {
-      console.error(`Unknown command: "${command}".`);
-      printHelp();
-      process.exit(1);
+      await runCreatePool(commandArgs, deps);
+      return 0;
     }
-  } catch (error: any) {
-    console.error(`\n❌ Error: ${error.message || error}`);
-    process.exit(1);
+    if (command === 'liquidate') {
+      await runLiquidate(commandArgs, deps);
+      return 0;
+    }
+    if (command === 'generate-types') {
+      await runGenerateTypes(commandArgs);
+      return 0;
+    }
+    if (command === 'verify-contracts') {
+      await runVerifyContracts(commandArgs, deps);
+      return 0;
+    }
+
+    throw new CliValidationError(`Unknown command "${command}"`);
+  } catch (err: unknown) {
+    const exitCode = err instanceof CliError ? err.exitCode : 1;
+    const errorCode = err instanceof CliError ? err.code : 'CLI_EXECUTION_ERROR';
+    const message = err instanceof Error ? err.message : String(err);
+
+    if (jsonMode) {
+      console.error(
+        JSON.stringify(
+          {
+            error: {
+              code: errorCode,
+              exitCode,
+              message,
+              ...(err instanceof CliError && err.details ? { details: err.details } : {}),
+            },
+          },
+          null,
+          2
+        )
+      );
+    } else {
+      console.error(`Error [${errorCode}]: ${message}`);
+    }
+    return exitCode;
   }
 }
 
 if (require.main === module) {
-  runCli();
+  runCli().then((code) => {
+    process.exit(code);
+  });
 }
