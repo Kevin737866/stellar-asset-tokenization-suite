@@ -1,5 +1,67 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+export const REDACTED_VALUE = '[REDACTED]';
+
+const SENSITIVE_KEY_REGEX =
+  /(secret|private[_-]?key|seed|mnemonic|password|passwd|api[_-]?key|token|authorization|auth[_-]?header|cookie|credential|signer[_-]?key)/i;
+
+const STELLAR_SECRET_VALUE_REGEX = /\bS[A-Z2-7]{55}\b/g;
+const BEARER_VALUE_REGEX = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+
+function maskSensitiveString(value: string): string {
+  return value
+    .replace(STELLAR_SECRET_VALUE_REGEX, REDACTED_VALUE)
+    .replace(BEARER_VALUE_REGEX, `Bearer ${REDACTED_VALUE}`);
+}
+
+/**
+ * Recursively redacts secret-like fields and inline Stellar secret keys
+ * or Bearer tokens from structured log payloads without mutating the caller's object.
+ */
+export function redactSensitiveFields<T>(
+  input: T,
+  seen: WeakSet<object> = new WeakSet()
+): T {
+  if (input == null) {
+    return input;
+  }
+  if (typeof input === 'string') {
+    return maskSensitiveString(input) as unknown as T;
+  }
+  if (typeof input !== 'object') {
+    return input;
+  }
+  if (input instanceof Date || input instanceof RegExp) {
+    return input;
+  }
+  if (input instanceof Error) {
+    return {
+      name: input.name,
+      message: maskSensitiveString(input.message),
+    } as unknown as T;
+  }
+
+  const objRef = input as unknown as object;
+  if (seen.has(objRef)) {
+    return '[Circular]' as unknown as T;
+  }
+  seen.add(objRef);
+
+  if (Array.isArray(input)) {
+    return input.map((item) => redactSensitiveFields(item, seen)) as unknown as T;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(input as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_REGEX.test(key)) {
+      out[key] = REDACTED_VALUE;
+    } else {
+      out[key] = redactSensitiveFields(val, seen);
+    }
+  }
+  return out as T;
+}
+
 export interface LogEntry {
   timestamp: string;
   level: LogLevel;
@@ -24,26 +86,28 @@ export class Logger {
 
   private log(level: LogLevel, message: string, data?: Record<string, unknown>): void {
     if (!this.shouldLog(level)) return;
+    const redactedMessage = maskSensitiveString(message);
+    const redactedData = data !== undefined ? redactSensitiveFields(data) : undefined;
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       level,
       component: this.component,
-      message,
-      data
+      message: redactedMessage,
+      data: redactedData
     };
     const formatted = `[${entry.timestamp}] [${entry.level.toUpperCase()}] [${entry.component}] ${entry.message}`;
     switch (level) {
       case 'error':
-        console.error(formatted, data ?? '');
+        console.error(formatted, redactedData ?? '');
         break;
       case 'warn':
-        console.warn(formatted, data ?? '');
+        console.warn(formatted, redactedData ?? '');
         break;
       case 'debug':
-        console.debug(formatted, data ?? '');
+        console.debug(formatted, redactedData ?? '');
         break;
       default:
-        console.log(formatted, data ?? '');
+        console.log(formatted, redactedData ?? '');
     }
   }
 
