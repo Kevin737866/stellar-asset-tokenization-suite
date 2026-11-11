@@ -23,8 +23,35 @@ import {
   DEFAULT_TIMEOUT_SECONDS,
   STELLAR_NETWORKS,
 } from './constants';
-import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
+import { createLogger, Logger, redactSensitiveFields, REDACTED_VALUE } from './logger';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange, parseExactDecimal, formatExactDecimal, type ExactDecimalParts } from './validation';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MIN_REQUEST_TIMEOUT_MS,
+  MAX_REQUEST_TIMEOUT_MS,
+  SDK_RUNTIME_REQUIREMENTS,
+  SDK_NETWORK_DOCUMENTATION,
+  SOROBAN_SIMULATION_ERROR_CODES,
+  validateTypedNetworkConfig,
+  validateContractAddressForNetwork,
+  resolveRequestTimeoutMs,
+  withRequestTimeout,
+  executeReadWithAbort,
+  classifySimulationFailure,
+  toContractInvocationFailure,
+  invokeContractSafely,
+  getSDKCapabilities,
+  type TypedNetworkConfigInput,
+  type TypedNetworkConfigValidationResult,
+  type NetworkContractValidationOptions,
+  type RequestTimeoutConfig,
+  type ReadRequestOptions,
+  type SorobanSimulationErrorCode,
+  type SimulationFailureDetails,
+  type ContractInvocationFailure,
+  type ContractInvocationResult,
+  type SDKCapabilityReport,
+} from './core';
 import {
   GasEstimator,
   estimateGas,
@@ -945,3 +972,35 @@ export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS)
 // ─── Default export ───────────────────────────────────────────────────────────
 export default StellarRWASDK;
 export { MetricsCollector, ConsoleExporter, PrometheusExporter, NoopExporter, createMetricsCollector } from './telemetry';
+export {
+  redactSensitiveFields,
+  REDACTED_VALUE,
+  parseExactDecimal,
+  formatExactDecimal,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MIN_REQUEST_TIMEOUT_MS,
+  MAX_REQUEST_TIMEOUT_MS,
+  SDK_RUNTIME_REQUIREMENTS,
+  SDK_NETWORK_DOCUMENTATION,
+  SOROBAN_SIMULATION_ERROR_CODES,
+  validateTypedNetworkConfig,
+  validateContractAddressForNetwork,
+  resolveRequestTimeoutMs,
+  withRequestTimeout,
+  executeReadWithAbort,
+  classifySimulationFailure,
+  toContractInvocationFailure,
+  invokeContractSafely,
+  getSDKCapabilities,
+  type ExactDecimalParts,
+  type TypedNetworkConfigInput,
+  type TypedNetworkConfigValidationResult,
+  type NetworkContractValidationOptions,
+  type RequestTimeoutConfig,
+  type ReadRequestOptions,
+  type SorobanSimulationErrorCode,
+  type SimulationFailureDetails,
+  type ContractInvocationFailure,
+  type ContractInvocationResult,
+  type SDKCapabilityReport,
+};
