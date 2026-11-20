@@ -9,6 +9,16 @@ interface SecondaryMarketProps {
   userAddress: string;
 }
 
+const POSITIVE_DECIMAL_PATTERN = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+
+const isPositiveFiniteNumber = (value: string): boolean => {
+  const normalizedValue = value.trim();
+  if (!POSITIVE_DECIMAL_PATTERN.test(normalizedValue)) return false;
+
+  const parsedValue = Number(normalizedValue);
+  return Number.isFinite(parsedValue) && parsedValue > 0;
+};
+
 const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress }) => {
   const toast = useToast();
   const translateError = useErrorTranslator();
@@ -145,11 +155,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       return;
     }
 
-    if (!price || parseFloat(price) <= 0) {
+    if (!isPositiveFiniteNumber(price)) {
       toast.warning('Invalid Price', 'Please enter a valid price greater than zero.');
       return;
     }
-    if (!amount || parseFloat(amount) <= 0) {
+    if (!isPositiveFiniteNumber(amount)) {
       toast.warning('Invalid Amount', 'Please enter a valid amount greater than zero.');
       return;
     }
