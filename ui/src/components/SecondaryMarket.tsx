@@ -18,6 +18,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [trades, setTrades] = useState<Trade[]>([]);
   const [vwap, setVwap] = useState<string>('0');
   const [userOrders, setUserOrders] = useState<Order[]>([]);
+  const [ordersFetchError, setOrdersFetchError] = useState<string | null>(null);
   const [kycStatus, setKycStatus] = useState<boolean>(false);
   const [dividendHalt, setDividendHalt] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -77,15 +78,25 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       const tr = await sdk.marketClient.getRecentTrades(asset.token_address);
       const v = await sdk.marketClient.getVWAP(asset.token_address);
       const kyc = await sdk.complianceClient.getKYCStatus(userAddress);
-      const orders = await sdk.marketClient.getUserOrders(new Address(userAddress));
 
       setOrderBook(ob);
       setTrades(tr);
       setVwap(v);
       setKycStatus(kyc.is_verified);
-      setUserOrders(orders);
       setFetchError(null);
       setIsNetworkError(false);
+
+      try {
+        const orders = await sdk.marketClient.getUserOrders(new Address(userAddress));
+        setUserOrders(orders);
+        setOrdersFetchError(null);
+      } catch (err: any) {
+        const { title, message } = translateError(err);
+        setOrdersFetchError(message);
+        if (showToasts) {
+          toast.error(title, `Unable to load your active orders. ${message}`);
+        }
+      }
 
       const portfolioValue = await sdk.marketClient.getMarketStats(asset.token_address).catch(() => null);
       if (portfolioValue && parseFloat(portfolioValue.avgPrice) > 0) {
@@ -524,7 +535,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
             </div>
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Active Orders</label>
-              <span className="text-base font-semibold">{userOrders.length}</span>
+              <span className="text-base font-semibold">{activeUserOrders.length}</span>
             </div>
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Last Trade</label>
@@ -535,7 +546,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
           </div>
           <div className="mt-5 border-t border-gray-200 dark:border-gray-700 pt-4">
             <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">Your Active Orders</h3>
-            {activeUserOrders.length > 0 ? (
+            {ordersFetchError ? (
+              <p className="text-sm text-red-600 dark:text-red-400" role="alert">
+                Unable to load your active orders: {ordersFetchError}
+              </p>
+            ) : activeUserOrders.length > 0 ? (
               <ul className="space-y-2">
                 {activeUserOrders.map(order => {
                   const isOwner = order.trader.toString() === userAddress;
