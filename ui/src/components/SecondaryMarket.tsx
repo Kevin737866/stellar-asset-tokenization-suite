@@ -1,13 +1,30 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { StellarRWASDK } from '../../sdk/src';
-import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Address } from 'stellar-sdk';
+import { StellarRWASDK } from '../../../dist';
+import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../../dist/types';
 import { useToast, useErrorTranslator } from './Toast';
+import { MarketOrderParams, validateMarketOrderInput } from './marketOrder';
+
+/**
+ * Secondary-market order UI state contract:
+ * - idle: no order submission is in progress.
+ * - submitting: inputs and authorization are accepted and a signed SDK request is pending.
+ * - submitted: the SDK confirmed the order; inputs are cleared and market data is refreshed.
+ * - failed: submission failed; inputs remain intact for a one-shot retry of the exact snapshot.
+ *
+ * Invalid input and authorization failures are terminal for the current attempt, do not
+ * create a transaction, and do not mutate the order inputs. On success, only the submitted
+ * order inputs are cleared. On a market-data fetch failure, existing market data remains
+ * visible and can be refreshed through the retry control.
+ */
+export type SecondaryMarketOrderState = 'idle' | 'submitting' | 'submitted' | 'failed';
 
 interface SecondaryMarketProps {
   sdk: StellarRWASDK;
   asset: AssetInfo;
   userAddress: string;
 }
+
 
 const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress }) => {
   const toast = useToast();
@@ -20,6 +37,8 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [kycStatus, setKycStatus] = useState<boolean>(false);
   const [dividendHalt, setDividendHalt] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [orderState, setOrderState] = useState<SecondaryMarketOrderState>('idle');
+  const isSubmittingRef = useRef(false);
 
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
@@ -39,20 +58,14 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
 
   const [portfolioPnl, setPortfolioPnl] = useState<string | null>(null);
 
-  const [lastOrderParams, setLastOrderParams] = useState<{
-    side: 'buy' | 'sell';
-    price: string;
-    amount: string;
-  } | null>(null);
-
   const chartData = useMemo(() => {
     if (!trades || trades.length === 0) return [];
     return trades.slice(-20).map((t) => ({
-      price: parseFloat(t.fill_price || '0'),
-      amount: parseFloat(t.fill_amount || '0'),
-      isBuy: t.side === 'buy',
+      price: parseFloat(t.price || '0'),
+      amount: parseFloat(t.amount || '0'),
+      isBuy: t.buyer.toString() === userAddress,
     }));
-  }, [trades]);
+  }, [trades, userAddress]);
 
   const chartStats = useMemo(() => {
     if (chartData.length === 0) return { min: 0, max: 0, range: 0 };
@@ -66,22 +79,26 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
     setFetchError(null);
 
     try {
-      const ob = await sdk.marketClient.getOrderBook(asset.token_address);
-      const tr = await sdk.marketClient.getRecentTrades(asset.token_address);
-      const v = await sdk.marketClient.getVWAP(asset.token_address);
-      const kyc = await sdk.complianceClient.getKYCStatus(userAddress);
+      const ob = await sdk.marketClient.getOrderBook(asset.tokenAddress);
+      const tr = await sdk.marketClient.getRecentTrades(asset.tokenAddress);
+      const v = ob.lastPrice || '0';
+      const kyc = await sdk.complianceClient.getKYCStatus(new Address(userAddress));
+      const orders = await sdk.marketClient.getUserOrders(new Address(userAddress)).catch(() => null);
 
       setOrderBook(ob);
       setTrades(tr);
       setVwap(v);
-      setKycStatus(kyc.is_verified);
+      setKycStatus(kyc.isVerified);
+      if (orders) {
+        setUserOrders(orders);
+      }
       setFetchError(null);
       setIsNetworkError(false);
 
-      const portfolioValue = await sdk.marketClient.getMarketStats(asset.token_address).catch(() => null);
+      const portfolioValue = await sdk.marketClient.getMarketStats(asset.tokenAddress).catch(() => null);
       if (portfolioValue && parseFloat(portfolioValue.avgPrice) > 0) {
         const avgPrice = parseFloat(portfolioValue.avgPrice);
-        const lastPrice = tr.length > 0 ? parseFloat(tr[tr.length - 1].fill_price || '0') : avgPrice;
+        const lastPrice = tr.length > 0 ? parseFloat(tr[tr.length - 1].price || '0') : avgPrice;
         const pnl = avgPrice > 0 ? ((lastPrice - avgPrice) / avgPrice) * 100 : 0;
         setPortfolioPnl(`${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%`);
       } else {
@@ -104,7 +121,16 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   }, [sdk, asset, userAddress, toast, translateError]);
 
   const fetchFeePreview = useCallback(async () => {
-    if (!price || !amount || parseFloat(price) <= 0 || parseFloat(amount) <= 0) {
+    const parsedPrice = Number(price);
+    const parsedAmount = Number(amount);
+    if (
+      price.trim() === '' ||
+      amount.trim() === '' ||
+      !Number.isFinite(parsedPrice) ||
+      !Number.isFinite(parsedAmount) ||
+      parsedPrice <= 0 ||
+      parsedAmount <= 0
+    ) {
       setFeePreview(null);
       return;
     }
@@ -127,10 +153,12 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
     return () => clearInterval(interval);
   }, [fetchMarketData]);
 
-  const handlePlaceOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitOrder = async (orderParams: MarketOrderParams) => {
+    if (isSubmittingRef.current) return;
 
     if (!kycStatus) {
+      setOrderState('failed');
+      setStatusMessage('KYC verification is required before trading.');
       toast.warning(
         'KYC Verification Required',
         'Please complete KYC verification before trading. Visit the compliance page to verify your identity.'
@@ -138,6 +166,8 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       return;
     }
     if (dividendHalt) {
+      setOrderState('failed');
+      setStatusMessage('Trading is temporarily halted.');
       toast.warning(
         'Trading Halted',
         'Trading is temporarily halted during the dividend record date. Trading will resume automatically.'
@@ -145,50 +175,61 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       return;
     }
 
-    if (!price || parseFloat(price) <= 0) {
-      toast.warning('Invalid Price', 'Please enter a valid price greater than zero.');
-      return;
-    }
-    if (!amount || parseFloat(amount) <= 0) {
-      toast.warning('Invalid Amount', 'Please enter a valid amount greater than zero.');
-      return;
-    }
-
-    const orderParams = { side, price, amount };
-    setLastOrderParams(orderParams);
+    setOrderState('submitting');
+    isSubmittingRef.current = true;
     setIsPlacingOrder(true);
+    setStatusMessage(`Submitting ${orderParams.side} limit order.`);
 
     try {
-      await sdk.marketClient.placeLimitOrder(
-        userAddress,
-        asset.token_address,
-        side,
-        price,
-        amount,
-        Math.floor(Date.now() / 1000) + 86400 * 7
-      );
+      const trader = new Address(userAddress);
+      const tokenAddress = asset.tokenAddress;
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const options = { tokenAddress, amount: orderParams.amount, price: orderParams.price, expiresAt };
 
+      if (orderParams.side === 'buy') {
+        await sdk.marketClient.createBuyOrder(trader, options);
+      } else {
+        await sdk.marketClient.createSellOrder(trader, options);
+      }
+
+      setOrderState('submitted');
+      setStatusMessage(
+        `${orderParams.side.toUpperCase()} limit order submitted for ${orderParams.amount} @ ${orderParams.price}.`
+      );
       toast.success(
         'Order Placed',
-        `${side.toUpperCase()} order for ${amount} @ ${price} placed successfully.`
+        `${orderParams.side.toUpperCase()} order for ${orderParams.amount} @ ${orderParams.price} placed successfully.`
       );
-      fetchMarketData();
       setPrice('');
       setAmount('');
-      setLastOrderParams(null);
+      await fetchMarketData(false);
     } catch (err: any) {
+      setOrderState('failed');
+      setStatusMessage('Order submission failed. Your order inputs were preserved.');
       const { title, message } = translateError(err);
-      toast.error(title, message, () => {
-        if (lastOrderParams) {
-          setSide(lastOrderParams.side);
-          setPrice(lastOrderParams.price);
-          setAmount(lastOrderParams.amount);
-          handlePlaceOrder(new Event('submit') as any);
-        }
-      });
+      toast.error(title, message, () => submitOrder(orderParams));
     } finally {
+      isSubmittingRef.current = false;
       setIsPlacingOrder(false);
     }
+  };
+
+  const handlePlaceOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const orderParams = validateMarketOrderInput(side, price, amount);
+    if (!orderParams) {
+      setOrderState('failed');
+      setStatusMessage('Enter a valid price and amount greater than zero.');
+      if (!price || Number(price) <= 0 || !Number.isFinite(Number(price))) {
+        toast.warning('Invalid Price', 'Please enter a valid price greater than zero.');
+      } else {
+        toast.warning('Invalid Amount', 'Please enter a valid amount greater than zero.');
+      }
+      return;
+    }
+
+    await submitOrder(orderParams);
   };
 
   const handleRetryFetch = () => {
@@ -321,9 +362,9 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
         <section className="border border-gray-200 dark:border-gray-700 rounded-lg p-3" aria-label="Order book depth">
           <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-2">Order Book</h2>
           <div className="space-y-1">
-            {orderBook?.asks?.length ? orderBook.asks.map((ask, i) => (
+            {orderBook?.sellOrders?.length ? orderBook.sellOrders.map((ask, i) => (
               <div key={`ask-${i}`} className="flex justify-between px-2 py-1 text-xs rounded bg-red-50 dark:bg-red-950 border-r-2 border-red-400"
-                style={{ width: `${Math.min((ask.amount / 1000) * 100, 100)}%` }}>
+                style={{ width: `${Math.min((parseFloat(ask.amount) / 1000) * 100, 100)}%` }}>
                 <span className="text-red-600 dark:text-red-400">{ask.price}</span>
                 <span className="text-gray-600 dark:text-gray-400">{ask.amount}</span>
               </div>
@@ -333,9 +374,9 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
           </div>
           <div className="my-2 border-t border-gray-200 dark:border-gray-700" />
           <div className="space-y-1">
-            {orderBook?.bids?.length ? orderBook.bids.map((bid, i) => (
+            {orderBook?.buyOrders?.length ? orderBook.buyOrders.map((bid, i) => (
               <div key={`bid-${i}`} className="flex justify-between px-2 py-1 text-xs rounded bg-green-50 dark:bg-green-950 border-r-2 border-green-500"
-                style={{ width: `${Math.min((bid.amount / 1000) * 100, 100)}%` }}>
+                style={{ width: `${Math.min((parseFloat(bid.amount) / 1000) * 100, 100)}%` }}>
                 <span className="text-green-600 dark:text-green-400">{bid.price}</span>
                 <span className="text-gray-600 dark:text-gray-400">{bid.amount}</span>
               </div>
@@ -449,11 +490,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
                 <tbody>
                   {trades.map((trade, i) => (
                     <tr key={i} className={`border-b border-gray-100 dark:border-gray-800 ${
-                      trade.side === 'buy' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
+                      trade.buyer.toString() === userAddress ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
                     }`}>
-                      <td className="py-1.5">{new Date(trade.timestamp * 1000).toLocaleTimeString()}</td>
-                      <td className="py-1.5 font-medium">{trade.fill_price}</td>
-                      <td className="py-1.5">{trade.fill_amount}</td>
+                      <td className="py-1.5">{trade.executedAt.toLocaleTimeString()}</td>
+                      <td className="py-1.5 font-medium">{trade.price}</td>
+                      <td className="py-1.5">{trade.amount}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -488,7 +529,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Last Trade</label>
               <span className="text-base font-semibold">
-                {trades.length > 0 ? trades[trades.length - 1].fill_price : '—'}
+                {trades.length > 0 ? trades[trades.length - 1].price : '—'}
               </span>
             </div>
           </div>

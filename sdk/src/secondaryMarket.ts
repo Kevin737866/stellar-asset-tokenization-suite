@@ -1,30 +1,44 @@
 import { 
-  Server, 
+  SorobanRpc,
   Address, 
   xdr, 
   TransactionBuilder, 
   Networks, 
   scValToNative, 
-  nativeToScVal 
-} from 'stellar-sdk';
+  nativeToScVal,
+  Contract,
+  ScInt
+} from '@stellar/stellar-sdk';
 import { RWASDKConfig, TransactionOptions, Order, Trade, OrderBook } from './types';
-import { formatAmount, parseAmount } from './index';
 import { DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateEnum, validateRange } from './validation';
+import { InvalidParametersError, RWASDKError, contractErrorToCode } from './errors';
+
+function parseAmount(amount: string, decimals: number = 7): string {
+  if (!/^\d+(?:\.\d+)?$/.test(amount)) {
+    throw new InvalidParametersError('Invalid amount format');
+  }
+  const [whole, fractional = ''] = amount.split('.');
+  const wholeValue = BigInt(whole || '0');
+  const fractionalValue = fractional
+    ? BigInt(fractional.padEnd(decimals, '0').slice(0, decimals))
+    : 0n;
+  return (wholeValue * (10n ** BigInt(decimals)) + fractionalValue).toString();
+}
 
 export class SecondaryMarketClient {
   private config: RWASDKConfig;
   private contractId: string;
-  private server: Server;
+  private server: SorobanRpc.Server;
   private logger: Logger;
 
   constructor(config: RWASDKConfig) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateAddress(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
     this.config = config;
-    this.contractId = config.contracts.secondaryMarket;
-    this.server = new Server(config.stellar.serverUrl);
+    this.contractId = config.contracts.secondaryMarket.toString();
+    this.server = new SorobanRpc.Server(config.stellar.serverUrl);
     this.logger = createLogger('SecondaryMarketClient');
   }
 
@@ -105,7 +119,7 @@ export class SecondaryMarketClient {
     try {
       const contract = new Contract(this.contractId);
       const result = await this.server.simulateTransaction(
-        contract.call('get_vwap', new Address(tokenAddress).toScVal())
+        contract.call('get_vwap', new Address(tokenAddress).toScVal()) as any
       );
       return this.extractScValString(result);
     } catch (error) {
@@ -122,7 +136,7 @@ export class SecondaryMarketClient {
           'get_twap',
           new Address(tokenAddress).toScVal(),
           new ScInt(windowSeconds).toU64()
-        )
+        ) as any
       );
       return this.extractScValString(result);
     } catch (error) {
@@ -133,5 +147,34 @@ export class SecondaryMarketClient {
   async getPortfolioValue(user: string): Promise<string> {
     validateAddress(user, 'user');
     return "0";
+  }
+
+  private extractScValString(result: any): string {
+    const retval =
+      result?.result?.retval ??
+      result?.retval ??
+      result?.result;
+    if (retval == null) return '0';
+    if (typeof retval === 'string') return retval;
+    if (typeof retval === 'number') return String(retval);
+    if (typeof retval === 'bigint') return retval.toString();
+    try {
+      const native = scValToNative(retval);
+      return native?.toString() ?? '0';
+    } catch {
+      return '0';
+    }
+  }
+
+  private handleError(error: unknown): RWASDKError {
+    if (error instanceof RWASDKError) return error;
+    const errorCode =
+      error && typeof error === 'object' && 'code' in error && typeof (error as any).code === 'number'
+        ? (error as any).code
+        : 0;
+    return new RWASDKError(
+      contractErrorToCode(errorCode),
+      error instanceof Error ? error.message : String(error)
+    );
   }
 }

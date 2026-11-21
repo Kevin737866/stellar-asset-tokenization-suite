@@ -6,7 +6,9 @@ import {
   Address,
   Contract,
   xdr,
-  ScInt
+  ScInt,
+  scValToNative,
+  Keypair
 } from 'stellar-sdk';
 import type { 
   AssetInfo, 
@@ -534,7 +536,7 @@ export class TokenClient {
       metadata: native.metadata || {},
       complianceRegistry: native.compliance_registry?.toString() || '',
       dividendDistributor: native.dividend_distributor?.toString() || '',
-    } as AssetInfo;
+    } as unknown as AssetInfo;
   }
 
   private convertScValToBalance(scVal: xdr.ScVal): Balance {
@@ -543,8 +545,10 @@ export class TokenClient {
       amount: native.amount?.toString() || '0',
       lockedAmount: native.locked_amount?.toString() || '0',
       votingPower: native.voting_power?.toString() || '0',
-      lastDividendClaim: Number(native.last_dividend_claim) || 0,
-    } as Balance;
+      lastDividendClaim: new Date(
+        (Number(native.last_dividend_claim) || 0) * 1000
+      ),
+    };
   }
 
   private async signTransaction(transaction: any, signer: Address): Promise<any> {
