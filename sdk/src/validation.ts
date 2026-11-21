@@ -58,6 +58,15 @@ export function validateNonEmptyString(value: unknown, name: string, maxLength =
   }
 }
 
+export function validateFutureDate(value: unknown, name: string): void {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new InvalidParametersError(`${name} must be a valid date`);
+  }
+  if (value.getTime() <= Date.now()) {
+    throw new InvalidParametersError(`${name} must be in the future`);
+  }
+}
+
 export function validatePositiveInteger(value: unknown, name: string): void {
   if (value == null) {
     throw new InvalidParametersError(`${name} is required`);
