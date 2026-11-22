@@ -7,8 +7,8 @@ use soroban_sdk::{
 };
 
 use crate::compliance_registry::{
-    ComplianceRegistry, ComplianceRegistryClient, ComplianceError, KYCStatus, KycState,
-    TransferLimits,
+    ComplianceRegistry, ComplianceRegistryClient, ComplianceError, ComplianceRule,
+    KYCStatus, KycState, TransferLimits,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -528,7 +528,7 @@ fn test_same_priority_tie_break() {
 // ============================================================
 
 #[test]
-fn test_no_conflict() {
+fn test_no_conflict_minimal() {
     let (env, admin, client) = setup();
     let user_a = Address::generate(&env);
     let user_b = Address::generate(&env);

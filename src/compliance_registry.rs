@@ -30,6 +30,8 @@ pub enum ComplianceError {
     DelegateNotFound = 13,
     InvalidDateRange = 14,
     ReportTooLarge = 15,
+    /// Issue #173: a rating outside the supported credit scale.
+    InvalidCreditRating = 16,
 }
 
 #[contracttype]
@@ -84,8 +86,8 @@ pub struct ComplianceRule {
     pub min_verification_level: u32,
     pub requires_accreditation: bool,
     pub max_amount: i128,
-    /// 0 = highest priority, 255 = lowest priority
-    pub priority: u8,
+    /// 0 = highest priority, higher values run later.
+    pub priority: u32,
 }
 
 /// Issue #122: An external compliance check submitted by a delegated third-party
@@ -221,6 +223,7 @@ impl ComplianceRegistry {
             min_verification_level: 1,
             requires_accreditation: false,
             max_amount: 1_000_000,
+            priority: 0,
         });
         rules.push_back(ComplianceRule {
             rule_id: Symbol::new(&env, "reg_d"),
@@ -231,6 +234,7 @@ impl ComplianceRegistry {
             min_verification_level: 2,
             requires_accreditation: true,
             max_amount: 5_000_000,
+            priority: 0,
         });
         rules.push_back(ComplianceRule {
             rule_id: Symbol::new(&env, "reg_s"),
@@ -241,6 +245,7 @@ impl ComplianceRegistry {
             min_verification_level: 1,
             requires_accreditation: false,
             max_amount: 10_000_000,
+            priority: 0,
         });
         env.storage()
             .instance()
@@ -1255,6 +1260,127 @@ impl ComplianceRegistry {
             max_risk_score: 8,
             require_aml_clearance_above: 8,
         })
+    }
+
+    // ── Issue #173: invoice credit rating monitoring ─────────────────────────
+
+    /// Update the credit rating of a tokenized invoice. Admin-only.
+    ///
+    /// Every change is appended to the asset's rating history (the last
+    /// `RATING_HISTORY_LIMIT` entries are retained). A downgrade below BBB
+    /// raises a compliance flag, and a downgrade below B also restricts
+    /// transfers of the asset. The `credit_rating_changed` event carries the
+    /// previous rating, the new rating and the resulting flags.
+    pub fn update_credit_rating(
+        env: Env,
+        auth: Address,
+        invoice_asset: Address,
+        new_rating: Symbol,
+    ) {
+        crate::shared_admin::require_admin(&env, &auth);
+        Self::check_version(&env);
+
+        if !crate::invoice::is_valid_credit_rating(&env, &new_rating) {
+            panic_with_error!(&env, ComplianceError::InvalidCreditRating);
+        }
+
+        let status_key = Symbol::new(&env, "invoice_rating_status");
+        let mut statuses: Map<Address, crate::invoice::InvoiceRatingStatus> = env
+            .storage()
+            .instance()
+            .get(&status_key)
+            .unwrap_or(Map::new(&env));
+
+        let previous_rating = statuses
+            .get(invoice_asset.clone())
+            .map(|status| status.current_rating)
+            .unwrap_or_else(|| new_rating.clone());
+
+        let compliance_flagged = crate::invoice::is_below_investment_grade(&env, &new_rating);
+        let transfer_restricted = crate::invoice::requires_transfer_restriction(&env, &new_rating);
+
+        statuses.set(
+            invoice_asset.clone(),
+            crate::invoice::InvoiceRatingStatus {
+                current_rating: new_rating.clone(),
+                compliance_flagged,
+                transfer_restricted,
+            },
+        );
+        env.storage().instance().set(&status_key, &statuses);
+
+        let history_key = Symbol::new(&env, "invoice_rating_history");
+        let mut histories: Map<Address, Vec<crate::invoice::CreditRatingRecord>> = env
+            .storage()
+            .instance()
+            .get(&history_key)
+            .unwrap_or(Map::new(&env));
+
+        let mut history = histories
+            .get(invoice_asset.clone())
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(crate::invoice::CreditRatingRecord {
+            rating: new_rating.clone(),
+            timestamp: env.ledger().timestamp(),
+        });
+        while history.len() > crate::invoice::RATING_HISTORY_LIMIT {
+            history.remove(0);
+        }
+        histories.set(invoice_asset.clone(), history);
+        env.storage().instance().set(&history_key, &histories);
+
+        env.events().publish(
+            (Symbol::new(&env, "credit_rating_changed"), invoice_asset),
+            (
+                previous_rating,
+                new_rating,
+                compliance_flagged,
+                transfer_restricted,
+                env.ledger().timestamp(),
+            ),
+        );
+    }
+
+    /// The current rating and flags for a tokenized invoice.
+    pub fn get_invoice_rating(
+        env: Env,
+        invoice_asset: Address,
+    ) -> crate::invoice::InvoiceRatingStatus {
+        let statuses: Map<Address, crate::invoice::InvoiceRatingStatus> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "invoice_rating_status"))
+            .unwrap_or(Map::new(&env));
+
+        statuses
+            .get(invoice_asset)
+            .unwrap_or_else(|| panic_with_error!(&env, ComplianceError::UserNotFound))
+    }
+
+    /// The retained rating history for a tokenized invoice, oldest first.
+    pub fn get_invoice_rating_history(
+        env: Env,
+        invoice_asset: Address,
+    ) -> Vec<crate::invoice::CreditRatingRecord> {
+        let histories: Map<Address, Vec<crate::invoice::CreditRatingRecord>> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "invoice_rating_history"))
+            .unwrap_or(Map::new(&env));
+
+        histories
+            .get(invoice_asset)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Whether an invoice asset currently carries a compliance flag.
+    pub fn is_invoice_flagged(env: Env, invoice_asset: Address) -> bool {
+        Self::get_invoice_rating(env, invoice_asset).compliance_flagged
+    }
+
+    /// Whether transfers of an invoice asset are currently restricted.
+    pub fn is_invoice_transfer_restricted(env: Env, invoice_asset: Address) -> bool {
+        Self::get_invoice_rating(env, invoice_asset).transfer_restricted
     }
 
     // ── Issue #124: compliance data export for regulatory reporting ───────────

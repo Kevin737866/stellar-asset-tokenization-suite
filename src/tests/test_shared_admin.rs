@@ -115,6 +115,7 @@ fn dividend_config(d: &Deployed) -> DividendConfig {
         fee_rate: 0,
         fee_recipient: d.admin.clone(),
         min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
+        allow_in_kind_distributions: false,
     }
 }
 

@@ -71,11 +71,11 @@ fn holder_count_follows_mints_and_transfers() {
     t.token.mint(&t.admin, &alice, &100i128);
     assert_eq!(t.token.get_holder_count(), 2);
 
-    t.token.transfer(&t.admin, &alice, &bob, &40i128);
+    t.token.transfer(&alice, &bob, &40i128);
     // Alice still holds 60, so both of them remain holders.
     assert_eq!(t.token.get_holder_count(), 3);
 
-    t.token.transfer(&t.admin, &alice, &bob, &60i128);
+    t.token.transfer(&alice, &bob, &60i128);
     // Alice is back to zero and is no longer a holder.
     assert_eq!(t.token.get_holder_count(), 2);
 }

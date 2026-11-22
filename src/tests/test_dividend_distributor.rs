@@ -9,7 +9,7 @@ use soroban_sdk::{
 use crate::{
     compliance_registry::{ComplianceRegistry, ComplianceRegistryClient},
     dividend_distributor::{
-        BoostConfig, DividendConfig, DividendDistributor, DividendDistributorClient, DividendError,
+        BoostConfig, DistributionCategory, DividendConfig, DividendDistributor, DividendDistributorClient, DividendError,
         DEFAULT_MIN_CLAIM_WINDOW, BOOST_TIER_30D, BOOST_TIER_365D,
     },
     rwa_token::{RWAToken, RWATokenClient},
@@ -119,7 +119,7 @@ fn initialize_twice_panics() {
 fn create_distribution_returns_id_one() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -135,7 +135,7 @@ fn create_distribution_returns_id_one() {
 fn create_distribution_increments_id() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id1 = t.distributor.create_distribution(
+    let id1 = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -144,7 +144,7 @@ fn create_distribution_increments_id() {
         &DistributionCategory::Regular,
         &Map::new(&t.env),
     );
-    let id2 = t.distributor.create_distribution(
+    let id2 = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -161,7 +161,7 @@ fn create_distribution_increments_id() {
 fn create_distribution_with_zero_amount_panics() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 86400;
-    t.distributor.create_distribution(
+    t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -177,7 +177,7 @@ fn create_distribution_with_zero_amount_panics() {
 fn create_distribution_with_unsupported_currency_panics() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 86400;
-    t.distributor.create_distribution(
+    t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &Symbol::new(&t.env, "UNKNOWN"),
@@ -194,7 +194,7 @@ fn create_distribution_by_non_admin_panics() {
     let t = setup();
     let attacker = Address::generate(&t.env);
     let deadline = t.env.ledger().timestamp() + 86400;
-    t.distributor.create_distribution(
+    t.distributor.create_categorized_distribution(
         &attacker,
         &t.token.address,
         &t.currency_symbol,
@@ -217,7 +217,7 @@ fn create_distribution_with_too_soon_deadline_returns_claim_deadline_too_soon() 
     let t = setup();
     // 1s under the default 3600s minimum window
     let deadline = t.env.ledger().timestamp() + DEFAULT_MIN_CLAIM_WINDOW - 1;
-    let res = t.distributor.try_create_distribution(
+    let res = t.distributor.try_create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -241,7 +241,7 @@ fn create_distribution_with_too_soon_deadline_returns_claim_deadline_too_soon() 
 fn create_distribution_with_too_soon_deadline_panics() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 60; // well under the 1h window
-    t.distributor.create_distribution(
+    t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -257,7 +257,7 @@ fn create_distribution_with_deadline_at_minimum_window_succeeds() {
     let t = setup();
     // Exactly the minimum window is accepted (boundary is inclusive)
     let deadline = t.env.ledger().timestamp() + DEFAULT_MIN_CLAIM_WINDOW;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -275,7 +275,7 @@ fn create_distribution_with_deadline_at_minimum_window_succeeds() {
 fn create_distribution_with_normal_deadline_succeeds() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -304,12 +304,13 @@ fn min_claim_window_is_configurable_via_update_config() {
             fee_rate: 50,
             fee_recipient: t.admin.clone(),
             min_claim_window: 7200, // custom 2h window
+            allow_in_kind_distributions: false,
         },
     );
 
     // A 1h deadline no longer satisfies the custom 2h window
     let short_deadline = t.env.ledger().timestamp() + 3600;
-    let res = t.distributor.try_create_distribution(
+    let res = t.distributor.try_create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -329,7 +330,7 @@ fn min_claim_window_is_configurable_via_update_config() {
 
     // A 2h deadline satisfies the custom window
     let ok_deadline = t.env.ledger().timestamp() + 7200;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -347,7 +348,7 @@ fn min_claim_window_is_configurable_via_update_config() {
 fn get_distribution_returns_correct_data() {
     let t = setup();
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -380,7 +381,7 @@ fn claim_dividend_transfers_net_amount_to_claimer() {
     t.token.transfer(&t.admin, &claimer, &500_000i128);
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -404,7 +405,7 @@ fn claim_dividend_twice_panics() {
     t.token.transfer(&t.admin, &claimer, &100_000i128);
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -428,7 +429,7 @@ fn claim_dividend_after_deadline_panics() {
     // Must satisfy the minimum claim window (#132) — expiry is tested by
     // advancing past the deadline below, not by creating a short window.
     let deadline = t.env.ledger().timestamp() + 7200;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -450,7 +451,7 @@ fn claim_dividend_with_zero_balance_panics() {
     let claimer = Address::generate(&t.env); // no tokens
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -472,7 +473,7 @@ fn calculate_available_dividend_returns_proportional_amount() {
     t.token.transfer(&t.admin, &claimer, &500_000i128); // 50%
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -494,7 +495,7 @@ fn calculate_available_dividend_returns_zero_after_claim() {
     t.token.transfer(&t.admin, &claimer, &500_000i128);
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -519,7 +520,7 @@ fn claim_on_deactivated_distribution_panics() {
     t.token.transfer(&t.admin, &claimer, &100_000i128);
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -548,13 +549,14 @@ fn update_config_changes_fee_rate() {
         fee_rate: 100, // changed from 50 to 100 bps
         fee_recipient: t.admin.clone(),
         min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
+        allow_in_kind_distributions: false,
     };
     t.distributor.update_config(&t.admin, &new_config);
     // Verify by creating a distribution and checking the claimed amount reflects new fee
     let claimer = Address::generate(&t.env);
     t.token.transfer(&t.admin, &claimer, &1_000_000i128);
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -580,7 +582,7 @@ fn migrate_preserves_config_and_currencies() {
 
     // Create a distribution to populate state
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -608,7 +610,7 @@ fn migrate_preserves_claim_state() {
     t.token.transfer(&t.admin, &claimer, &500_000i128);
 
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -685,7 +687,7 @@ fn migrate_with_empty_distributions() {
 
     // Creating a distribution after empty state should work fine
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -712,12 +714,13 @@ fn migrate_preserves_auto_distribution_config() {
         fee_rate: 50,
         fee_recipient: t.admin.clone(),
         min_claim_window: DEFAULT_MIN_CLAIM_WINDOW,
+        allow_in_kind_distributions: false,
     };
     t.distributor.update_config(&t.admin, &config);
 
     // Config persists after update
     let deadline = t.env.ledger().timestamp() + 86400;
-    let id = t.distributor.create_distribution(
+    let id = t.distributor.create_categorized_distribution(
         &t.admin,
         &t.token.address,
         &t.currency_symbol,
@@ -885,7 +888,7 @@ fn deploy_second_token(t: &TestEnv) -> RWATokenClient<'static> {
 
 fn create_distribution(t: &TestEnv, token_address: &Address) -> u64 {
     let deadline = t.env.ledger().timestamp() + 86400;
-    t.distributor.create_distribution(
+    t.distributor.create_categorized_distribution(
         &t.admin,
         token_address,
         &t.currency_symbol,

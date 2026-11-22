@@ -36,6 +36,11 @@ pub enum RWATokenError {
     AlreadyAtLatestVersion = 16,
     TokenPaused = 17,
     InvalidBatch = 18,
+    InsufficientAllowance = 19,
+    MetadataKeyImmutable = 20,
+    MetadataLimitExceeded = 21,
+    MetadataValueTooLong = 22,
+    InvalidAssetClass = 23,
 }
 
 #[contracttype]
@@ -148,10 +153,13 @@ impl RWAToken {
             panic_with_error!(&env, RWATokenError::MetadataLimitExceeded);
         }
 
+        // The initial supply is minted below, so the stored supply starts at
+        // zero and `mint` brings it up to `total_supply`. Setting it here as
+        // well would count the initial supply twice.
         let token_info = TokenInfo {
             name: name.clone(),
             symbol: symbol.clone(),
-            total_supply,
+            total_supply: 0,
             decimals,
             asset_type: asset_type.clone(),
             metadata,
@@ -443,6 +451,230 @@ impl RWAToken {
         );
     }
 
+    // ── Issue #175: carbon credit retirement ────────────────────────────────
+
+    fn is_carbon_credit(env: &Env, asset_type: &Symbol) -> bool {
+        *asset_type == Symbol::new(env, crate::carbon_credit::CARBON_CREDIT_ASSET_TYPE)
+            || *asset_type == Symbol::new(env, "carbon_credit")
+    }
+
+    /// Permanently retires `amount` of `owner`'s carbon credits.
+    ///
+    /// The credits are removed from the owner's balance and from the token's
+    /// total supply, and an immutable retirement record is appended to the
+    /// owner's certificate. There is no un-retire entry point, so retired
+    /// credits can never re-enter circulation or be transferred.
+    pub fn retire_credits(env: Env, owner: Address, amount: i128) {
+        let purpose = Symbol::new(&env, "retire");
+        Self::retire_credits_with_purpose(env, owner, amount, purpose);
+    }
+
+    /// Retires carbon credits with a purpose recorded on the certificate
+    /// (e.g. `offset`, `compliance`, `voluntary`).
+    pub fn retire_credits_with_purpose(
+        env: Env,
+        owner: Address,
+        amount: i128,
+        purpose: Symbol,
+    ) {
+        if amount <= 0 {
+            panic_with_error!(&env, RWATokenError::InvalidAmount);
+        }
+
+        owner.require_auth();
+        Self::check_version(&env);
+
+        let mut token_info = Self::read_token_info(&env);
+
+        if !Self::is_carbon_credit(&env, &token_info.asset_type) {
+            panic_with_error!(&env, RWATokenError::InvalidAssetClass);
+        }
+
+        if token_info.is_paused || token_info.is_frozen {
+            panic_with_error!(&env, RWATokenError::TransferPaused);
+        }
+
+        let mut balance = Self::refresh_balance(&env, &owner);
+        let spendable = balance.amount.saturating_sub(balance.locked_amount);
+        if spendable < amount {
+            panic_with_error!(&env, RWATokenError::InsufficientBalance);
+        }
+
+        balance.amount = balance
+            .amount
+            .checked_sub(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Underflow));
+        env.storage().instance().set(&owner, &balance);
+
+        token_info.total_supply = token_info
+            .total_supply
+            .checked_sub(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Underflow));
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "token_info"), &token_info);
+
+        Self::adjust_holders(&env, &owner, -amount);
+
+        let record = crate::carbon_credit::RetirementRecord {
+            owner: owner.clone(),
+            amount,
+            timestamp: env.ledger().timestamp(),
+            purpose: purpose.clone(),
+        };
+        crate::carbon_credit::append_retirement(&env, &owner, record);
+
+        env.events().publish(
+            (Symbol::new(&env, "credits_retired"), owner),
+            (amount, purpose, env.ledger().timestamp()),
+        );
+    }
+
+    /// Every retirement recorded for `owner`, oldest first. The certificate is
+    /// append-only and is not affected by later transfers.
+    pub fn get_retirement_certificate(
+        env: Env,
+        owner: Address,
+    ) -> Vec<crate::carbon_credit::RetirementRecord> {
+        crate::carbon_credit::get_retirements(&env, &owner)
+    }
+
+    /// Total credits `owner` has permanently retired.
+    pub fn get_total_retired(env: Env, owner: Address) -> i128 {
+        crate::carbon_credit::total_retired(&env, &owner)
+    }
+
+    // ── Issue #176: art provenance ──────────────────────────────────────────
+
+    fn is_art(env: &Env, asset_type: &Symbol) -> bool {
+        *asset_type == Symbol::new(env, crate::art::ART_ASSET_TYPE)
+            || *asset_type == Symbol::new(env, "art")
+    }
+
+    fn append_art_entry(
+        env: &Env,
+        token: &Address,
+        owner: &Address,
+        method: Symbol,
+        price: i128,
+        location: Symbol,
+        event_type: crate::art::ProvenanceEventType,
+    ) {
+        crate::art::append_provenance(
+            env,
+            token,
+            crate::art::ProvenanceEntry {
+                owner: owner.clone(),
+                acquired_date: env.ledger().timestamp(),
+                method,
+                price,
+                location,
+                event_type,
+            },
+        );
+    }
+
+    /// Automatically records a purchase entry when an art token is transferred.
+    fn auto_append_art_provenance(env: &Env, owner: &Address) {
+        let token_info = Self::read_token_info(env);
+        if !Self::is_art(env, &token_info.asset_type) {
+            return;
+        }
+
+        Self::append_art_entry(
+            env,
+            &env.current_contract_address(),
+            owner,
+            Symbol::new(env, "purchase"),
+            0,
+            Symbol::new(env, "transfer"),
+            crate::art::ProvenanceEventType::Purchase,
+        );
+    }
+
+    /// Transfers an artwork and records the acquisition method on-chain.
+    /// Use this instead of `transfer` when the transfer is not a plain sale
+    /// (inheritance, auction or loan).
+    pub fn transfer_art(
+        env: Env,
+        from: Address,
+        to: Address,
+        amount: i128,
+        method: Symbol,
+        price: i128,
+        location: Symbol,
+        event_type: crate::art::ProvenanceEventType,
+    ) {
+        from.require_auth();
+
+        let token_info = Self::read_token_info(&env);
+        if !Self::is_art(&env, &token_info.asset_type) {
+            panic_with_error!(&env, RWATokenError::InvalidAssetClass);
+        }
+
+        Self::transfer_internal(&env, &from, &to, amount);
+        Self::adjust_holders(&env, &from, -amount);
+        Self::adjust_holders(&env, &to, amount);
+
+        Self::append_art_entry(
+            &env,
+            &env.current_contract_address(),
+            &to,
+            method.clone(),
+            price,
+            location.clone(),
+            event_type,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "art_transfer"), from),
+            (to, amount, method, price, location, env.ledger().timestamp()),
+        );
+    }
+
+    /// Records an art acquisition that happened off-chain (inheritance,
+    /// auction, loan) on the provenance chain. Admin-only.
+    pub fn record_art_provenance(
+        env: Env,
+        auth: Address,
+        owner: Address,
+        method: Symbol,
+        price: i128,
+        location: Symbol,
+        event_type: crate::art::ProvenanceEventType,
+    ) {
+        crate::shared_admin::require_admin(&env, &auth);
+
+        let token_info = Self::read_token_info(&env);
+        if !Self::is_art(&env, &token_info.asset_type) {
+            panic_with_error!(&env, RWATokenError::InvalidAssetClass);
+        }
+
+        Self::append_art_entry(
+            &env,
+            &env.current_contract_address(),
+            &owner,
+            method.clone(),
+            price,
+            location.clone(),
+            event_type,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "art_provenance_recorded"), owner),
+            (method, price, location, env.ledger().timestamp()),
+        );
+    }
+
+    /// The complete provenance chain for `token`, oldest first. The history is
+    /// immutable: entries are only ever appended.
+    pub fn get_provenance_history(
+        env: Env,
+        token: Address,
+    ) -> Vec<crate::art::ProvenanceEntry> {
+        crate::art::get_provenance(&env, &token)
+    }
+
     fn transfer_internal(env: &Env, from: &Address, to: &Address, amount: i128) {
         if amount <= 0 {
             panic_with_error!(env, RWATokenError::InvalidAmount);
@@ -492,6 +724,9 @@ impl RWAToken {
         // Issue #109 — keep the holder registry in step with the balances.
         Self::adjust_holders(&env, &from, -amount);
         Self::adjust_holders(&env, &to, amount);
+
+        // Issue #176 — an art token records every transfer on its chain.
+        Self::auto_append_art_provenance(&env, &to);
 
         env.events().publish(
             (Symbol::new(&env, "transfer"), from),
@@ -557,13 +792,15 @@ impl RWAToken {
         Self::adjust_holders(&env, &from, -amount);
         Self::adjust_holders(&env, &to, amount);
 
+        Self::auto_append_art_provenance(&env, &to);
+
         env.events().publish(
             (Symbol::new(&env, "forced_transfer"), from.clone()),
             (admin, to, amount, reason, env.ledger().timestamp()),
         );
     }
 
-    pub fn get_token_info(env: Env) -> TokenInfo {
+    fn read_allowances(env: &Env) -> Map<(Address, Address), i128> {
         env.storage()
             .instance()
             .get(&allowances_key(env))
@@ -660,6 +897,10 @@ impl RWAToken {
         let remaining = approved - amount;
         Self::write_allowance(&env, &from, &spender, remaining);
 
+        Self::adjust_holders(&env, &from, -amount);
+        Self::adjust_holders(&env, &to, amount);
+        Self::auto_append_art_provenance(&env, &to);
+
         env.events().publish(
             (Symbol::new(&env, "transfer_from"), spender),
             (from, to, amount, env.ledger().timestamp()),
@@ -670,6 +911,15 @@ impl RWAToken {
 
     pub fn get_token_info(env: Env) -> TokenInfo {
         Self::read_token_info(&env)
+    }
+
+    /// Issue #96: the owner's currently active lock slots. Expired slots are
+    /// pruned by the balance refresh so the result only holds live locks.
+    pub fn get_lock_slots(env: Env, owner: Address) -> Vec<LockSlot> {
+        Self::refresh_balance(&env, &owner);
+        Self::read_locks(&env)
+            .get(owner)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn get_balance(env: Env, address: Address) -> Balance {
@@ -1191,6 +1441,11 @@ impl RWAToken {
                 .checked_add(amount)
                 .unwrap_or_else(|| panic_with_error!(&env, RWATokenError::Overflow));
             env.storage().instance().set(&to, &to_balance);
+        }
+
+        for i in 0..recipients.len() {
+            let to = recipients.get(i).unwrap();
+            Self::auto_append_art_provenance(&env, &to);
         }
 
         env.events().publish(
