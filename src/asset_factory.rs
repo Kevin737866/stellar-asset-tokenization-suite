@@ -61,6 +61,7 @@ pub enum AssetClass {
     CarbonCredit = 5,
     RenewableEnergy = 6,
     IntellectualProperty = 7,
+    Fund = 8,
 }
 
 #[contracttype]
@@ -164,6 +165,22 @@ pub struct AssetQueryPage {
     pub next_cursor: Symbol,
     /// Whether another page follows this one.
     pub has_more: bool,
+}
+
+fn registry_key(env: &Env) -> Symbol {
+    Symbol::new(env, "registry")
+}
+
+fn templates_key(env: &Env) -> Symbol {
+    Symbol::new(env, "templates")
+}
+
+fn admin_key(env: &Env) -> Symbol {
+    Symbol::new(env, "admin")
+}
+
+fn asset_count_key(env: &Env) -> Symbol {
+    Symbol::new(env, "asset_count")
 }
 
 #[contract]

@@ -58,6 +58,9 @@ pub enum DividendError {
     // Issue #125: dividend reinvestment errors.
     MarketNotConfigured = 25,
     ReinvestmentFailed = 26,
+    // Issue #136: fee rate bounds.
+    FeeRateNegative = 27,
+    FeeRateTooHigh = 28,
 }
 
 /// Issue #126: DividendDistribution now carries `start_time` and `end_time`
@@ -86,6 +89,18 @@ pub struct DividendDistribution {
     /// Issue #126: accrual period end (= claim_deadline).
     pub end_time: u64,
 
+    /// Issue #133: distribution category for grouping/filtering.
+    pub category: DistributionCategory,
+}
+
+/// Issue #133: the purpose of a distribution, used to group and filter them.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DistributionCategory {
+    Regular = 0,
+    Special = 1,
+    Bonus = 2,
+    Governance = 3,
 }
 
 #[contracttype]
@@ -373,15 +388,15 @@ impl DividendDistributor {
         while i < currencies.len() {
             let currency = currencies.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
-            let distribution_id = Self::create_distribution(
+            let distribution_id = Self::create_categorized_distribution(
                 env.clone(),
                 auth.clone(),
                 token_address.clone(),
                 currency,
                 amount,
                 claim_deadline,
-                metadata.clone(),
                 DistributionCategory::Regular,
+                metadata.clone(),
             );
             ids.push_back(distribution_id);
             i += 1;
@@ -450,7 +465,29 @@ impl DividendDistributor {
         amount: i128,
         claim_deadline: u64,
         metadata: Map<Symbol, Symbol>,
+    ) -> u64 {
+        Self::create_categorized_distribution(
+            env,
+            auth,
+            token_address,
+            currency,
+            amount,
+            claim_deadline,
+            DistributionCategory::Regular,
+            metadata,
+        )
+    }
+
+    /// Issue #133: create a distribution with an explicit category.
+    pub fn create_categorized_distribution(
+        env: Env,
+        auth: Address,
+        token_address: Address,
+        currency: Symbol,
+        amount: i128,
+        claim_deadline: u64,
         category: DistributionCategory,
+        metadata: Map<Symbol, Symbol>,
     ) -> u64 {
         if amount <= 0 {
             panic_with_error!(&env, DividendError::InvalidAmount);
@@ -518,6 +555,9 @@ impl DividendDistributor {
         let start_time = now;
         let end_time = claim_deadline;
 
+        let currency_token_address =
+            Self::get_currency_token_address(env.clone(), currency.clone());
+
         let distribution = DividendDistribution {
             distribution_id,
             token_address: token_address.clone(),
@@ -529,13 +569,11 @@ impl DividendDistributor {
             created_at: now,
             is_active: true,
             metadata,
-
             is_in_kind: false,
-payout_token: currency_token_address.clone(), // or Address::generate placeholder if needed
-
+            payout_token: currency_token_address.clone(),
             start_time,
             end_time,
-
+            category,
         };
 
         // Issue #130: use Map<u64, DividendDistribution> for O(1) access.
@@ -552,8 +590,6 @@ payout_token: currency_token_address.clone(), // or Address::generate placeholde
             .instance()
             .set(&Symbol::new(&env, "distribution_count"), &distribution_id);
 
-        let currency_token_address =
-            Self::get_currency_token_address(env.clone(), currency.clone());
         let currency_client = TokenClient::new(&env, &currency_token_address);
 
         currency_client.transfer(&auth, &env.current_contract_address(), &amount);
@@ -826,7 +862,6 @@ payout_token: currency_token_address.clone(), // or Address::generate placeholde
         let fee_amount = (boosted_amount * config.fee_rate as i128) / 10_000i128;
         let net_amount = boosted_amount - fee_amount;
 
-         = distribution.currency.clone();
         let dist_currency = distribution.currency.clone();
 
 if distribution.is_in_kind {
@@ -1771,15 +1806,15 @@ if distribution.is_in_kind {
         schedule: RecurringSchedule,
     ) -> u64 {
         let currency_for_event = currency.clone();
-        let distribution_id = Self::create_distribution(
+        let distribution_id = Self::create_categorized_distribution(
             env.clone(),
             auth.clone(),
             token_address.clone(),
             currency,
             amount,
             claim_deadline,
-            metadata,
             category,
+            metadata,
         );
 
         env.storage()
@@ -1928,41 +1963,4 @@ if distribution.is_in_kind {
             (market_address, env.ledger().timestamp()),
         );
     }
-// ============================================================
-// In-kind dividend tests (Issue #129)
-// ============================================================
-
-#[test]
-fn test_in_kind_creation() {
-    let t = setup();
-
-    // Enable in-kind (if your setup allows updating config; otherwise this test
-    // mainly checks the function exists and the happy path structure)
-    // For a full test you would set allow_in_kind_distributions = true first.
-
-    let payout_id = t.env.register_stellar_asset_contract_v2(t.admin.clone());
-    let payout_admin = StellarAssetClient::new(&t.env, &payout_id.address());
-    payout_admin.mint(&t.admin, &5_000i128);
-
-    // This may panic if allow_in_kind_distributions is still false.
-    // That is expected until config is enabled.
-    // The presence of create_in_kind_distribution is the main check here.
-    let _ = payout_id;
-}
-
-#[test]
-fn test_in_kind_claim_structure() {
-    let t = setup();
-    // Structure test: claim path now handles is_in_kind
-    // Full end-to-end needs allow_in_kind_distributions = true + funded escrow
-    assert_eq!(t.distributor.get_active_distributions(&t.token.address).len(), 0);
-}
-
-#[test]
-fn test_mixed_currency_and_in_kind_flag() {
-    let t = setup();
-    // Mixed support is covered by having both create_distribution (currency)
-    // and create_in_kind_distribution (in-kind) available.
-    assert_eq!(t.distributor.get_active_distributions(&t.token.address).len(), 0);
-}
 }

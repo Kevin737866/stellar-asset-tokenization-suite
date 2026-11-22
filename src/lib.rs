@@ -17,6 +17,7 @@ pub mod intellectual_property;
 pub mod security;
 pub mod art;
 pub mod carbon_credit;
+pub mod fund;
 pub mod renewable_energy;
 
 #[cfg(test)]

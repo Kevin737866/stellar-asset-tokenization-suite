@@ -7,6 +7,7 @@ use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules, DividendSch
 pub use crate::art;
 pub use crate::carbon_credit;
 pub use crate::commodity;
+pub use crate::fund;
 pub use crate::intellectual_property;
 pub use crate::invoice;
 pub use crate::real_estate;
@@ -116,6 +117,15 @@ impl AssetClassHandlers {
         renewable_energy::create_rec_config(env, base_config, rec_config)
     }
 
+    /// Issue #174: fund/basket asset class for multi-asset portfolios.
+    pub fn create_fund_config(
+        env: Env,
+        base_config: AssetConfig,
+        fund_config: fund::FundConfig,
+    ) -> AssetConfig {
+        fund::create_fund_config(env, base_config, fund_config)
+    }
+
     /// Issue #170: intellectual property asset class (patents, trademarks,
     /// copyrights and trade secrets).
     pub fn create_ip_config(
@@ -192,6 +202,13 @@ impl AssetClassHandlers {
                 holding_period_days: intellectual_property::IP_HOLDING_PERIOD_DAYS,
                 transfer_limits: intellectual_property::IP_TRANSFER_LIMIT,
             },
+            AssetClass::Fund => ComplianceRules {
+                kyc_required: true,
+                accredited_investor_only: true,
+                geographic_restrictions: Vec::new(&env),
+                holding_period_days: 30,
+                transfer_limits: 5_000_000,
+            },
         }
     }
 
@@ -224,6 +241,12 @@ impl AssetClassHandlers {
             AssetClass::CarbonCredit => None,
             AssetClass::RenewableEnergy => None,
             AssetClass::IntellectualProperty => None,
+            AssetClass::Fund => Some(DividendSchedule {
+                frequency_days: 90,
+                next_distribution_date: env.ledger().timestamp() + (90 * 86400),
+                total_distributed: 0,
+                is_active: true,
+            }),
         }
     }
 }
