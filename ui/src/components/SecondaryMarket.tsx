@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
@@ -19,7 +19,8 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [userOrders, setUserOrders] = useState<Order[]>([]);
   const [kycStatus, setKycStatus] = useState<boolean>(false);
   const [dividendHalt, setDividendHalt] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{ id: number; message: string } | null>(null);
+  const statusMessageSequence = useRef(0);
 
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
@@ -129,28 +130,39 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    setStatusMessage(null);
 
     if (!kycStatus) {
+      const message =
+        'Please complete KYC verification before trading. Visit the compliance page to verify your identity.';
+      setStatusMessage({ id: ++statusMessageSequence.current, message });
       toast.warning(
         'KYC Verification Required',
-        'Please complete KYC verification before trading. Visit the compliance page to verify your identity.'
+        message
       );
       return;
     }
     if (dividendHalt) {
+      const message =
+        'Trading is temporarily halted during the dividend record date. Trading will resume automatically.';
+      setStatusMessage({ id: ++statusMessageSequence.current, message });
       toast.warning(
         'Trading Halted',
-        'Trading is temporarily halted during the dividend record date. Trading will resume automatically.'
+        message
       );
       return;
     }
 
     if (!price || parseFloat(price) <= 0) {
-      toast.warning('Invalid Price', 'Please enter a valid price greater than zero.');
+      const message = 'Please enter a valid price greater than zero.';
+      setStatusMessage({ id: ++statusMessageSequence.current, message });
+      toast.warning('Invalid Price', message);
       return;
     }
     if (!amount || parseFloat(amount) <= 0) {
-      toast.warning('Invalid Amount', 'Please enter a valid amount greater than zero.');
+      const message = 'Please enter a valid amount greater than zero.';
+      setStatusMessage({ id: ++statusMessageSequence.current, message });
+      toast.warning('Invalid Amount', message);
       return;
     }
 
@@ -178,6 +190,10 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       setLastOrderParams(null);
     } catch (err: any) {
       const { title, message } = translateError(err);
+      setStatusMessage({
+        id: ++statusMessageSequence.current,
+        message: `Order placement failed: ${title}. ${message}`,
+      });
       toast.error(title, message, () => {
         if (lastOrderParams) {
           setSide(lastOrderParams.side);
@@ -244,7 +260,9 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       aria-label={`Secondary market for ${asset.symbol}`}
     >
       {statusMessage && (
-        <div role="status" aria-live="polite" className="sr-only">{statusMessage}</div>
+        <div key={statusMessage.id} role="alert" aria-live="assertive" aria-atomic="true" className="sr-only">
+          {statusMessage.message}
+        </div>
       )}
 
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-gray-200 dark:border-gray-700 pb-4 mb-5">
