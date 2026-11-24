@@ -5,10 +5,15 @@ import { StellarRWASDK } from '../../sdk/src';
 import { Address } from '../../sdk/src';
 import { KYCStatus, VerificationLevel, TransferLimits } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
+import { canonicalAccount } from './walletSession';
+import { useAccountScopedState } from './useAccountScopedState';
+import { WalletDisconnectButton } from './WalletDisconnectButton';
 
 interface ComplianceDashboardProps {
   sdk: StellarRWASDK;
   userAddress: string;
+  onDisconnect?: () => Promise<void> | void;
+  onDisconnected?: () => void;
 }
 
 const VERIFICATION_LABELS: Record<number, string> = {
@@ -51,23 +56,30 @@ function ProgressBar({ used, total, color }: { used: number; total: number; colo
   );
 }
 
-export default function ComplianceDashboard({ sdk, userAddress }: ComplianceDashboardProps) {
+export default function ComplianceDashboard({ sdk, userAddress, onDisconnect, onDisconnected }: ComplianceDashboardProps) {
   const toast = useToast();
   const translateError = useErrorTranslator();
 
-  const [kycStatus, setKycStatus] = useState<KYCStatus | null>(null);
-  const [transferLimits, setTransferLimits] = useState<TransferLimits | null>(null);
-  const [isBlacklisted, setIsBlacklisted] = useState<boolean>(false);
-  const [isWhitelisted, setIsWhitelisted] = useState<boolean>(false);
+  // Account-scoped views are cleared on disconnect or account switch.
+  const [kycStatus, setKycStatus] = useAccountScopedState<KYCStatus | null>(userAddress, () => null);
+  const [transferLimits, setTransferLimits] = useAccountScopedState<TransferLimits | null>(userAddress, () => null);
+  const [isBlacklisted, setIsBlacklisted] = useAccountScopedState<boolean>(userAddress, () => false);
+  const [isWhitelisted, setIsWhitelisted] = useAccountScopedState<boolean>(userAddress, () => false);
 
   const [isLoading, setIsLoading] = useState(true);
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useAccountScopedState<string | null>(userAddress, () => null);
 
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [adminTargetAddress, setAdminTargetAddress] = useState('');
+  const [isAdmin, setIsAdmin] = useAccountScopedState(userAddress, () => false);
+  const [adminTargetAddress, setAdminTargetAddress] = useAccountScopedState(userAddress, () => '');
   const [adminActionLoading, setAdminActionLoading] = useState(false);
 
   const fetchData = useCallback(async (showToasts = true) => {
+    const account = canonicalAccount(userAddress);
+    if (account === null) {
+      setIsLoading(false);
+      return;
+    }
+
     setFetchError(null);
     setIsLoading(true);
     try {
@@ -102,7 +114,13 @@ export default function ComplianceDashboard({ sdk, userAddress }: ComplianceDash
   }, [fetchData]);
 
   const handleAdminAction = async (action: string, reason?: string) => {
-    const target = adminTargetAddress || userAddress;
+    const account = canonicalAccount(userAddress);
+    if (account === null) {
+      toast.warning('Wallet Not Connected', 'Connect a wallet to perform admin actions.');
+      return;
+    }
+
+    const target = adminTargetAddress || account;
     if (!target) {
       toast.warning('Missing Address', 'Please enter a target address.');
       return;
@@ -175,6 +193,13 @@ export default function ComplianceDashboard({ sdk, userAddress }: ComplianceDash
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Compliance Dashboard</h1>
         <div className="flex items-center gap-3">
+          {onDisconnect && (
+            <WalletDisconnectButton
+              account={userAddress}
+              onDisconnect={onDisconnect}
+              onDisconnected={onDisconnected}
+            />
+          )}
           <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 cursor-pointer">
             <input
               type="checkbox"

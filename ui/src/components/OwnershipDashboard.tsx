@@ -35,6 +35,9 @@ import {
 } from 'lucide-react';
 import { AssetInfo, Balance, AssetHolding, Portfolio } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+import { canonicalAccount } from './walletSession';
+import { useAccountScopedState } from './useAccountScopedState';
+import { WalletDisconnectButton } from './WalletDisconnectButton';
 
 interface OwnershipDashboardProps {
   userAddress: string;
@@ -43,6 +46,8 @@ interface OwnershipDashboardProps {
   onUnlockTokens?: (assetAddress: string, amount: string) => Promise<void>;
   onClaimDividends?: (assetAddress: string, distributionId: number) => Promise<void>;
   isLoading?: boolean;
+  onDisconnect?: () => Promise<void> | void;
+  onDisconnected?: () => void;
 }
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82CA9D'];
@@ -54,14 +59,17 @@ export default function OwnershipDashboard({
   onUnlockTokens,
   onClaimDividends,
   isLoading = false,
+  onDisconnect,
+  onDisconnected,
 }: OwnershipDashboardProps) {
   const toast = useToast();
   const translateError = useErrorTranslator();
 
-  const [selectedAsset, setSelectedAsset] = useState<AssetHolding | null>(null);
-  const [lockAmount, setLockAmount] = useState('');
-  const [lockPeriod, setLockPeriod] = useState('');
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  // Account-scoped views are cleared on disconnect or account switch.
+  const [selectedAsset, setSelectedAsset] = useAccountScopedState<AssetHolding | null>(userAddress, () => null);
+  const [lockAmount, setLockAmount] = useAccountScopedState(userAddress, () => '');
+  const [lockPeriod, setLockPeriod] = useAccountScopedState(userAddress, () => '');
+  const [statusMessage, setStatusMessage] = useAccountScopedState<string | null>(userAddress, () => null);
 
   // Loading states for operations
   const [isLocking, setIsLocking] = useState(false);
@@ -69,10 +77,10 @@ export default function OwnershipDashboard({
   const [isClaiming, setIsClaiming] = useState<string | null>(null);
 
   // Error states
-  const [lockError, setLockError] = useState<string | null>(null);
-  const [unlockError, setUnlockError] = useState<Record<string, string>>({});
-  const [claimError, setClaimError] = useState<Record<string, string>>({});
-  const [isNetworkError, setIsNetworkError] = useState(false);
+  const [lockError, setLockError] = useAccountScopedState<string | null>(userAddress, () => null);
+  const [unlockError, setUnlockError] = useAccountScopedState<Record<string, string>>(userAddress, () => ({}));
+  const [claimError, setClaimError] = useAccountScopedState<Record<string, string>>(userAddress, () => ({}));
+  const [isNetworkError, setIsNetworkError] = useAccountScopedState(userAddress, () => false);
 
   // Prepare data for charts
   const pieChartData = portfolio.assets.map((holding) => ({
@@ -93,6 +101,7 @@ export default function OwnershipDashboard({
   const totalVotingPower = parseFloat(portfolio.votingPower);
 
   const handleLockTokens = async () => {
+    if (canonicalAccount(userAddress) === null) return;
     if (!selectedAsset || !lockAmount || !lockPeriod) return;
 
     // Inline validation
@@ -142,6 +151,7 @@ export default function OwnershipDashboard({
   };
 
   const handleUnlockTokens = async (assetAddress: string, amount: string) => {
+    if (canonicalAccount(userAddress) === null) return;
     setIsUnlocking(assetAddress);
     setUnlockError((prev) => ({ ...prev, [assetAddress]: '' }));
     setIsNetworkError(false);
@@ -173,6 +183,7 @@ export default function OwnershipDashboard({
   };
 
   const handleClaimDividends = async (assetAddress: string, distributionId: number) => {
+    if (canonicalAccount(userAddress) === null) return;
     setIsClaiming(assetAddress);
     setClaimError((prev) => ({ ...prev, [assetAddress]: '' }));
     setIsNetworkError(false);
@@ -226,6 +237,16 @@ export default function OwnershipDashboard({
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
+      {onDisconnect && (
+        <div className="flex justify-end">
+          <WalletDisconnectButton
+            account={userAddress}
+            onDisconnect={onDisconnect}
+            onDisconnected={onDisconnected}
+          />
+        </div>
+      )}
+
       {/* Network Error Banner */}
       {isNetworkError && (
         <Alert variant="destructive">

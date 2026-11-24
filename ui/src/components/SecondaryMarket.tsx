@@ -2,33 +2,40 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
+import { canonicalAccount } from './walletSession';
+import { useAccountScopedState } from './useAccountScopedState';
+import { WalletDisconnectButton } from './WalletDisconnectButton';
 
 interface SecondaryMarketProps {
   sdk: StellarRWASDK;
   asset: AssetInfo;
   userAddress: string;
+  onDisconnect?: () => Promise<void> | void;
+  onDisconnected?: () => void;
 }
 
-const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress }) => {
+const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress, onDisconnect, onDisconnected }) => {
   const toast = useToast();
   const translateError = useErrorTranslator();
 
   const [orderBook, setOrderBook] = useState<OrderBook | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [vwap, setVwap] = useState<string>('0');
-  const [userOrders, setUserOrders] = useState<Order[]>([]);
-  const [kycStatus, setKycStatus] = useState<boolean>(false);
-  const [dividendHalt, setDividendHalt] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Account-scoped views are cleared on disconnect or account switch.
+  const [userOrders, setUserOrders] = useAccountScopedState<Order[]>(userAddress, () => []);
+  const [kycStatus, setKycStatus] = useAccountScopedState(userAddress, () => false);
+  const [dividendHalt, setDividendHalt] = useAccountScopedState(userAddress, () => false);
+  const [statusMessage, setStatusMessage] = useAccountScopedState<string | null>(userAddress, () => null);
 
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
-  const [fetchError, setFetchError] = useState<string | null>(null);
-  const [isNetworkError, setIsNetworkError] = useState(false);
+  const [fetchError, setFetchError] = useAccountScopedState<string | null>(userAddress, () => null);
+  const [isNetworkError, setIsNetworkError] = useAccountScopedState(userAddress, () => false);
 
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
-  const [price, setPrice] = useState<string>('');
-  const [amount, setAmount] = useState<string>('');
+  const [price, setPrice] = useAccountScopedState(userAddress, () => '');
+  const [amount, setAmount] = useAccountScopedState(userAddress, () => '');
 
   const [feePreview, setFeePreview] = useState<{
     baseFee: string;
@@ -37,13 +44,13 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
     feeCurrency: string;
   } | null>(null);
 
-  const [portfolioPnl, setPortfolioPnl] = useState<string | null>(null);
+  const [portfolioPnl, setPortfolioPnl] = useAccountScopedState<string | null>(userAddress, () => null);
 
-  const [lastOrderParams, setLastOrderParams] = useState<{
+  const [lastOrderParams, setLastOrderParams] = useAccountScopedState<{
     side: 'buy' | 'sell';
     price: string;
     amount: string;
-  } | null>(null);
+  } | null>(userAddress, () => null);
 
   const chartData = useMemo(() => {
     if (!trades || trades.length === 0) return [];
@@ -63,6 +70,12 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   }, [chartData]);
 
   const fetchMarketData = useCallback(async (showToasts: boolean = true) => {
+    const account = canonicalAccount(userAddress);
+    if (account === null) {
+      setIsLoadingData(false);
+      return;
+    }
+
     setFetchError(null);
 
     try {
@@ -130,6 +143,10 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (canonicalAccount(userAddress) === null) {
+      toast.warning('Wallet Not Connected', 'Connect a wallet before placing an order.');
+      return;
+    }
     if (!kycStatus) {
       toast.warning(
         'KYC Verification Required',
@@ -250,6 +267,13 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-gray-200 dark:border-gray-700 pb-4 mb-5">
         <h1 className="text-xl font-semibold">{asset.symbol} - Secondary Market</h1>
         <div className="flex items-center gap-3 mt-2 sm:mt-0 text-sm">
+          {onDisconnect && (
+            <WalletDisconnectButton
+              account={userAddress}
+              onDisconnect={onDisconnect}
+              onDisconnected={onDisconnected}
+            />
+          )}
           <span className="text-gray-500 dark:text-gray-400" aria-label={`Volume-weighted average price: ${vwap}`}>
             VWAP: {vwap}
           </span>
