@@ -10,6 +10,9 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, TrendingUp, Clock, DollarSign, History, Settings, Zap } from 'lucide-react';
+import { canonicalAccount } from './walletSession';
+import { useAccountScopedState } from './useAccountScopedState';
+import { WalletDisconnectButton } from './WalletDisconnectButton';
 
 interface DividendDistribution {
   distributionId: number;
@@ -53,6 +56,8 @@ interface DividendPanelProps {
   }) => Promise<{ txHash: string; distributionId: number }>;
   onEstimateGas?: (distributionId: number) => Promise<{ baseFee: string; totalFee: string }>;
   isLoading?: boolean;
+  onDisconnect?: () => Promise<void> | void;
+  onDisconnected?: () => void;
 }
 
 const CURRENCIES = ['USDC', 'XLM', 'EURC', 'BTC', 'ETH'];
@@ -68,19 +73,23 @@ export default function DividendPanel({
   onCreateDistribution,
   onEstimateGas,
   isLoading = false,
+  onDisconnect,
+  onDisconnected,
 }: DividendPanelProps) {
   const [autoClaim, setAutoClaim] = useState(false);
-  const [claimLoading, setClaimLoading] = useState<Record<number, boolean>>({});
-  const [gasEstimates, setGasEstimates] = useState<Record<number, { baseFee: string; totalFee: string }>>({});
-  const [showCreateForm, setShowCreateForm] = useState(false);
-  const [createForm, setCreateForm] = useState({
+
+  // Account-scoped views are cleared on disconnect or account switch.
+  const [claimLoading, setClaimLoading] = useAccountScopedState<Record<number, boolean>>(userAddress, () => ({}));
+  const [gasEstimates, setGasEstimates] = useAccountScopedState<Record<number, { baseFee: string; totalFee: string }>>(userAddress, () => ({}));
+  const [showCreateForm, setShowCreateForm] = useAccountScopedState(userAddress, () => false);
+  const [createForm, setCreateForm] = useAccountScopedState(userAddress, () => ({
     tokenAddress: '',
     currency: 'USDC',
     amount: '',
     deadlineDays: '30',
-  });
-  const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
-  const [claimError, setClaimError] = useState<string | null>(null);
+  }));
+  const [claimSuccess, setClaimSuccess] = useAccountScopedState<string | null>(userAddress, () => null);
+  const [claimError, setClaimError] = useAccountScopedState<string | null>(userAddress, () => null);
 
   // Sort distributions by deadline (closest first) and active status
   const sortedDistributions = useMemo(() => {
@@ -118,6 +127,7 @@ export default function DividendPanel({
   };
 
   const handleClaim = async (distributionId: number) => {
+    if (canonicalAccount(userAddress) === null) return;
     setClaimLoading(prev => ({ ...prev, [distributionId]: true }));
     setClaimError(null);
     setClaimSuccess(null);
@@ -136,6 +146,7 @@ export default function DividendPanel({
   };
 
   const handleClaimAll = async () => {
+    if (canonicalAccount(userAddress) === null) return;
     setClaimError(null);
     setClaimSuccess(null);
 
@@ -155,6 +166,7 @@ export default function DividendPanel({
   };
 
   const handleCreateDistribution = async () => {
+    if (canonicalAccount(userAddress) === null) return;
     if (!onCreateDistribution) return;
 
     try {
@@ -227,6 +239,16 @@ export default function DividendPanel({
       role="region"
       aria-label="Dividend management panel"
     >
+      {onDisconnect && (
+        <div className="flex justify-end">
+          <WalletDisconnectButton
+            account={userAddress}
+            onDisconnect={onDisconnect}
+            onDisconnected={onDisconnected}
+          />
+        </div>
+      )}
+
       {/* Yield Summary Cards */}
       <div
         className="grid grid-cols-1 md:grid-cols-3 gap-4"
