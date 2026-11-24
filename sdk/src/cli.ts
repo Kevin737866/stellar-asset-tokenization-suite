@@ -130,10 +130,9 @@ async function runGenerateTypes(args: string[]): Promise<void> {
   }
 
   const networkName = options['network'] || 'testnet';
-  const networkConfig = STELLAR_NETWORKS[networkName];
-  if (contracts.length > 0 && !networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
-  }
+  // Network is only used when fetching contracts; schema-only runs ignore it.
+  const networkConfig =
+    contracts.length > 0 ? resolveNetwork(networkName) : STELLAR_NETWORKS[networkName];
 
   let manualTypesFile = options['manual-types'];
   if (!manualTypesFile) {
@@ -182,6 +181,7 @@ Options:
   --fee <fee>            Liquidity pool fee in basis points (default: 30)
   --secret <secret>      Secret key of the depositor [required]
   --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
+  --confirm-mainnet   Required with --network mainnet: explicit confirmation that this command moves real funds on the public network
   --horizon-url <url>    Horizon server URL (optional, overrides default for network)
   --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
   --help, -h             Show this help message
@@ -207,6 +207,7 @@ Options:
   --reason <reason>             Short reason code for the claim (default: "undercollateralized")
   --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
   --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
+  --confirm-mainnet   Required with --network mainnet: explicit confirmation that this command moves real funds on the public network
   --horizon-url <url>           Horizon server URL (optional, overrides default for network)
   --force                       Skip collateralization check and liquidate unconditionally
   --help, -h                    Show this help message
@@ -292,15 +293,115 @@ export async function prompt(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Safe network selection (exported for reuse in tests)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type StellarNetworkName = 'testnet' | 'mainnet' | 'futurenet' | 'standalone';
+
+/** Network names the CLI accepts in `--network` (single source of truth). */
+export const SUPPORTED_NETWORKS: readonly StellarNetworkName[] = [
+  'testnet',
+  'mainnet',
+  'futurenet',
+  'standalone',
+];
+
+export interface ResolvedNetwork {
+  name: StellarNetworkName;
+  horizonUrl: string;
+  passphrase: string;
+  /** True only for mainnet — the one network where commands move real funds. */
+  isProduction: boolean;
+}
+
+/**
+ * Hostnames of Stellar's public Horizon servers, keyed by network. Used only
+ * to catch a `--horizon-url` that points at a *different* network's public
+ * Horizon (e.g. mainnet + the testnet Horizon). Any other host — a private
+ * Horizon, a proxy, localhost — is accepted for any network.
+ */
+const PUBLIC_HORIZON_HOSTS: Record<StellarNetworkName, string> = {
+  testnet: 'horizon-testnet.stellar.org',
+  mainnet: 'horizon.stellar.org',
+  futurenet: 'horizon-futurenet.stellar.org',
+  standalone: '',
+};
+
+/**
+ * Resolve a `--network` name (plus an optional `--horizon-url` override)
+ * into the concrete connection settings, or throw before any network call
+ * or transaction is built. Unknown names, cross-network public Horizon
+ * overrides, and malformed override URLs are all rejected here, so a failed
+ * selection leaves no partial state behind.
+ */
+export function resolveNetwork(name: string, horizonUrlOverride?: string): ResolvedNetwork {
+  const normalized = name.trim();
+  const config = STELLAR_NETWORKS[normalized];
+  if (!config) {
+    throw new Error(
+      `Unsupported network: "${name}". Supported: ${SUPPORTED_NETWORKS.join(', ')}`
+    );
+  }
+
+  let horizonUrl = config.horizonUrl;
+  if (horizonUrlOverride !== undefined && horizonUrlOverride !== '') {
+    let overrideHost: string;
+    try {
+      overrideHost = new URL(horizonUrlOverride).hostname.toLowerCase();
+    } catch {
+      throw new Error(
+        `Invalid --horizon-url "${horizonUrlOverride}": must be a valid http(s) URL`
+      );
+    }
+    const expectedHost = PUBLIC_HORIZON_HOSTS[normalized as StellarNetworkName];
+    const knownHosts = Object.values(PUBLIC_HORIZON_HOSTS).filter(Boolean);
+    if (
+      expectedHost &&
+      knownHosts.includes(overrideHost) &&
+      overrideHost !== expectedHost
+    ) {
+      throw new Error(
+        `--horizon-url "${horizonUrlOverride}" points at a different network's public Horizon ` +
+          `(${overrideHost}) than --network ${normalized} (${expectedHost}). ` +
+          `Use the ${normalized} Horizon or drop --horizon-url to use its default.`
+      );
+    }
+    horizonUrl = horizonUrlOverride;
+  }
+
+  return {
+    name: normalized as StellarNetworkName,
+    horizonUrl,
+    passphrase: config.passphrase,
+    isProduction: normalized === 'mainnet',
+  };
+}
+
+/**
+ * Mainnet guard for the commands that move funds (`create-pool`,
+ * `liquidate`). Non-interactive mainnet runs must pass `--confirm-mainnet`;
+ * without it the command refuses before building or signing anything.
+ * Test networks never require confirmation. `generate-types` is read-only
+ * and never calls this guard.
+ */
+export function assertMainnetConfirmed(network: ResolvedNetwork, confirmed: boolean): void {
+  if (network.isProduction && !confirmed) {
+    throw new Error(
+      'Refusing to run against mainnet without explicit confirmation. ' +
+        'Re-run with --confirm-mainnet to confirm this command moves real funds on the public Stellar network.'
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Shared validators (exported for reuse in tests)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const validators = {
   network: (value: string): string | null => {
-    const valid = ['testnet', 'mainnet', 'futurenet', 'standalone'];
-    return valid.includes(value)
+    return SUPPORTED_NETWORKS.includes(value as StellarNetworkName)
       ? null
-      : `Must be one of: ${valid.join(', ')}`;
+      : `Must be one of: ${SUPPORTED_NETWORKS.join(', ')}`;
   },
 
   secret: (value: string): string | null => {
@@ -543,6 +644,9 @@ export async function runInteractive(
       const display = key === 'secret' ? '*'.repeat(8) : value;
       console.log(`    ${key}: ${display}`);
     }
+    if (options['network'] === 'mainnet') {
+      console.log('  ⚠️  MAINNET selected: this command moves real funds on the public Stellar network.');
+    }
     console.log('──────────────────────────────────────────\n');
 
     const confirm = await prompt(rl, 'Proceed with these settings? (yes/no)', {
@@ -605,12 +709,10 @@ async function runCreatePool(args: string[]): Promise<void> {
   const fee = parseInt(feeStr, 10);
   const slippage = parseFloat(slippageStr);
 
-  const networkConfig = STELLAR_NETWORKS[networkName];
-  if (!networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
-  }
+  const networkConfig = resolveNetwork(networkName, options['horizon-url']);
+  assertMainnetConfirmed(networkConfig, options['confirm-mainnet'] === 'true');
 
-  const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
+  const horizonUrl = networkConfig.horizonUrl;
   console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
   const server = new Horizon.Server(horizonUrl);
 
@@ -762,12 +864,10 @@ async function runLiquidate(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const networkConfig = STELLAR_NETWORKS[networkName];
-  if (!networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
-  }
+  const networkConfig = resolveNetwork(networkName, options['horizon-url']);
+  assertMainnetConfirmed(networkConfig, options['confirm-mainnet'] === 'true');
 
-  const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
+  const horizonUrl = networkConfig.horizonUrl;
   console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
 
   const adminKeypair = Keypair.fromSecret(secret);

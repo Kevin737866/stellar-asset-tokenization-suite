@@ -130,6 +130,10 @@ function App() {
 API reference for Soroban contracts and the TypeScript SDK:
 - [`docs/api/README.md`](docs/api/README.md)
 
+### CLI Guide
+Install, configuration, and safe network selection for the SDK CLI:
+- [`docs/sdk-cli.md`](docs/sdk-cli.md)
+
 ### Architecture Overview
 
 The Stellar RWA Tokenization Suite follows a modular architecture:
