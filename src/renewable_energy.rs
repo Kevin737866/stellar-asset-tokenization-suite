@@ -1,4 +1,5 @@
 use soroban_sdk::{contracterror, contracttype, Env, Symbol, panic_with_error, String};
+use crate::asset_class_handlers::validate_metadata_keys;
 use crate::asset_factory::AssetConfig;
 
 #[contracterror]
@@ -23,6 +24,8 @@ pub fn create_rec_config(
     base_config: AssetConfig,
     rec_config: RECConfig,
 ) -> AssetConfig {
+    validate_metadata_keys(&env, &base_config.metadata);
+
     let valid_sources = [
         Symbol::new(&env, "SOLAR"),
         Symbol::new(&env, "WIND"),

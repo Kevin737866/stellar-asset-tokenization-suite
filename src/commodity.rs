@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, Vec, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
+use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_keys, validate_metadata_size};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -66,6 +66,7 @@ pub fn create_commodity_config(
 ) -> AssetConfig {
     validate_address_not_zero(&env, &commodity_config.custody_vault);
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_metadata_keys(&env, &base_config.metadata);
 
     let valid_grades = Vec::from_array(&env, [
         Symbol::new(&env, "999"),
@@ -106,6 +107,7 @@ pub fn create_agricultural_config(
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_metadata_keys(&env, &base_config.metadata);
 
     let now = env.ledger().timestamp();
     let price_adjustment_bps =

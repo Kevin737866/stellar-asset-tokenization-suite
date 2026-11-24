@@ -1,8 +1,28 @@
+import { STELLAR_NETWORKS } from './constants';
 import { InvalidParametersError } from './errors';
+import type { RWASDKConfig } from './types';
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
 const AMOUNT_REGEX = /^\d+(\.\d+)?$/;
-const CONTRACT_ID_REGEX = /^[A-Z2-7]{56}$/;
+const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
+
+const NETWORK_CONTRACT_FIELDS = [
+  'assetFactory',
+  'complianceRegistry',
+  'dividendDistributor',
+  'secondaryMarket',
+  'custodyValidator',
+] as const;
+
+function toAddressString(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && 'toString' in value) {
+    const str = (value as { toString(): string }).toString();
+    return typeof str === 'string' ? str : null;
+  }
+  return null;
+}
 
 export function validateAddress(address: unknown, name: string): void {
   if (address == null) {
@@ -94,12 +114,59 @@ export function validateServerUrl(url: unknown, name: string): void {
 }
 
 export function validateContractId(id: unknown, name: string): void {
-  if (id == null || typeof id !== 'string') {
+  if (id == null) {
     throw new InvalidParametersError(`${name} is required`);
   }
-  if (!CONTRACT_ID_REGEX.test(id)) {
-    throw new InvalidParametersError(`Invalid ${name}: must be a valid Stellar contract ID`);
+  const str = toAddressString(id);
+  if (str == null || !CONTRACT_ID_REGEX.test(str)) {
+    throw new InvalidParametersError(`Invalid ${name}: must be a valid Stellar contract ID (C...)`);
   }
+}
+
+export function validateStellarNetwork(network: unknown, name = 'config.stellar.network'): void {
+  if (network == null) {
+    throw new InvalidParametersError(`${name} is required`);
+  }
+  if (typeof network !== 'string' || !(network in STELLAR_NETWORKS)) {
+    throw new InvalidParametersError(
+      `Invalid ${name}: must be one of ${Object.keys(STELLAR_NETWORKS).join(', ')}`,
+    );
+  }
+}
+
+export function validateNetworkPassphrase(network: string, passphrase: unknown): void {
+  const expected = STELLAR_NETWORKS[network]?.passphrase;
+  if (expected == null) {
+    throw new InvalidParametersError(`Invalid config.stellar.network: unsupported network ${network}`);
+  }
+  if (passphrase !== expected) {
+    throw new InvalidParametersError(
+      `Invalid config.stellar.passphrase: must match the ${network} network passphrase`,
+      { network, expected, actual: passphrase },
+    );
+  }
+}
+
+export function validateNetworkContractAddresses(contracts: unknown): void {
+  if (contracts == null || typeof contracts !== 'object') {
+    throw new InvalidParametersError('config.contracts is required');
+  }
+  for (const field of NETWORK_CONTRACT_FIELDS) {
+    validateContractId((contracts as Record<string, unknown>)[field], `config.contracts.${field}`);
+  }
+}
+
+export function validateNetworkConfig(config: RWASDKConfig): void {
+  if (config == null || typeof config !== 'object') {
+    throw new InvalidParametersError('config is required');
+  }
+  if (config.stellar == null || typeof config.stellar !== 'object') {
+    throw new InvalidParametersError('config.stellar is required');
+  }
+  validateStellarNetwork(config.stellar.network);
+  validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
+  validateNetworkPassphrase(config.stellar.network, config.stellar.passphrase);
+  validateNetworkContractAddresses(config.contracts);
 }
 
 export function validateBoolean(value: unknown, name: string): void {

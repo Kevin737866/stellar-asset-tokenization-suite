@@ -32,6 +32,7 @@ import {
   RefreshCw,
   AlertCircle,
   WifiOff,
+  Inbox,
 } from 'lucide-react';
 import { AssetInfo, Balance, AssetHolding, Portfolio } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
@@ -43,6 +44,8 @@ interface OwnershipDashboardProps {
   onUnlockTokens?: (assetAddress: string, amount: string) => Promise<void>;
   onClaimDividends?: (assetAddress: string, distributionId: number) => Promise<void>;
   isLoading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
 }
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82CA9D'];
@@ -54,6 +57,8 @@ export default function OwnershipDashboard({
   onUnlockTokens,
   onClaimDividends,
   isLoading = false,
+  error = null,
+  onRetry,
 }: OwnershipDashboardProps) {
   const toast = useToast();
   const translateError = useErrorTranslator();
@@ -206,7 +211,7 @@ export default function OwnershipDashboard({
   // Initial loading state
   if (isLoading) {
     return (
-      <div className="max-w-6xl mx-auto space-y-6">
+      <div className="max-w-6xl mx-auto space-y-6" role="status" aria-label="Loading portfolio">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
             <Card key={i}>
@@ -220,6 +225,46 @@ export default function OwnershipDashboard({
           <div className="h-80 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
           <div className="h-80 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
         </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-6xl mx-auto">
+        <Alert variant="destructive" role="alert">
+          <AlertCircle className="h-5 w-5" />
+          <AlertDescription>
+            <div className="space-y-3">
+              <p className="font-medium">We couldn&apos;t load your portfolio.</p>
+              <p className="text-sm">{error}</p>
+              {onRetry && (
+                <Button variant="outline" size="sm" onClick={onRetry}>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Try again
+                </Button>
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  if (portfolio.assets.length === 0) {
+    return (
+      <div className="max-w-6xl mx-auto">
+        <Card>
+          <CardContent className="p-12 text-center" role="status">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100 dark:bg-gray-800">
+              <Inbox className="h-6 w-6 text-gray-500" />
+            </div>
+            <h3 className="text-lg font-semibold">No assets yet</h3>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Tokenized assets you own will appear here once they are issued to {userAddress}.
+            </p>
+          </CardContent>
+        </Card>
       </div>
     );
   }

@@ -24,7 +24,7 @@ import {
   STELLAR_NETWORKS,
 } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange, validateNetworkConfig, validateStellarNetwork } from './validation';
 import {
   GasEstimator,
   estimateGas,
@@ -364,8 +364,7 @@ export class StellarRWASDK {
   private _retryListener?: RetryEventListener;
 
   constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
-    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    validateNetworkConfig(config);
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
@@ -456,29 +455,15 @@ export class StellarRWASDK {
    * Update configuration
    */
   updateConfig(newConfig: Partial<RWASDKConfig>): void {
-    if (newConfig.stellar?.serverUrl) {
-      validateServerUrl(newConfig.stellar.serverUrl, 'config.stellar.serverUrl');
-    }
-    if (newConfig.stellar?.passphrase) {
-      validateNonEmptyString(newConfig.stellar.passphrase, 'config.stellar.passphrase');
-    }
-    if (newConfig.contracts?.assetFactory) {
-      validateAddress(newConfig.contracts.assetFactory, 'config.contracts.assetFactory');
-    }
-    if (newConfig.contracts?.complianceRegistry) {
-      validateAddress(newConfig.contracts.complianceRegistry, 'config.contracts.complianceRegistry');
-    }
-    if (newConfig.contracts?.dividendDistributor) {
-      validateAddress(newConfig.contracts.dividendDistributor, 'config.contracts.dividendDistributor');
-    }
-    if (newConfig.contracts?.secondaryMarket) {
-      validateAddress(newConfig.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
-    }
-    if (newConfig.contracts?.custodyValidator) {
-      validateAddress(newConfig.contracts.custodyValidator, 'config.contracts.custodyValidator');
-    }
+    const candidate: RWASDKConfig = {
+      ...this.config,
+      ...newConfig,
+      stellar: { ...this.config.stellar, ...(newConfig.stellar ?? {}) },
+      contracts: { ...this.config.contracts, ...(newConfig.contracts ?? {}) },
+    };
+    validateNetworkConfig(candidate);
     this.logger.info('Updating SDK configuration', { newConfig: Object.keys(newConfig) });
-    this.config = { ...this.config, ...newConfig };
+    this.config = candidate;
     
     // Reinitialize clients with new config
     this.assetFactory = new AssetFactory(
@@ -560,6 +545,8 @@ export class StellarRWASDK {
         throw new InvalidParametersError(`${contract} contract address is required`);
       }
     }
+
+    validateNetworkConfig(this.config);
   }
 
   /**
@@ -876,6 +863,7 @@ export function createStellarRWASDK(
     defaultTimeout?: number;
   }
 ): StellarRWASDK {
+  validateStellarNetwork(network, 'network');
   const config = STELLAR_NETWORKS[network];
   
   const sdkConfig: RWASDKConfig = {

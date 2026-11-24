@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Env, Symbol, Vec, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_metadata_size};
+use crate::asset_class_handlers::{AssetClassError, validate_metadata_keys, validate_metadata_size};
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -35,6 +35,7 @@ pub fn create_security_config(
     security_config: SecurityConfig,
 ) -> AssetConfig {
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_metadata_keys(&env, &base_config.metadata);
 
     let valid_frameworks = Vec::from_array(&env, [
         Symbol::new(&env, "REG_D"),

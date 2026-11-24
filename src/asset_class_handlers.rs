@@ -26,13 +26,40 @@ pub enum AssetClassError {
     InvalidParameters = 8,
     InvalidRegulationFramework = 9,
     InvalidVerificationStandard = 10,
+    ReservedMetadataKey = 11,
 }
+
+/// Metadata keys that would shadow first-class asset configuration fields.
+/// Rejecting them keeps `AssetInfo` unambiguous and prevents clients from
+/// relying on values that can silently diverge from the canonical fields.
+pub const RESERVED_METADATA_KEYS: [&str; 9] = [
+    "name",
+    "symbol",
+    "decimals",
+    "total_supply",
+    "asset_class",
+    "compliance_rules",
+    "dividend_schedule",
+    "created_at",
+    "metadata",
+];
 
 // ── Shared Validation Helpers (Issue #179) ───────────────────────────────────
 
 pub fn validate_metadata_size(env: &Env, metadata_len: u32, max_size: u32) {
     if metadata_len > max_size {
         panic_with_error!(env, AssetClassError::InvalidParameters);
+    }
+}
+
+pub fn validate_metadata_keys(env: &Env, metadata: &Map<Symbol, String>) {
+    for (key, _) in metadata.iter() {
+        if RESERVED_METADATA_KEYS
+            .iter()
+            .any(|reserved| key == Symbol::new(env, reserved))
+        {
+            panic_with_error!(env, AssetClassError::ReservedMetadataKey);
+        }
     }
 }
 

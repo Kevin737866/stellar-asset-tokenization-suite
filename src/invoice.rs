@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, Vec, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_date_range, validate_metadata_size};
+use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_date_range, validate_metadata_keys, validate_metadata_size};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -29,6 +29,7 @@ pub fn create_invoice_config(
     validate_date_range(&env, invoice_config.due_date, current_time);
     validate_address_not_zero(&env, &invoice_config.debtor_address);
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_metadata_keys(&env, &base_config.metadata);
 
     let valid_ratings = Vec::from_array(&env, [
         Symbol::new(&env, "AAA"),

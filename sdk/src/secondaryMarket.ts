@@ -11,7 +11,7 @@ import { RWASDKConfig, TransactionOptions, Order, Trade, OrderBook } from './typ
 import { formatAmount, parseAmount } from './index';
 import { DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateEnum, validateRange } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateEnum, validateRange, validateContractId } from './validation';
 
 export class SecondaryMarketClient {
   private config: RWASDKConfig;
@@ -21,7 +21,7 @@ export class SecondaryMarketClient {
 
   constructor(config: RWASDKConfig) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateAddress(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
+    validateContractId(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
     this.config = config;
     this.contractId = config.contracts.secondaryMarket;
     this.server = new Server(config.stellar.serverUrl);
