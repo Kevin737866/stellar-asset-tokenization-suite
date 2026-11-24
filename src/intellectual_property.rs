@@ -1,6 +1,10 @@
-use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Env, String, Symbol};
+use soroban_sdk::{
+    contracterror, contracttype, panic_with_error, Address, BytesN, Env, String, Symbol,
+};
 
-use crate::asset_class_handlers::validate_metadata_size;
+use crate::asset_class_handlers::{
+    set_legal_document_hash, validate_legal_document_hash, validate_metadata_size,
+};
 use crate::asset_factory::AssetConfig;
 
 /// Issue #170: default compliance parameters for intellectual property.
@@ -27,6 +31,8 @@ pub struct IPConfig {
     pub filing_date: u64,
     pub expiry_date: u64,
     pub valuation: i128,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
 fn is_valid_ip_type(env: &Env, ip_type: &Symbol) -> bool {
@@ -60,6 +66,7 @@ pub fn create_ip_config(env: Env, base_config: AssetConfig, ip_config: IPConfig)
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_legal_document_hash(&env, &ip_config.legal_document_hash);
 
     let mut metadata = base_config.metadata;
     metadata.set(
@@ -98,6 +105,7 @@ pub fn create_ip_config(env: Env, base_config: AssetConfig, ip_config: IPConfig)
         Symbol::new(&env, "transfer_limit"),
         String::from_str(&env, &IP_TRANSFER_LIMIT.to_string()),
     );
+    set_legal_document_hash(&env, &mut metadata, &ip_config.legal_document_hash);
 
     AssetConfig {
         metadata,
