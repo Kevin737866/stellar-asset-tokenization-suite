@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Address } from 'stellar-sdk';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
@@ -23,8 +24,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
 
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+  const [cancellingOrderIds, setCancellingOrderIds] = useState<Set<number>>(new Set());
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [isNetworkError, setIsNetworkError] = useState(false);
+  const cancellationRequests = useRef<Set<number>>(new Set());
+  const cancelledOrderIds = useRef<Set<number>>(new Set());
 
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
   const [price, setPrice] = useState<string>('');
@@ -70,11 +74,13 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       const tr = await sdk.marketClient.getRecentTrades(asset.token_address);
       const v = await sdk.marketClient.getVWAP(asset.token_address);
       const kyc = await sdk.complianceClient.getKYCStatus(userAddress);
+      const orders = await sdk.marketClient.getUserOrders(new Address(userAddress));
 
       setOrderBook(ob);
       setTrades(tr);
       setVwap(v);
       setKycStatus(kyc.is_verified);
+      setUserOrders(orders);
       setFetchError(null);
       setIsNetworkError(false);
 
@@ -102,6 +108,46 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       setIsLoadingData(false);
     }
   }, [sdk, asset, userAddress, toast, translateError]);
+
+  const handleCancelOrder = async (order: Order) => {
+    if (order.trader.toString() !== userAddress) {
+      toast.warning('Unable to Cancel Order', 'You can only cancel orders that belong to your account.');
+      return;
+    }
+    if (
+      !order.isActive ||
+      cancellationRequests.current.has(order.orderId) ||
+      cancelledOrderIds.current.has(order.orderId)
+    ) {
+      return;
+    }
+
+    cancellationRequests.current.add(order.orderId);
+    setCancellingOrderIds(new Set(cancellationRequests.current));
+
+    try {
+      await sdk.marketClient.cancelOrder(new Address(userAddress), order.orderId);
+      cancelledOrderIds.current.add(order.orderId);
+      setUserOrders(currentOrders => currentOrders.filter(current => current.orderId !== order.orderId));
+      toast.success('Order Cancelled', `Order #${order.orderId} was cancelled successfully.`);
+      void fetchMarketData(false);
+    } catch (err: any) {
+      const { title, message } = translateError(err);
+      toast.error(title, message);
+    } finally {
+      cancellationRequests.current.delete(order.orderId);
+      setCancellingOrderIds(new Set(cancellationRequests.current));
+    }
+  };
+
+  const openOrders = useMemo(
+    () => userOrders.filter(order =>
+      order.isActive &&
+      order.tokenAddress.toString() === asset.tokenAddress.toString() &&
+      !cancelledOrderIds.current.has(order.orderId)
+    ),
+    [userOrders, asset.tokenAddress]
+  );
 
   const fetchFeePreview = useCallback(async () => {
     if (!price || !amount || parseFloat(price) <= 0 || parseFloat(amount) <= 0) {
@@ -464,6 +510,35 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
           )}
         </section>
 
+        <section className="lg:col-span-3 border border-gray-200 dark:border-gray-700 rounded-lg p-4" aria-label="Your open orders">
+          <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">Your Open Orders</h2>
+          {openOrders.length > 0 ? (
+            <ul className="space-y-2">
+              {openOrders.map((order) => {
+                const isCancelling = cancellingOrderIds.has(order.orderId);
+                return (
+                  <li key={order.orderId} className="flex items-center justify-between gap-3 border-b border-gray-100 dark:border-gray-800 pb-2">
+                    <span className="text-sm">
+                      {order.orderType.toUpperCase()} {order.remainingAmount} @ {order.price}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleCancelOrder(order)}
+                      disabled={isCancelling}
+                      aria-label={`Cancel order ${order.orderId}`}
+                      className="px-3 py-1 text-sm rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+                    >
+                      {isCancelling ? 'Cancelling...' : 'Cancel'}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-sm text-gray-400">You have no open orders for this asset.</p>
+          )}
+        </section>
+
         <section className="lg:col-span-3 border border-gray-200 dark:border-gray-700 rounded-lg p-4" aria-label="Your portfolio">
           <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">Your Portfolio</h2>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -483,7 +558,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
             </div>
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Active Orders</label>
-              <span className="text-base font-semibold">{userOrders.length}</span>
+              <span className="text-base font-semibold">{openOrders.length}</span>
             </div>
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Last Trade</label>
