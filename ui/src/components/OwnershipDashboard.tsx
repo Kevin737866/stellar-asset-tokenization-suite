@@ -393,8 +393,18 @@ export default function OwnershipDashboard({
             {portfolio.assets.map((holding, index) => (
               <Card
                 key={index}
-                className="cursor-pointer hover:shadow-lg transition-shadow"
+                role="button"
+                tabIndex={0}
+                aria-label={`Select ${holding.asset.name} (${holding.asset.symbol})`}
+                aria-pressed={selectedAsset?.asset.tokenAddress === holding.asset.tokenAddress}
+                className="cursor-pointer hover:shadow-lg transition-shadow focus:outline-none focus:ring-2 focus:ring-blue-500"
                 onClick={() => setSelectedAsset(holding)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setSelectedAsset(holding);
+                  }
+                }}
               >
                 <CardContent className="p-6">
                   <div className="flex items-start justify-between">
