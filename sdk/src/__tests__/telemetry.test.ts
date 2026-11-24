@@ -1,4 +1,3 @@
-import { describe, it, expect } from 'vitest';
 import { MetricsCollector, PrometheusExporter, NoopExporter, ConsoleExporter } from '../telemetry';
 
 describe('MetricsCollector', () => {

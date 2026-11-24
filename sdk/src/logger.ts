@@ -69,7 +69,8 @@ export function createLogger(component: string, minLevel?: LogLevel): Logger {
 }
 
 export const isBrowser: boolean =
-  typeof window !== 'undefined' && typeof window.document !== 'undefined';
+  typeof (globalThis as any).window !== 'undefined' &&
+  typeof (globalThis as any).window.document !== 'undefined';
 
 export const isNode: boolean =
   typeof process !== 'undefined' && process.versions != null && process.versions.node != null;
