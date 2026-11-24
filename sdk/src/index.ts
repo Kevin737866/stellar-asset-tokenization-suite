@@ -21,8 +21,13 @@ import {
   DEFAULT_DECIMALS,
   DEFAULT_FEE_RATE,
   DEFAULT_TIMEOUT_SECONDS,
-  STELLAR_NETWORKS,
 } from './constants';
+import {
+  resolveNetworkConfig,
+  validateFeeRateBps,
+  validateNetworkName,
+  validateTimeoutSeconds,
+} from './runtimeConfig';
 import { createLogger, Logger } from './logger';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 import {
@@ -40,6 +45,28 @@ import {
 // This is the SINGLE re-export of every shared type. No other module should
 // re-export from types.ts to prevent accidental circular paths.
 export * from './types';
+
+// ─── Runtime requirements & network configuration (Issue #397) ─────────────
+// Single source of truth for the rules documented in `docs/sdk-runtime.md`.
+export {
+  SUPPORTED_NETWORKS,
+  RUNTIME_REQUIREMENTS,
+  MIN_TIMEOUT_SECONDS,
+  MAX_TIMEOUT_SECONDS,
+  MIN_FEE_RATE_BPS,
+  MAX_FEE_RATE_BPS,
+  isSupportedNetwork,
+  validateNetworkName,
+  validateTimeoutSeconds,
+  validateFeeRateBps,
+  resolveNetworkConfig,
+  validateRuntimeConfig,
+  resolveRuntimeConfig,
+  type NetworkConfig,
+  type RuntimeConfigInput,
+  type ResolvedRuntimeConfig,
+  type StellarNetworkName,
+} from './runtimeConfig';
 
 // ─── Custody module exports ───────────────────────────────────────────────────
 export {
@@ -364,8 +391,18 @@ export class StellarRWASDK {
   private _retryListener?: RetryEventListener;
 
   constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
+    // Unknown network names used to surface only later, as a bare TypeError
+    // or a failed request against the wrong network. Reject them up front
+    // with the supported names (issue #397).
+    validateNetworkName(config.stellar?.network);
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    if (config.defaultTimeout != null) {
+      validateTimeoutSeconds(config.defaultTimeout, 'config.defaultTimeout');
+    }
+    if (config.defaultFeeRate != null) {
+      validateFeeRateBps(config.defaultFeeRate, 'config.defaultFeeRate');
+    }
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
@@ -456,6 +493,9 @@ export class StellarRWASDK {
    * Update configuration
    */
   updateConfig(newConfig: Partial<RWASDKConfig>): void {
+    if (newConfig.stellar?.network) {
+      validateNetworkName(newConfig.stellar.network, 'config.stellar.network');
+    }
     if (newConfig.stellar?.serverUrl) {
       validateServerUrl(newConfig.stellar.serverUrl, 'config.stellar.serverUrl');
     }
@@ -876,18 +916,29 @@ export function createStellarRWASDK(
     defaultTimeout?: number;
   }
 ): StellarRWASDK {
-  const config = STELLAR_NETWORKS[network];
-  
+  // An unknown network used to crash here with a bare TypeError
+  // (`STELLAR_NETWORKS[network]` is undefined). Resolve explicitly so the
+  // failure names the supported networks (issue #397). Timeout / fee
+  // overrides are bounds-checked the same way; `??` (not `||`) keeps a
+  // legitimate `defaultFeeRate` of 0 from silently becoming 100.
+  const config = resolveNetworkConfig(network);
+  if (options?.defaultTimeout != null) {
+    validateTimeoutSeconds(options.defaultTimeout, 'options.defaultTimeout');
+  }
+  if (options?.defaultFeeRate != null) {
+    validateFeeRateBps(options.defaultFeeRate, 'options.defaultFeeRate');
+  }
+
   const sdkConfig: RWASDKConfig = {
     stellar: {
       network,
-      serverUrl: options?.serverUrl || config.serverUrl,
-      horizonUrl: options?.horizonUrl || config.horizonUrl,
+      serverUrl: options?.serverUrl ?? config.serverUrl,
+      horizonUrl: options?.horizonUrl ?? config.horizonUrl,
       passphrase: config.passphrase
     },
     contracts,
-    defaultFeeRate: options?.defaultFeeRate || DEFAULT_FEE_RATE,
-    defaultTimeout: options?.defaultTimeout || DEFAULT_TIMEOUT_SECONDS
+    defaultFeeRate: options?.defaultFeeRate ?? DEFAULT_FEE_RATE,
+    defaultTimeout: options?.defaultTimeout ?? DEFAULT_TIMEOUT_SECONDS
   };
 
   return new StellarRWASDK(sdkConfig);

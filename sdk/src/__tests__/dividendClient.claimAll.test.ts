@@ -1,4 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+/**
+ * Tests for DividendClient.claimAllDividends.
+ *
+ * NOTE (2026-11-24, issue #397): converted from vitest to jest — this repo
+ * runs jest (see jest.config.js) and vitest is not installed. Only the
+ * import line, the `vi` namespace, and one type cast changed (the mocked
+ * claimed amounts are numbers, so the `.filter((a: number) => ...)` line
+ * needs `(result.claimedAmounts as unknown as number[])` to type-check
+ * under ts-jest); fixture data and assertions are untouched.
+ *
+ * The suite still cannot run on main: `sdk/src/dividendClient.ts` itself
+ * does not compile under ts-jest (pre-existing stellar-sdk v12 breakage —
+ * `Server` is no longer exported, `validateFutureDate` is not exported by
+ * `./validation`, `ScVal` API renames). Fixing the source module is a
+ * separate issue; this conversion only removes the false "missing vitest"
+ * failure so the real blocker is visible.
+ */
 import { DividendClient } from '../dividendClient';
 
 describe('DividendClient.claimAllDividends', () => {
@@ -7,10 +23,10 @@ describe('DividendClient.claimAllDividends', () => {
   let mockServer: any;
 
   beforeEach(() => {
-    mockContractCall = vi.fn().mockReturnValue({ toXDR: () => 'mock-op-xdr' });
+    mockContractCall = jest.fn().mockReturnValue({ toXDR: () => 'mock-op-xdr' });
     mockServer = {
-      getAccount: vi.fn().mockResolvedValue({ accountId: () => 'GABC...' }),
-      sendTransaction: vi.fn()
+      getAccount: jest.fn().mockResolvedValue({ accountId: () => 'GABC...' }),
+      sendTransaction: jest.fn()
     };
     client = new DividendClient({
       stellar: { passphrase: 'Test SDF Network ; September 2015', rpcUrl: 'http://localhost' },
@@ -18,8 +34,8 @@ describe('DividendClient.claimAllDividends', () => {
     } as any);
     (client as any).contract = { call: mockContractCall };
     (client as any).server = mockServer;
-    (client as any).signTransaction = vi.fn().mockResolvedValue('signed-tx');
-    (client as any).extractClaimedAmounts = vi.fn();
+    (client as any).signTransaction = jest.fn().mockResolvedValue('signed-tx');
+    (client as any).extractClaimedAmounts = jest.fn();
   });
 
   it('claims full batch: returns claimed amount for every distribution', async () => {
@@ -40,7 +56,7 @@ describe('DividendClient.claimAllDividends', () => {
     const result = await client.claimAllDividends('GCLAIMER...' as any);
 
     expect(result.claimedAmounts).toEqual([150, 0, 0, 400]);
-    expect(result.claimedAmounts.filter((a: number) => a === 0).length).toBe(2);
+    expect((result.claimedAmounts as unknown as number[]).filter((a: number) => a === 0).length).toBe(2);
   });
 
   it('claims empty batch: no eligible distributions returns empty array', async () => {
