@@ -2,6 +2,11 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
+import {
+  calculateOrderProceeds,
+  formatQuoteAmount,
+  OrderFeeEstimate,
+} from '../lib/orderProceeds';
 
 interface SecondaryMarketProps {
   sdk: StellarRWASDK;
@@ -30,12 +35,9 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [price, setPrice] = useState<string>('');
   const [amount, setAmount] = useState<string>('');
 
-  const [feePreview, setFeePreview] = useState<{
-    baseFee: string;
-    tradingFee: string;
-    totalFee: string;
-    feeCurrency: string;
-  } | null>(null);
+  const [feeEstimate, setFeeEstimate] = useState<OrderFeeEstimate | null>(null);
+  const [feeEstimateError, setFeeEstimateError] = useState<string | null>(null);
+  const [isEstimatingFee, setIsEstimatingFee] = useState(false);
 
   const [portfolioPnl, setPortfolioPnl] = useState<string | null>(null);
 
@@ -103,20 +105,42 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
     }
   }, [sdk, asset, userAddress, toast, translateError]);
 
+  // Estimated fees and net proceeds for the order being composed. `null` hides
+  // the preview whenever the price or amount is not a positive decimal.
+  const orderPreview = useMemo(
+    () => calculateOrderProceeds(side, price, amount, feeEstimate),
+    [side, price, amount, feeEstimate]
+  );
+
   const fetchFeePreview = useCallback(async () => {
     if (!price || !amount || parseFloat(price) <= 0 || parseFloat(amount) <= 0) {
-      setFeePreview(null);
+      setFeeEstimate(null);
+      setFeeEstimateError(null);
+      setIsEstimatingFee(false);
       return;
     }
+
+    setIsEstimatingFee(true);
     try {
       const fee = await sdk.marketClient.estimateTradingFee(side as OrderType, amount, price);
-      setFeePreview(fee);
+      setFeeEstimate(fee);
+      setFeeEstimateError(null);
     } catch {
-      setFeePreview(null);
+      // Do not block order submission: the preview falls back to zero fees and
+      // tells the user that the final fee is only known at confirmation.
+      setFeeEstimate(null);
+      setFeeEstimateError(
+        'Fee estimate unavailable right now. Fees will be shown before you confirm the order.'
+      );
+    } finally {
+      setIsEstimatingFee(false);
     }
   }, [sdk, side, price, amount]);
 
   useEffect(() => {
+    // Drop the previous estimate so a changed side/price/amount is never shown
+    // next to fees that were calculated for the old values.
+    setFeeEstimate(null);
     const timer = setTimeout(fetchFeePreview, 300);
     return () => clearTimeout(timer);
   }, [fetchFeePreview]);
@@ -397,24 +421,76 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
               />
             </div>
 
-            {feePreview && (
-              <div className="bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-3 text-sm">
-                <div className="font-medium text-blue-800 dark:text-blue-300 mb-1">Fee Preview</div>
-                <div className="grid grid-cols-3 gap-2 text-xs text-gray-600 dark:text-gray-400">
-                  <div>
-                    <span className="block text-gray-400">Base Fee</span>
-                    <span className="font-medium">{feePreview.baseFee} {feePreview.feeCurrency}</span>
-                  </div>
-                  <div>
-                    <span className="block text-gray-400">Trading Fee</span>
-                    <span className="font-medium">{feePreview.tradingFee} {feePreview.feeCurrency}</span>
-                  </div>
-                  <div>
-                    <span className="block text-gray-400">Total</span>
-                    <span className="font-medium text-blue-700 dark:text-blue-300">{feePreview.totalFee} {feePreview.feeCurrency}</span>
-                  </div>
+            {orderPreview ? (
+              <div
+                className="bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-3 text-sm"
+                aria-label="Estimated fees and net proceeds"
+                aria-busy={isEstimatingFee}
+              >
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <span className="font-medium text-blue-800 dark:text-blue-300">Order Preview</span>
+                  <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                    {isEstimatingFee
+                      ? 'Updating estimate...'
+                      : orderPreview.feeEstimateAvailable
+                        ? 'Estimates update as you type'
+                        : 'Fees not estimated'}
+                  </span>
                 </div>
+                <dl className="grid grid-cols-2 gap-2 text-xs text-gray-600 dark:text-gray-400 sm:grid-cols-4">
+                  <div>
+                    <dt className="text-gray-400">Gross Value</dt>
+                    <dd className="font-medium">{formatQuoteAmount(orderPreview.grossValue)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-400">Est. Trading Fee</dt>
+                    <dd className="font-medium">
+                      {orderPreview.feeEstimateAvailable
+                        ? formatQuoteAmount(orderPreview.tradingFee)
+                        : 'Unknown'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-400">Network Fee</dt>
+                    <dd className="font-medium">
+                      ~{orderPreview.networkFee} {orderPreview.feeCurrency}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-400">
+                      {side === 'sell' ? 'Net Proceeds' : 'Total Cost'}
+                    </dt>
+                    <dd
+                      className="font-semibold text-blue-700 dark:text-blue-300"
+                      aria-label={
+                        side === 'sell'
+                          ? `Estimated net proceeds: ${formatQuoteAmount(orderPreview.netProceeds)}`
+                          : `Estimated total cost: ${formatQuoteAmount(orderPreview.totalCost)}`
+                      }
+                    >
+                      {formatQuoteAmount(
+                        side === 'sell' ? orderPreview.netProceeds : orderPreview.totalCost
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+                <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                  {side === 'sell'
+                    ? 'Net proceeds deduct the estimated trading fee from the gross value. '
+                    : 'Total cost adds the estimated trading fee to the gross value. '}
+                  The network fee is paid separately in {orderPreview.feeCurrency}.
+                </p>
               </div>
+            ) : (
+              feeEstimateError && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 mb-3 text-xs text-yellow-800 dark:text-yellow-200"
+                >
+                  {feeEstimateError}
+                </div>
+              )
             )}
 
             <button

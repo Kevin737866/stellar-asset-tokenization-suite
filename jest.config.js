@@ -3,13 +3,13 @@
  *
  * The SDK test suite is written in TypeScript and relies on `ts-jest`; this
  * config keeps the transform consistent across all SDK test files under
- * `sdk/src/__tests__`.
+ * `sdk/src/__tests__` and the UI helper tests under `ui/src/__tests__`.
  */
 /** @type {import('ts-jest').JestConfigWithTsJest} */
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>/sdk/src'],
+  roots: ['<rootDir>/sdk/src', '<rootDir>/ui/src'],
   testMatch: ['**/__tests__/**/*.test.ts'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'json', 'node'],
   transform: {

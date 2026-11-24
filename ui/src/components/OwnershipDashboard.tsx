@@ -206,26 +206,26 @@ export default function OwnershipDashboard({
   // Initial loading state
   if (isLoading) {
     return (
-      <div className="max-w-6xl mx-auto space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           {[1, 2, 3, 4].map((i) => (
             <Card key={i}>
-              <CardContent className="p-6">
-                <div className="h-16 bg-gray-200 dark:bg-gray-700 animate-pulse rounded" />
+              <CardContent className="p-3 sm:p-6">
+                <div className="h-14 sm:h-16 bg-gray-200 dark:bg-gray-700 animate-pulse rounded" />
               </CardContent>
             </Card>
           ))}
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="h-80 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
-          <div className="h-80 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+          <div className="h-56 sm:h-80 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
+          <div className="h-56 sm:h-80 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6">
       {/* Network Error Banner */}
       {isNetworkError && (
         <Alert variant="destructive">
@@ -238,81 +238,81 @@ export default function OwnershipDashboard({
 
       {/* Overview Cards */}
       <div
-        className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"
+        className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4"
         role="region"
         aria-label="Portfolio overview"
       >
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="total-value-label">Total Portfolio Value</p>
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="total-value-label">Total Portfolio Value</p>
                 <p
-                  className="text-2xl font-bold"
+                  className="text-lg sm:text-2xl font-bold truncate"
                   aria-labelledby="total-value-label"
                 >
                   ${totalValue.toLocaleString()}
                 </p>
               </div>
-              <DollarSign className="h-8 w-8 text-green-600" aria-hidden="true" />
+              <DollarSign className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-green-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="total-dividends-label">Total Dividends</p>
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="total-dividends-label">Total Dividends</p>
                 <p
-                  className="text-2xl font-bold"
+                  className="text-lg sm:text-2xl font-bold truncate"
                   aria-labelledby="total-dividends-label"
                 >
                   ${totalDividends.toLocaleString()}
                 </p>
               </div>
-              <TrendingUp className="h-8 w-8 text-blue-600" aria-hidden="true" />
+              <TrendingUp className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-blue-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="voting-power-label">Voting Power</p>
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="voting-power-label">Voting Power</p>
                 <p
-                  className="text-2xl font-bold"
+                  className="text-lg sm:text-2xl font-bold truncate"
                   aria-labelledby="voting-power-label"
                 >
                   {totalVotingPower.toLocaleString()}
                 </p>
               </div>
-              <Vote className="h-8 w-8 text-purple-600" aria-hidden="true" />
+              <Vote className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-purple-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="assets-held-label">Assets Held</p>
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="assets-held-label">Assets Held</p>
                 <p
-                  className="text-2xl font-bold"
+                  className="text-lg sm:text-2xl font-bold"
                   aria-labelledby="assets-held-label"
                 >
                   {portfolio.assets.length}
                 </p>
               </div>
-              <Wallet className="h-8 w-8 text-orange-600" aria-hidden="true" />
+              <Wallet className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-orange-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
       </div>
 
-      <Tabs defaultValue="overview" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-4" role="tablist" aria-label="Dashboard sections">
+      <Tabs defaultValue="overview" className="space-y-4 sm:space-y-6">
+        <TabsList className="grid w-full grid-cols-4 text-xs sm:text-sm" role="tablist" aria-label="Dashboard sections">
           <TabsTrigger value="overview" role="tab" aria-selected="true">Overview</TabsTrigger>
           <TabsTrigger value="assets" role="tab">Assets</TabsTrigger>
           <TabsTrigger value="dividends" role="tab">Dividends</TabsTrigger>
@@ -320,8 +320,8 @@ export default function OwnershipDashboard({
         </TabsList>
 
         {/* Overview Tab */}
-        <TabsContent value="overview" className="space-y-6" role="tabpanel" aria-label="Overview tab">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <TabsContent value="overview" className="space-y-4 sm:space-y-6" role="tabpanel" aria-label="Overview tab">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
             {/* Portfolio Distribution */}
             <Card>
               <CardHeader>
@@ -334,8 +334,9 @@ export default function OwnershipDashboard({
                 <div
                   role="img"
                   aria-label={`Pie chart showing portfolio distribution across ${pieChartData.length} assets`}
+                  className="h-52 sm:h-72"
                 >
-                  <ResponsiveContainer width="100%" height={300}>
+                  <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
                       <Pie
                         data={pieChartData}
@@ -370,8 +371,9 @@ export default function OwnershipDashboard({
                 <div
                   role="img"
                   aria-label={`Bar chart showing asset performance for ${barChartData.length} assets`}
+                  className="h-52 sm:h-72"
                 >
-                  <ResponsiveContainer width="100%" height={300}>
+                  <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={barChartData}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="name" />
@@ -396,11 +398,11 @@ export default function OwnershipDashboard({
                 className="cursor-pointer hover:shadow-lg transition-shadow"
                 onClick={() => setSelectedAsset(holding)}
               >
-                <CardContent className="p-6">
+                <CardContent className="p-4 sm:p-6">
                   <div className="flex items-start justify-between">
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-3 mb-2">
-                        <div className="w-10 h-10 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center" aria-hidden="true">
+                        <div className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center" aria-hidden="true">
                           {holding.asset.assetType === 'real_estate' && <Building2 className="h-5 w-5" />}
                           {holding.asset.assetType === 'commodity' && <Package className="h-5 w-5" />}
                           {(holding.asset.assetType === 'invoice' || holding.asset.assetType === 'security') && (
@@ -408,37 +410,37 @@ export default function OwnershipDashboard({
                           )}
                         </div>
                         <div>
-                          <h3 className="font-semibold text-lg">{holding.asset.name}</h3>
+                          <h3 className="font-semibold text-base sm:text-lg">{holding.asset.name}</h3>
                           <p className="text-sm text-gray-600 dark:text-gray-300">{holding.asset.symbol}</p>
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4 mt-3 sm:mt-4">
                         <div>
-                          <p className="text-sm text-gray-600 dark:text-gray-400">Balance</p>
-                          <p className="font-medium">
+                          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Balance</p>
+                          <p className="font-medium text-sm sm:text-base">
                             {parseFloat(holding.balance.amount).toLocaleString()}
                           </p>
                         </div>
                         <div>
-                          <p className="text-sm text-gray-600 dark:text-gray-400">Value</p>
-                          <p className="font-medium">
+                          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Value</p>
+                          <p className="font-medium text-sm sm:text-base">
                             ${parseFloat(holding.value).toLocaleString()}
                           </p>
                         </div>
                         <div>
-                          <p className="text-sm text-gray-600 dark:text-gray-400">Dividends</p>
-                          <p className="font-medium">
+                          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Dividends</p>
+                          <p className="font-medium text-sm sm:text-base">
                             ${parseFloat(holding.dividends).toLocaleString()}
                           </p>
                         </div>
                         <div>
-                          <p className="text-sm text-gray-600 dark:text-gray-400">Percentage</p>
-                          <p className="font-medium">{holding.percentage.toFixed(2)}%</p>
+                          <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Percentage</p>
+                          <p className="font-medium text-sm sm:text-base">{holding.percentage.toFixed(2)}%</p>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 mt-4">
+                      <div className="flex flex-wrap items-center gap-2 mt-3 sm:mt-4">
                         <Badge
                           variant={holding.balance.lockedAmount === '0' ? 'secondary' : 'default'}
                         >
@@ -459,7 +461,7 @@ export default function OwnershipDashboard({
         </TabsContent>
 
         {/* Dividends Tab */}
-        <TabsContent value="dividends" className="space-y-6" role="tabpanel" aria-label="Dividends tab">
+        <TabsContent value="dividends" className="space-y-4 sm:space-y-6" role="tabpanel" aria-label="Dividends tab">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -468,10 +470,10 @@ export default function OwnershipDashboard({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                <div className="flex justify-between items-center p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
-                  <span className="font-medium">Total Dividends Earned</span>
-                  <span className="text-2xl font-bold text-green-600 dark:text-green-400">
+              <div className="space-y-3 sm:space-y-4">
+                <div className="flex flex-wrap justify-between items-center gap-1 p-3 sm:p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                  <span className="font-medium text-sm sm:text-base">Total Dividends Earned</span>
+                  <span className="text-xl sm:text-2xl font-bold text-green-600 dark:text-green-400">
                     ${totalDividends.toLocaleString()}
                   </span>
                 </div>
@@ -483,12 +485,12 @@ export default function OwnershipDashboard({
                     const errorMsg = claimError[addr];
                     return (
                       <div key={index}>
-                        <div className="flex justify-between items-center p-3 border dark:border-gray-700 rounded">
-                          <div>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between p-3 border dark:border-gray-700 rounded">
+                          <div className="min-w-0">
                             <p className="font-medium">{holding.asset.name}</p>
                             <p className="text-sm text-gray-600 dark:text-gray-300">{holding.asset.symbol}</p>
                           </div>
-                          <div className="text-right">
+                          <div className="flex items-center justify-between gap-2 sm:block sm:text-right">
                             <p className="font-medium">
                               ${parseFloat(holding.dividends).toLocaleString()}
                             </p>
@@ -525,7 +527,7 @@ export default function OwnershipDashboard({
         </TabsContent>
 
         {/* Voting Tab */}
-        <TabsContent value="voting" className="space-y-6" role="tabpanel" aria-label="Voting tab">
+        <TabsContent value="voting" className="space-y-4 sm:space-y-6" role="tabpanel" aria-label="Voting tab">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -534,10 +536,10 @@ export default function OwnershipDashboard({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-6">
-                <div className="text-center p-6 bg-gray-50 rounded-lg">
+              <div className="space-y-4 sm:space-y-6">
+                <div className="text-center p-4 sm:p-6 bg-gray-50 rounded-lg">
                   <p className="text-sm text-gray-600 dark:text-gray-300 mb-2">Total Voting Power</p>
-                  <p className="text-3xl font-bold text-purple-600 dark:text-purple-400">
+                  <p className="text-2xl sm:text-3xl font-bold text-purple-600 dark:text-purple-400">
                     {totalVotingPower.toLocaleString()}
                   </p>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
@@ -555,7 +557,7 @@ export default function OwnershipDashboard({
                   >
                     <h4 className="font-medium">Lock Tokens for {selectedAsset.asset.name}</h4>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
                       <div>
                         <label htmlFor="lock-amount" className="text-sm font-medium">Amount</label>
                         <input
@@ -587,7 +589,7 @@ export default function OwnershipDashboard({
                         />
                       </div>
                       <div className="flex items-end">
-                        <Button onClick={handleLockTokens} disabled={isLocking || !lockAmount || !lockPeriod}>
+                        <Button className="w-full sm:w-auto" onClick={handleLockTokens} disabled={isLocking || !lockAmount || !lockPeriod}>
                           {isLocking ? (
                             <>
                               <Loader2 className="h-4 w-4 mr-1 animate-spin" />
@@ -607,7 +609,7 @@ export default function OwnershipDashboard({
                       </p>
                     )}
 
-                    <div className="text-sm text-gray-600 dark:text-gray-300">
+                    <div className="text-sm text-gray-600 dark:text-gray-300 break-words">
                       Available: {selectedAsset.balance.amount} | Locked:{' '}
                       {selectedAsset.balance.lockedAmount} | Voting Power:{' '}
                       {selectedAsset.balance.votingPower}
@@ -622,14 +624,14 @@ export default function OwnershipDashboard({
                     const errorMsg = unlockError[addr];
                     return (
                       <div key={index}>
-                        <div className="flex justify-between items-center p-3 border dark:border-gray-700 rounded">
-                          <div>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between p-3 border dark:border-gray-700 rounded">
+                          <div className="min-w-0">
                             <p className="font-medium">{holding.asset.name}</p>
                             <p className="text-sm text-gray-600">
                               Locked: {holding.balance.lockedAmount} | Voting: {holding.balance.votingPower}
                             </p>
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 sm:justify-end">
                             {parseFloat(holding.balance.lockedAmount) > 0 && (
                               <Button
                                 size="sm"
