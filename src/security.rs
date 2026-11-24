@@ -40,7 +40,8 @@ pub fn create_security_config(
         Symbol::new(&env, "REG_D"),
         Symbol::new(&env, "REG_S"),
         Symbol::new(&env, "RULE_144"),
-        Symbol::new(&env, "REG_A+"),
+        // Soroban symbols only allow [A-Za-z0-9_]; spell the plus out.
+        Symbol::new(&env, "REG_A_PLUS"),
     ]);
     
     if !valid_frameworks.contains(&security_config.regulation_framework) {

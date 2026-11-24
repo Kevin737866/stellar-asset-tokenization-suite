@@ -394,7 +394,7 @@ proptest! {
         let env = Env::default();
         let base_config = create_base_asset_config(&env);
 
-        let frameworks = vec!["REG_D", "REG_S", "RULE_144", "REG_A+", "SEC", "CFTC", "UNKNOWN", ""];
+        let frameworks = vec!["REG_D", "REG_S", "RULE_144", "REG_A_PLUS", "SEC", "CFTC", "UNKNOWN", ""];
         let regulation_framework = Symbol::new(&env, frameworks[framework_idx % frameworks.len()]);
 
         let security_config = SecurityConfig {
@@ -415,7 +415,7 @@ proptest! {
             )
         });
 
-        let valid_frameworks = ["REG_D", "REG_S", "RULE_144", "REG_A+"];
+        let valid_frameworks = ["REG_D", "REG_S", "RULE_144", "REG_A_PLUS"];
         if valid_frameworks.contains(&frameworks[framework_idx % frameworks.len()]) {
             assert!(result.is_ok());
             let config = result.unwrap();

@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, panic_with_error, Address, Env, Map, Symbol, String, Vec,
+    contract, contracterror, contractimpl, panic_with_error, Address, Env, Map, String, Symbol, Vec,
 };
 
 use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules, DividendSchedule};
@@ -26,6 +26,10 @@ pub enum AssetClassError {
     InvalidParameters = 8,
     InvalidRegulationFramework = 9,
     InvalidVerificationStandard = 10,
+    /// A debt security was configured without a valid coupon schedule
+    /// (Issue #381). The numeric code is 12 so this addition does not reuse
+    /// code 11, which is reserved for other in-flight validation work.
+    InvalidCouponSchedule = 12,
 }
 
 // ── Shared Validation Helpers (Issue #179) ───────────────────────────────────
@@ -44,6 +48,127 @@ pub fn validate_date_range(env: &Env, start: u64, end: u64) {
     if start >= end {
         panic_with_error!(env, AssetClassError::InvalidDueDate);
     }
+}
+
+// ── Security coupon schedules (Issue #381) ───────────────────────────────────
+
+/// `equity_type` values that identify a debt instrument rather than equity.
+///
+/// The existing `SecurityConfig::equity_type` field is reused so this change
+/// needs no config-struct or storage migration. Clients tokenizing bonds pass
+/// one of these values in that field.
+pub const DEBT_SECURITY_TYPES: [&str; 5] = ["bond", "debt", "debenture", "note", "fixed_income"];
+
+/// Inclusive bounds for a coupon period, in days. Monthly, quarterly,
+/// semi-annual and annual coupons all fit inside this range.
+pub const MIN_COUPON_FREQUENCY_DAYS: u32 = 1;
+pub const MAX_COUPON_FREQUENCY_DAYS: u32 = 365;
+
+/// Metadata key holding the debt instrument's maturity date (Unix seconds).
+/// Debt securities must provide it so coupon dates can be checked against the
+/// life of the instrument.
+pub const MATURITY_DATE_KEY: &str = "maturity_date";
+/// Metadata key for the validated coupon period in days.
+pub const COUPON_FREQUENCY_DAYS_KEY: &str = "coupon_frequency_days";
+/// Metadata key for the first validated coupon payment date.
+pub const FIRST_COUPON_DATE_KEY: &str = "first_coupon_date";
+
+/// Normalized coupon data shared by validation and metadata recording.
+#[derive(Copy, Clone)]
+struct CouponScheduleInfo {
+    frequency_days: u32,
+    first_coupon_date: u64,
+    maturity_date: u64,
+}
+
+/// Whether a security type denotes a debt instrument.
+pub fn is_debt_security(env: &Env, equity_type: &Symbol) -> bool {
+    for candidate in DEBT_SECURITY_TYPES {
+        if &Symbol::new(env, candidate) == equity_type {
+            return true;
+        }
+    }
+    false
+}
+
+fn read_maturity_date(env: &Env, base_config: &AssetConfig) -> u64 {
+    let value = base_config
+        .metadata
+        .get(Symbol::new(env, MATURITY_DATE_KEY))
+        .unwrap_or_else(|| panic_with_error!(env, AssetClassError::InvalidCouponSchedule));
+
+    value
+        .to_string()
+        .parse::<u64>()
+        .unwrap_or_else(|_| panic_with_error!(env, AssetClassError::InvalidCouponSchedule))
+}
+
+/// Validate a debt instrument's coupon schedule before any config is changed.
+///
+/// For debt securities (`equity_type` in [`DEBT_SECURITY_TYPES`]) the caller
+/// must supply exactly one active entry in `AssetConfig::dividend_schedule`
+/// and a parseable future `maturity_date` metadata value. The first coupon
+/// date must be strictly after the current ledger timestamp and no later than
+/// maturity; the coupon frequency must be 1..=365 days and previously
+/// distributed coupons must not be negative. Equity securities are untouched.
+///
+/// This is a pure check: it neither requires authorization nor writes storage.
+/// Authorization remains with the asset factory that invokes these handlers.
+pub fn validate_security_coupon_schedule(
+    env: &Env,
+    base_config: &AssetConfig,
+    security_config: &security::SecurityConfig,
+) {
+    if !is_debt_security(env, &security_config.equity_type) {
+        return;
+    }
+
+    let _ = validated_coupon_info(env, base_config);
+}
+
+fn validated_coupon_info(env: &Env, base_config: &AssetConfig) -> CouponScheduleInfo {
+    if base_config.dividend_schedule.len() != 1 {
+        panic_with_error!(env, AssetClassError::InvalidCouponSchedule);
+    }
+
+    let schedule = base_config
+        .dividend_schedule
+        .get(0)
+        .unwrap_or_else(|| panic_with_error!(env, AssetClassError::InvalidCouponSchedule));
+    let now = env.ledger().timestamp();
+    let maturity_date = read_maturity_date(env, base_config);
+
+    if !schedule.is_active
+        || schedule.frequency_days < MIN_COUPON_FREQUENCY_DAYS
+        || schedule.frequency_days > MAX_COUPON_FREQUENCY_DAYS
+        || schedule.next_distribution_date <= now
+        || schedule.next_distribution_date > maturity_date
+        || maturity_date <= now
+        || schedule.total_distributed < 0
+    {
+        panic_with_error!(env, AssetClassError::InvalidCouponSchedule);
+    }
+
+    CouponScheduleInfo {
+        frequency_days: schedule.frequency_days,
+        first_coupon_date: schedule.next_distribution_date,
+        maturity_date,
+    }
+}
+
+fn record_coupon_schedule(env: &Env, metadata: &mut Map<Symbol, String>, info: CouponScheduleInfo) {
+    metadata.set(
+        Symbol::new(env, COUPON_FREQUENCY_DAYS_KEY),
+        String::from_str(env, &info.frequency_days.to_string()),
+    );
+    metadata.set(
+        Symbol::new(env, FIRST_COUPON_DATE_KEY),
+        String::from_str(env, &info.first_coupon_date.to_string()),
+    );
+    metadata.set(
+        Symbol::new(env, MATURITY_DATE_KEY),
+        String::from_str(env, &info.maturity_date.to_string()),
+    );
 }
 
 #[contract]
@@ -84,12 +209,30 @@ impl AssetClassHandlers {
         invoice::create_invoice_config(env, base_config, invoice_config)
     }
 
+    /// Create a security config. Debt instruments (bonds, debentures, notes,
+    /// fixed-income and generic debt types) must include a valid coupon
+    /// schedule; see [`validate_security_coupon_schedule`] for the rules.
     pub fn create_security_config(
         env: Env,
         base_config: AssetConfig,
         security_config: security::SecurityConfig,
     ) -> AssetConfig {
-        security::create_security_config(env, base_config, security_config)
+        // Validate everything before delegating so a rejected config cannot
+        // produce a partially initialized security.
+        let coupon_info = if is_debt_security(&env, &security_config.equity_type) {
+            Some(validated_coupon_info(&env, &base_config))
+        } else {
+            None
+        };
+
+        let mut config =
+            security::create_security_config(env.clone(), base_config, security_config);
+
+        if let Some(info) = coupon_info {
+            record_coupon_schedule(&env, &mut config.metadata, info);
+        }
+
+        config
     }
 
     pub fn create_art_config(
