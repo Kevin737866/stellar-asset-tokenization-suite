@@ -30,7 +30,7 @@ import {
 } from './errors';
 import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT, DEFAULT_ORDER_EXPIRY_HOURS, DEFAULT_PRICE_HISTORY_LIMIT, DEFAULT_MARKET_DEPTH } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange, validateContractId } from './validation';
 
 export class MarketClient {
   private server: Server;
@@ -40,7 +40,7 @@ export class MarketClient {
 
   constructor(config: RWASDKConfig) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateAddress(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
+    validateContractId(config.contracts.secondaryMarket, 'config.contracts.secondaryMarket');
     this.config = config;
     this.server = new Server(config.stellar.serverUrl);
     this.contract = new Contract(config.contracts.secondaryMarket);

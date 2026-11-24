@@ -30,7 +30,7 @@ import {
 } from './errors';
 import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange, validateFutureDate } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateRange, validateFutureDate, validateContractId } from './validation';
 
 export class DividendClient {
   private server: Server;
@@ -40,7 +40,7 @@ export class DividendClient {
 
   constructor(config: RWASDKConfig) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateAddress(config.contracts.dividendDistributor, 'config.contracts.dividendDistributor');
+    validateContractId(config.contracts.dividendDistributor, 'config.contracts.dividendDistributor');
     this.config = config;
     this.server = new Server(config.stellar.serverUrl);
     this.contract = new Contract(config.contracts.dividendDistributor);

@@ -79,11 +79,12 @@ import { createStellarRWASDK, AssetType, Currency } from './sdk/src';
 
 // Initialize SDK for testnet
 const sdk = createStellarRWASDK('testnet', {
-  assetFactory: 'GC...',
-  complianceRegistry: 'GD...',
-  dividendDistributor: 'GE...',
-  secondaryMarket: 'GF...',
-  custodyValidator: 'GH...'
+  // Contract IDs are C-prefixed StrKeys, not G-prefixed account addresses.
+  assetFactory: 'CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBWZWOWLHGW4UMDBFTRHTO6MCGZTL',
+  complianceRegistry: 'CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBWZWOWLHGW4UMDBFTRHTO6MCGZTL',
+  dividendDistributor: 'CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBWZWOWLHGW4UMDBFTRHTO6MCGZTL',
+  secondaryMarket: 'CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBWZWOWLHGW4UMDBFTRHTO6MCGZTL',
+  custodyValidator: 'CA3D5K2AZ5HUVLWWPQJ6TAGQFQ2SBWZWOWLHGW4UMDBFTRHTO6MCGZTL'
 });
 
 // Deploy a new RWA token
@@ -102,6 +103,8 @@ const token = await sdk.assetFactory.deployRWAToken(deployer, {
   dividendDistributor: sdk.getConfig().contracts.dividendDistributor
 });
 ```
+
+`createStellarRWASDK(network, ...)` uses the passphrase for `network` from `STELLAR_NETWORKS`. When constructing `StellarRWASDK` directly, `config.stellar.passphrase` must match `config.stellar.network`; a mismatch is rejected before any clients are created. See [SDK configuration](docs/api/sdk-configuration.md).
 
 ### React UI Integration
 

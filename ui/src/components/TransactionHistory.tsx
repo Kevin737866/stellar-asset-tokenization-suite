@@ -19,6 +19,7 @@ import {
   AlertCircle,
   Loader2,
   Inbox,
+  RefreshCw,
 } from 'lucide-react';
 
 // Transaction Types
@@ -44,6 +45,8 @@ interface TransactionHistoryProps {
   transactions: Transaction[];
   onOpenExplorer?: (txHash: string) => void;
   isLoading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
 }
 
 const STATUS_STYLES: Record<TransactionStatus, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; icon: React.FC<{ className?: string }> }> = {
@@ -68,7 +71,13 @@ const TYPE_LABELS: Record<Exclude<TransactionType, 'all'>, string> = {
 
 const ITEMS_PER_PAGE = 20;
 
-export default function TransactionHistory({ transactions, onOpenExplorer, isLoading = false }: TransactionHistoryProps) {
+export default function TransactionHistory({
+  transactions,
+  onOpenExplorer,
+  isLoading = false,
+  error = null,
+  onRetry,
+}: TransactionHistoryProps) {
   // Filter state
   const [filterType, setFilterType] = useState<TransactionType>('all');
   const [filterToken, setFilterToken] = useState<string>('all');
@@ -193,7 +202,7 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
   // Loading skeleton
   if (isLoading) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-4" role="status" aria-label="Loading transactions">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           {[1, 2, 3, 4].map((i) => (
             <div key={i} className="h-10 bg-gray-200 dark:bg-gray-700 animate-pulse rounded-lg" />
@@ -203,6 +212,24 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="h-16 bg-gray-100 dark:bg-gray-800 animate-pulse rounded-lg" />
           ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-red-200 bg-red-50 px-6 py-12 text-center dark:border-red-900 dark:bg-red-950/40" role="alert">
+          <AlertCircle className="h-10 w-10 mb-3 text-red-500" />
+          <p className="text-lg font-medium text-red-800 dark:text-red-200">Unable to load transactions</p>
+          <p className="mt-1 text-sm text-red-700 dark:text-red-300">{error}</p>
+          {onRetry && (
+            <Button variant="outline" size="sm" className="mt-4" onClick={onRetry}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Try again
+            </Button>
+          )}
         </div>
       </div>
     );

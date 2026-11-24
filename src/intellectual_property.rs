@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Env, String, Symbol};
 
-use crate::asset_class_handlers::validate_metadata_size;
+use crate::asset_class_handlers::{validate_metadata_keys, validate_metadata_size};
 use crate::asset_factory::AssetConfig;
 
 /// Issue #170: default compliance parameters for intellectual property.
@@ -60,6 +60,7 @@ pub fn create_ip_config(env: Env, base_config: AssetConfig, ip_config: IPConfig)
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_metadata_keys(&env, &base_config.metadata);
 
     let mut metadata = base_config.metadata;
     metadata.set(

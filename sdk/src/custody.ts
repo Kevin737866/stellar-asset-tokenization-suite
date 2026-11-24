@@ -139,7 +139,7 @@ export class CustodyClient {
         serverUrl: string = 'https://horizon-testnet.stellar.org',
         networkPassphrase: string = Networks.TESTNET
     ) {
-        validateNonEmptyString(contractId, 'contractId');
+        validateContractId(contractId, 'contractId');
         validateServerUrl(serverUrl, 'serverUrl');
         this.server = new Server(serverUrl);
         this.contractId = contractId;

@@ -33,7 +33,7 @@ import {
 } from './errors';
 import { DEFAULT_FEE_RATE, DEFAULT_TIMEOUT_SECONDS, DEFAULT_PAGINATION_LIMIT } from './constants';
 import { createLogger, Logger } from './logger';
-import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateBoolean, validateRange } from './validation';
+import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateBoolean, validateRange, validateContractId } from './validation';
 
 export class ComplianceClient {
   private server: Server;
@@ -43,7 +43,7 @@ export class ComplianceClient {
 
   constructor(config: RWASDKConfig) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateAddress(config.contracts.complianceRegistry, 'config.contracts.complianceRegistry');
+    validateContractId(config.contracts.complianceRegistry, 'config.contracts.complianceRegistry');
     this.config = config;
     this.server = new Server(config.stellar.serverUrl);
     this.contract = new Contract(config.contracts.complianceRegistry);

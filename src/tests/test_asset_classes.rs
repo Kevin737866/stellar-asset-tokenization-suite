@@ -1,11 +1,15 @@
 #![cfg(test)]
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Address, Env, Map, Symbol, Vec,
 };
 
-use crate::asset_class_handlers::AssetClassHandlers;
+use crate::asset_class_handlers::{
+    validate_metadata_keys, AssetClassError, AssetClassHandlers, RESERVED_METADATA_KEYS,
+};
 use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules};
 use crate::commodity::{self, AgriculturalConfig};
 use crate::intellectual_property::{self, IPConfig};
@@ -311,4 +315,71 @@ fn intellectual_property_defaults_match_spec() {
         AssetClass::IntellectualProperty,
     )
     .is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Reserved metadata key rejection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn config_with_metadata_key(env: &Env, key: &str) -> AssetConfig {
+    let mut config = base_config(env);
+    config.metadata.set(
+        Symbol::new(env, key),
+        soroban_sdk::String::from_str(env, "shadowed"),
+    );
+    config
+}
+
+#[test]
+fn reserved_metadata_keys_are_rejected() {
+    for key in RESERVED_METADATA_KEYS {
+        let env = Env::default();
+        let mut metadata = Map::new(&env);
+        metadata.set(
+            Symbol::new(&env, key),
+            soroban_sdk::String::from_str(&env, "shadowed"),
+        );
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            validate_metadata_keys(&env, &metadata);
+        }));
+        assert!(result.is_err(), "reserved metadata key {key} was accepted");
+    }
+}
+
+#[test]
+fn reserved_metadata_key_is_rejected_before_config_is_returned() {
+    let env = Env::default();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        real_estate::create_real_estate_config(
+            env.clone(),
+            config_with_metadata_key(&env, "name"),
+            real_estate_config(&env, 250_000),
+        );
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn non_reserved_metadata_key_is_preserved() {
+    let env = Env::default();
+    let config = real_estate::create_real_estate_config(
+        env.clone(),
+        config_with_metadata_key(&env, "custom_key"),
+        real_estate_config(&env, 250_000),
+    );
+
+    assert_eq!(
+        config
+            .metadata
+            .get(Symbol::new(&env, "custom_key"))
+            .unwrap(),
+        soroban_sdk::String::from_str(&env, "shadowed")
+    );
+}
+
+#[test]
+fn reserved_metadata_key_error_code_is_additive() {
+    assert_eq!(AssetClassError::ReservedMetadataKey as u32, 11);
 }

@@ -1,6 +1,6 @@
 use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, panic_with_error, String};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
+use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_keys, validate_metadata_size};
 
 /// Issue #171: allowed range for a tokenized property's appraisal value,
 /// expressed in the asset's base currency units.
@@ -45,6 +45,7 @@ pub fn create_real_estate_config(
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_metadata_keys(&env, &base_config.metadata);
 
     let mut metadata = base_config.metadata;
     metadata.set(Symbol::new(&env, "property_address"), String::from_str(&env, &real_estate_config.property_address.to_string()));
