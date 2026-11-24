@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { AssetInfo, Balance, AssetHolding, Portfolio } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+import { runWalletRequest } from './walletRequest';
 
 interface OwnershipDashboardProps {
   userAddress: string;
@@ -118,24 +119,31 @@ export default function OwnershipDashboard({
     setIsNetworkError(false);
 
     try {
-      await onLockTokens?.(assetAddress, lockAmount, period);
+      const outcome = await runWalletRequest(async () => {
+        await onLockTokens?.(assetAddress, lockAmount, period);
+      });
 
-      toast.success(
-        'Tokens Locked',
-        `Successfully locked ${parseFloat(lockAmount).toLocaleString()} tokens for ${period} days.`
-      );
-      setLockAmount('');
-      setLockPeriod('');
-      setLockError(null);
-    } catch (error: any) {
-      const { title, message } = translateError(error);
+      if (outcome.status === 'success') {
+        toast.success(
+          'Tokens Locked',
+          `Successfully locked ${parseFloat(lockAmount).toLocaleString()} tokens for ${period} days.`
+        );
+        setLockAmount('');
+        setLockPeriod('');
+        setLockError(null);
+      } else {
+        const error = outcome.error as any;
+        const { title, message } = translateError(error);
 
-      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
-        setIsNetworkError(true);
+        // Rejected requests leave lockAmount, lockPeriod and selectedAsset
+        // untouched so the user can retry without re-entering them.
+        if (outcome.status === 'failed' && (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network'))) {
+          setIsNetworkError(true);
+        }
+
+        setLockError(message);
+        toast.error(title, message, () => handleLockTokens());
       }
-
-      setLockError(message);
-      toast.error(title, message, () => handleLockTokens());
     } finally {
       setIsLocking(false);
     }
@@ -147,26 +155,31 @@ export default function OwnershipDashboard({
     setIsNetworkError(false);
 
     try {
-      await onUnlockTokens?.(assetAddress, amount);
-
-      toast.success(
-        'Tokens Unlocked',
-        `Successfully unlocked ${parseFloat(amount).toLocaleString()} tokens.`
-      );
-      setUnlockError((prev) => {
-        const next = { ...prev };
-        delete next[assetAddress];
-        return next;
+      const outcome = await runWalletRequest(async () => {
+        await onUnlockTokens?.(assetAddress, amount);
       });
-    } catch (error: any) {
-      const { title, message } = translateError(error);
 
-      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
-        setIsNetworkError(true);
+      if (outcome.status === 'success') {
+        toast.success(
+          'Tokens Unlocked',
+          `Successfully unlocked ${parseFloat(amount).toLocaleString()} tokens.`
+        );
+        setUnlockError((prev) => {
+          const next = { ...prev };
+          delete next[assetAddress];
+          return next;
+        });
+      } else {
+        const error = outcome.error as any;
+        const { title, message } = translateError(error);
+
+        if (outcome.status === 'failed' && (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network'))) {
+          setIsNetworkError(true);
+        }
+
+        setUnlockError((prev) => ({ ...prev, [assetAddress]: message }));
+        toast.error(title, message, () => handleUnlockTokens(assetAddress, amount));
       }
-
-      setUnlockError((prev) => ({ ...prev, [assetAddress]: message }));
-      toast.error(title, message, () => handleUnlockTokens(assetAddress, amount));
     } finally {
       setIsUnlocking(null);
     }
@@ -178,26 +191,31 @@ export default function OwnershipDashboard({
     setIsNetworkError(false);
 
     try {
-      await onClaimDividends?.(assetAddress, distributionId);
-
-      toast.success(
-        'Dividends Claimed',
-        'Your dividend rewards have been successfully claimed!'
-      );
-      setClaimError((prev) => {
-        const next = { ...prev };
-        delete next[assetAddress];
-        return next;
+      const outcome = await runWalletRequest(async () => {
+        await onClaimDividends?.(assetAddress, distributionId);
       });
-    } catch (error: any) {
-      const { title, message } = translateError(error);
 
-      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
-        setIsNetworkError(true);
+      if (outcome.status === 'success') {
+        toast.success(
+          'Dividends Claimed',
+          'Your dividend rewards have been successfully claimed!'
+        );
+        setClaimError((prev) => {
+          const next = { ...prev };
+          delete next[assetAddress];
+          return next;
+        });
+      } else {
+        const error = outcome.error as any;
+        const { title, message } = translateError(error);
+
+        if (outcome.status === 'failed' && (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network'))) {
+          setIsNetworkError(true);
+        }
+
+        setClaimError((prev) => ({ ...prev, [assetAddress]: message }));
+        toast.error(title, message, () => handleClaimDividends(assetAddress, distributionId));
       }
-
-      setClaimError((prev) => ({ ...prev, [assetAddress]: message }));
-      toast.error(title, message, () => handleClaimDividends(assetAddress, distributionId));
     } finally {
       setIsClaiming(null);
     }

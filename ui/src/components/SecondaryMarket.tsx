@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
+import { runWalletRequest } from './walletRequest';
 
 interface SecondaryMarketProps {
   sdk: StellarRWASDK;
@@ -38,12 +39,6 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   } | null>(null);
 
   const [portfolioPnl, setPortfolioPnl] = useState<string | null>(null);
-
-  const [lastOrderParams, setLastOrderParams] = useState<{
-    side: 'buy' | 'sell';
-    price: string;
-    amount: string;
-  } | null>(null);
 
   const chartData = useMemo(() => {
     if (!trades || trades.length === 0) return [];
@@ -127,8 +122,13 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
     return () => clearInterval(interval);
   }, [fetchMarketData]);
 
-  const handlePlaceOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handlePlaceOrder = async (
+    e: React.FormEvent | null,
+    submitted?: { side: 'buy' | 'sell'; price: string; amount: string }
+  ) => {
+    if (e) e.preventDefault();
+
+    const orderParams = submitted ?? { side, price, amount };
 
     if (!kycStatus) {
       toast.warning(
@@ -145,47 +145,43 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       return;
     }
 
-    if (!price || parseFloat(price) <= 0) {
+    if (!orderParams.price || parseFloat(orderParams.price) <= 0) {
       toast.warning('Invalid Price', 'Please enter a valid price greater than zero.');
       return;
     }
-    if (!amount || parseFloat(amount) <= 0) {
+    if (!orderParams.amount || parseFloat(orderParams.amount) <= 0) {
       toast.warning('Invalid Amount', 'Please enter a valid amount greater than zero.');
       return;
     }
 
-    const orderParams = { side, price, amount };
-    setLastOrderParams(orderParams);
     setIsPlacingOrder(true);
 
     try {
-      await sdk.marketClient.placeLimitOrder(
-        userAddress,
-        asset.token_address,
-        side,
-        price,
-        amount,
-        Math.floor(Date.now() / 1000) + 86400 * 7
+      const outcome = await runWalletRequest(() =>
+        sdk.marketClient.placeLimitOrder(
+          userAddress,
+          asset.token_address,
+          orderParams.side,
+          orderParams.price,
+          orderParams.amount,
+          Math.floor(Date.now() / 1000) + 86400 * 7
+        )
       );
 
-      toast.success(
-        'Order Placed',
-        `${side.toUpperCase()} order for ${amount} @ ${price} placed successfully.`
-      );
-      fetchMarketData();
-      setPrice('');
-      setAmount('');
-      setLastOrderParams(null);
-    } catch (err: any) {
-      const { title, message } = translateError(err);
-      toast.error(title, message, () => {
-        if (lastOrderParams) {
-          setSide(lastOrderParams.side);
-          setPrice(lastOrderParams.price);
-          setAmount(lastOrderParams.amount);
-          handlePlaceOrder(new Event('submit') as any);
-        }
-      });
+      if (outcome.status === 'success') {
+        toast.success(
+          'Order Placed',
+          `${orderParams.side.toUpperCase()} order for ${orderParams.amount} @ ${orderParams.price} placed successfully.`
+        );
+        fetchMarketData();
+        setPrice('');
+        setAmount('');
+      } else {
+        const { title, message } = translateError(outcome.error as any);
+        // Rejection means no order was submitted: price, amount and side stay
+        // as entered and the retry reuses the exact submitted parameters.
+        toast.error(title, message, () => handlePlaceOrder(null, orderParams));
+      }
     } finally {
       setIsPlacingOrder(false);
     }

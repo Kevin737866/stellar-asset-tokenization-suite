@@ -11,6 +11,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Loader2, Building2, Package, FileText, DollarSign, Home, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
 import { AssetType, DeploymentOptions } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+import { runWalletRequest } from './walletRequest';
 
 interface AssetDeployerProps {
   onDeploy: (options: DeploymentOptions) => Promise<{ transactionHash: string; tokenAddress: string }>;
@@ -128,36 +129,42 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     setLastDeploymentOptions(deploymentOptions);
 
     try {
-      const result = await onDeploy(deploymentOptions);
+      const outcome = await runWalletRequest(() => onDeploy(deploymentOptions));
 
-      toast.success(
-        'Token Deployed Successfully',
-        `Token ${formData.symbol} deployed at ${result.tokenAddress.slice(0, 8)}...`
-      );
+      if (outcome.status === 'success') {
+        const result = outcome.value;
 
-      // Reset form on success
-      setFormData({
-        name: '',
-        symbol: '',
-        totalSupply: '',
-        decimals: '18',
-        assetType: '' as AssetType,
-        metadata: {},
-        complianceRegistry: '',
-        dividendDistributor: '',
-      });
-      setLastDeploymentOptions(null);
-      setDeployError(null);
-    } catch (error: any) {
-      const { title, message } = translateError(error);
+        toast.success(
+          'Token Deployed Successfully',
+          `Token ${formData.symbol} deployed at ${result.tokenAddress.slice(0, 8)}...`
+        );
 
-      // Detect network errors for special UI
-      if (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network')) {
-        setIsNetworkError(true);
+        // Clear inputs only after a confirmed deployment.
+        setFormData({
+          name: '',
+          symbol: '',
+          totalSupply: '',
+          decimals: '18',
+          assetType: '' as AssetType,
+          metadata: {},
+          complianceRegistry: '',
+          dividendDistributor: '',
+        });
+        setLastDeploymentOptions(null);
+        setDeployError(null);
+      } else {
+        const error = outcome.error as any;
+        const { title, message } = translateError(error);
+
+        // A rejected request granted no signature, so every validated input
+        // and the retry snapshot are intentionally left untouched.
+        if (outcome.status === 'failed' && (error?.code === 'NETWORK_ERROR' || error?.message?.includes('fetch') || error?.message?.includes('Network'))) {
+          setIsNetworkError(true);
+        }
+
+        setDeployError(message);
+        toast.error(title, message, () => executeDeploy());
       }
-
-      setDeployError(message);
-      toast.error(title, message, () => executeDeploy());
     } finally {
       setIsSubmitting(false);
     }
