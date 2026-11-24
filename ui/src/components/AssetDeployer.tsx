@@ -11,10 +11,17 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Loader2, Building2, Package, FileText, DollarSign, Home, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
 import { AssetType, DeploymentOptions } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+import { AssetDeploymentConfirmation } from './AssetDeploymentConfirmation';
+import {
+  buildDeploymentConfirmationSummary,
+  canConfirmDeployment,
+  DeploymentConfirmationSummary,
+} from './deploymentConfirmation';
 
 interface AssetDeployerProps {
   onDeploy: (options: DeploymentOptions) => Promise<{ transactionHash: string; tokenAddress: string }>;
   isLoading?: boolean;
+  walletConnected?: boolean;
 }
 
 const assetTypeIcons = {
@@ -37,7 +44,11 @@ const assetTypeDescriptions = {
   intellectual_property: 'Tokenize patents, trademarks, and other IP assets',
 };
 
-export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDeployerProps) {
+export default function AssetDeployer({
+  onDeploy,
+  isLoading = false,
+  walletConnected = true,
+}: AssetDeployerProps) {
   const toast = useToast();
   const translateError = useErrorTranslator();
 
@@ -57,6 +68,9 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
   const [deployError, setDeployError] = useState<string | null>(null);
   const [isNetworkError, setIsNetworkError] = useState(false);
   const [lastDeploymentOptions, setLastDeploymentOptions] = useState<DeploymentOptions | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<DeploymentConfirmationSummary | null>(null);
+  const [hasConfirmedSummary, setHasConfirmedSummary] = useState(false);
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
@@ -102,27 +116,30 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     return Object.keys(newErrors).length === 0;
   }, [formData]);
 
-  const executeDeploy = useCallback(async () => {
+  const executeDeploy = useCallback(async (confirmedOptions?: DeploymentOptions) => {
     // Clear previous error state
     setDeployError(null);
     setIsNetworkError(false);
 
-    if (!validateForm()) {
-      toast.warning('Form Validation', 'Please fix the highlighted fields before submitting.');
-      return;
+    let deploymentOptions = confirmedOptions;
+    if (!deploymentOptions) {
+      if (!validateForm()) {
+        toast.warning('Form Validation', 'Please fix the highlighted fields before submitting.');
+        return;
+      }
+      deploymentOptions = {
+        name: formData.name,
+        symbol: formData.symbol,
+        totalSupply: formData.totalSupply,
+        decimals: Number(formData.decimals),
+        assetType: formData.assetType,
+        metadata: formData.metadata,
+        complianceRegistry: formData.complianceRegistry,
+        dividendDistributor: formData.dividendDistributor,
+      };
     }
 
     setIsSubmitting(true);
-    const deploymentOptions: DeploymentOptions = {
-      name: formData.name,
-      symbol: formData.symbol,
-      totalSupply: formData.totalSupply,
-      decimals: Number(formData.decimals),
-      assetType: formData.assetType,
-      metadata: formData.metadata,
-      complianceRegistry: formData.complianceRegistry,
-      dividendDistributor: formData.dividendDistributor,
-    };
 
     // Store for retry
     setLastDeploymentOptions(deploymentOptions);
@@ -132,10 +149,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
 
       toast.success(
         'Token Deployed Successfully',
-        `Token ${formData.symbol} deployed at ${result.tokenAddress.slice(0, 8)}...`
+        `Token ${deploymentOptions.symbol} deployed at ${result.tokenAddress.slice(0, 8)}...`
       );
 
-      // Reset form on success
+      // Reset form and confirmation state on success
       setFormData({
         name: '',
         symbol: '',
@@ -146,6 +163,8 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
         complianceRegistry: '',
         dividendDistributor: '',
       });
+      setPendingConfirmation(null);
+      setHasConfirmedSummary(false);
       setLastDeploymentOptions(null);
       setDeployError(null);
     } catch (error: any) {
@@ -157,7 +176,9 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
       }
 
       setDeployError(message);
-      toast.error(title, message, () => executeDeploy());
+      setPendingConfirmation(null);
+      setHasConfirmedSummary(false);
+      toast.error(title, message, () => executeDeploy(deploymentOptions));
     } finally {
       setIsSubmitting(false);
     }
@@ -165,10 +186,74 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    executeDeploy();
+    setDeployError(null);
+    setIsNetworkError(false);
+
+    const { summary, errors: validationErrors } = buildDeploymentConfirmationSummary({
+      name: formData.name,
+      symbol: formData.symbol,
+      totalSupply: formData.totalSupply,
+      decimals: Number(formData.decimals),
+      assetType: formData.assetType,
+      metadata: formData.metadata,
+      complianceRegistry: formData.complianceRegistry,
+      dividendDistributor: formData.dividendDistributor,
+    });
+
+    if (!summary) {
+      setErrors(validationErrors);
+      setPendingConfirmation(null);
+      setHasConfirmedSummary(false);
+      toast.warning('Form Validation', 'Please fix the highlighted fields before reviewing deployment.');
+      return;
+    }
+
+    setErrors({});
+    setHasConfirmedSummary(false);
+    setPendingConfirmation(summary);
   };
 
+  const handleConfirmDeploy = useCallback(() => {
+    const gate = canConfirmDeployment(pendingConfirmation, {
+      acknowledged: hasConfirmedSummary,
+      isSubmitting,
+      isLoading,
+      walletConnected,
+    });
+
+    if (!gate.allowed || !pendingConfirmation) {
+      toast.warning(
+        'Confirmation Required',
+        gate.reason || 'Please review and confirm the deployment summary before proceeding.'
+      );
+      return;
+    }
+
+    executeDeploy(pendingConfirmation.options);
+  }, [
+    pendingConfirmation,
+    hasConfirmedSummary,
+    isSubmitting,
+    isLoading,
+    walletConnected,
+    toast,
+    executeDeploy,
+  ]);
+
+  const handleCancelConfirmation = useCallback(() => {
+    setPendingConfirmation(null);
+    setHasConfirmedSummary(false);
+  }, []);
+
   const handleRetry = () => {
+    if (lastDeploymentOptions) {
+      const { summary } = buildDeploymentConfirmationSummary(lastDeploymentOptions);
+      if (summary) {
+        setHasConfirmedSummary(false);
+        setPendingConfirmation(summary);
+        return;
+      }
+    }
     executeDeploy();
   };
 
@@ -529,6 +614,8 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                   setDeployError(null);
                   setIsNetworkError(false);
                   setLastDeploymentOptions(null);
+                  setPendingConfirmation(null);
+                  setHasConfirmedSummary(false);
                 }}
               >
                 Clear Form
@@ -536,7 +623,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
               <Button
                 type="submit"
                 disabled={isSubmitting || isLoading}
-                aria-label={isSubmitting || isLoading ? 'Deploying token, please wait' : 'Deploy token'}
+                aria-label={isSubmitting || isLoading ? 'Deploying token, please wait' : 'Review deployment summary'}
                 aria-busy={isSubmitting || isLoading}
               >
                 {isSubmitting || isLoading ? (
@@ -545,13 +632,26 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     Deploying...
                   </>
                 ) : (
-                  'Deploy Token'
+                  'Review & Deploy'
                 )}
               </Button>
             </div>
           </form>
         </CardContent>
       </Card>
+
+      {pendingConfirmation && (
+        <AssetDeploymentConfirmation
+          summary={pendingConfirmation}
+          acknowledged={hasConfirmedSummary}
+          onAcknowledgeChange={setHasConfirmedSummary}
+          onConfirm={handleConfirmDeploy}
+          onCancel={handleCancelConfirmation}
+          isSubmitting={isSubmitting}
+          isLoading={isLoading}
+          walletConnected={walletConnected}
+        />
+      )}
 
       <Alert role="complementary" aria-label="Deployment information">
         <Building2 className="h-4 w-4" aria-hidden="true" />
