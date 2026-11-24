@@ -12,6 +12,103 @@ import { CustodyClient } from './custody';
 import { runTypeGenerator } from './typeGenerator';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Environment variable validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface EnvRequirement {
+  name: string;
+  description: string;
+}
+
+/** Raised when a required environment variable is missing or blank. */
+export class MissingEnvironmentVariableError extends Error {
+  readonly missing: string[];
+
+  constructor(requirements: EnvRequirement[]) {
+    const names = requirements.map((req) => `${req.name} (${req.description})`).join(', ');
+    super(`Missing required environment variable(s): ${names}`);
+    this.name = 'MissingEnvironmentVariableError';
+    this.missing = requirements.map((req) => req.name);
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Resolves required environment variables before any network client is built.
+ * Blank or whitespace-only values are treated as missing.
+ */
+export function validateRequiredEnv(
+  requirements: EnvRequirement[],
+  env: NodeJS.ProcessEnv = process.env
+): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  const missing: EnvRequirement[] = [];
+
+  for (const req of requirements) {
+    const value = env[req.name];
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      missing.push(req);
+    } else {
+      resolved[req.name] = value.trim();
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new MissingEnvironmentVariableError(missing);
+  }
+
+  return resolved;
+}
+
+/**
+ * Reads the signing secret from `--secret-env`, an `env:NAME` reference in
+ * `--secret`, or returns the literal `--secret` value unchanged.
+ */
+export function resolveSecretValue(
+  options: Record<string, string>,
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  if (options['secret-env']) {
+    const name = options['secret-env'] === 'true' ? 'STELLAR_SECRET' : options['secret-env'].trim();
+    if (!name) {
+      throw new Error('Invalid --secret-env: environment variable name cannot be empty');
+    }
+    return validateRequiredEnv(
+      [{ name, description: 'Stellar signing secret key' }],
+      env
+    )[name];
+  }
+
+  const secret = options['secret'];
+  if (!secret || secret === 'true') {
+    return undefined;
+  }
+  if (secret.startsWith('env:')) {
+    const name = secret.slice(4).trim();
+    if (!name) {
+      throw new Error('Invalid env: reference in --secret: environment variable name cannot be empty');
+    }
+    return validateRequiredEnv(
+      [{ name, description: 'Stellar signing secret key' }],
+      env
+    )[name];
+  }
+
+  return secret;
+}
+
+/** Optional seams for tests; production uses real clients and process.env. */
+export interface CliDeps {
+  env?: NodeJS.ProcessEnv;
+  createHorizonServer?: (horizonUrl: string) => Horizon.Server;
+  createCustodyClient?: (
+    contractId: string,
+    horizonUrl: string,
+    passphrase: string
+  ) => CustodyClient;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Asset utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -60,6 +157,10 @@ Commands:
 Global Options:
   --interactive, -i   Launch guided interactive prompt mode
   --help,       -h    Show this help message
+
+Environment:
+  STELLAR_SECRET   Default signing secret used with --secret-env
+  Required environment variables are validated before any network access.
 
 Run "node dist/cli.js <command> --help" for command-specific options.
 `);
@@ -180,7 +281,8 @@ Options:
   --amount-a <amount>    Maximum amount of Asset A to deposit [required]
   --amount-b <amount>    Maximum amount of Asset B to deposit [required]
   --fee <fee>            Liquidity pool fee in basis points (default: 30)
-  --secret <secret>      Secret key of the depositor [required]
+  --secret <secret>      Secret key of the depositor, or env:VAR [required unless --secret-env]
+  --secret-env [VAR]     Read signing secret from env var (default: STELLAR_SECRET)
   --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
   --horizon-url <url>    Horizon server URL (optional, overrides default for network)
   --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
@@ -203,7 +305,8 @@ Usage:
 Options:
   --asset-id <address>          On-chain contract address of the RWA token [required]
   --custody-validator <address> Custody Validator contract address [required]
-  --secret <secret>             Secret key of the authorized admin account [required]
+  --secret <secret>             Secret key of the admin, or env:VAR [required unless --secret-env]
+  --secret-env [VAR]            Read signing secret from env var (default: STELLAR_SECRET)
   --reason <reason>             Short reason code for the claim (default: "undercollateralized")
   --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
   --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
@@ -577,14 +680,14 @@ export async function runInteractive(
 // create-pool command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runCreatePool(args: string[]): Promise<void> {
+async function runCreatePool(args: string[], deps: CliDeps = {}): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     printCreatePoolHelp();
     process.exit(0);
   }
 
   const options = parseArgs(args);
-  const required = ['asset-a', 'asset-b', 'amount-a', 'amount-b', 'secret'];
+  const required = ['asset-a', 'asset-b', 'amount-a', 'amount-b'];
   for (const req of required) {
     if (!options[req]) {
       console.error(`Error: Missing required option --${req}`);
@@ -593,12 +696,17 @@ async function runCreatePool(args: string[]): Promise<void> {
     }
   }
 
+  const secret = resolveSecretValue(options, deps.env);
+  if (!secret) {
+    printCreatePoolHelp();
+    throw new Error('Missing signing secret: provide --secret, --secret-env, or an env: reference');
+  }
+
   const assetAStr = options['asset-a'];
   const assetBStr = options['asset-b'];
   const amountA = options['amount-a'];
   const amountB = options['amount-b'];
   const feeStr = options['fee'] || '30';
-  const secret = options['secret'];
   const networkName = options['network'] || 'testnet';
   const slippageStr = options['slippage'] || '0.01';
 
@@ -612,7 +720,9 @@ async function runCreatePool(args: string[]): Promise<void> {
 
   const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
   console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
-  const server = new Horizon.Server(horizonUrl);
+  const server = deps.createHorizonServer
+    ? deps.createHorizonServer(horizonUrl)
+    : new Horizon.Server(horizonUrl);
 
   const depositorKeypair = Keypair.fromSecret(secret);
   const depositorAddress = depositorKeypair.publicKey();
@@ -732,14 +842,14 @@ async function runCreatePool(args: string[]): Promise<void> {
 // liquidate command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runLiquidate(args: string[]): Promise<void> {
+async function runLiquidate(args: string[], deps: CliDeps = {}): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     printLiquidateHelp();
     process.exit(0);
   }
 
   const options = parseArgs(args);
-  const required = ['asset-id', 'custody-validator', 'secret', 'evidence-hash'];
+  const required = ['asset-id', 'custody-validator', 'evidence-hash'];
   for (const req of required) {
     if (!options[req]) {
       console.error(`Error: Missing required option --${req}`);
@@ -748,9 +858,14 @@ async function runLiquidate(args: string[]): Promise<void> {
     }
   }
 
+  const secret = resolveSecretValue(options, deps.env);
+  if (!secret) {
+    printLiquidateHelp();
+    throw new Error('Missing signing secret: provide --secret, --secret-env, or an env: reference');
+  }
+
   const assetId = options['asset-id'];
   const custodyValidatorId = options['custody-validator'];
-  const secret = options['secret'];
   const reason = options['reason'] || 'undercollateralized';
   const evidenceHash = options['evidence-hash'];
   const networkName = options['network'] || 'testnet';
@@ -776,11 +891,13 @@ async function runLiquidate(args: string[]): Promise<void> {
   console.log(`Custody Validator: ${custodyValidatorId}`);
 
   // Instantiate CustodyClient
-  const custodyClient = new CustodyClient(
-    custodyValidatorId,
-    horizonUrl,
-    networkConfig.passphrase
-  );
+  const custodyClient = deps.createCustodyClient
+    ? deps.createCustodyClient(custodyValidatorId, horizonUrl, networkConfig.passphrase)
+    : new CustodyClient(
+        custodyValidatorId,
+        horizonUrl,
+        networkConfig.passphrase
+      );
 
   // Check collateralization unless --force is set
   if (!force) {
@@ -841,8 +958,11 @@ async function runLiquidate(args: string[]): Promise<void> {
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function runCli() {
-  const args = process.argv.slice(2);
+export async function runCli(
+  argv: string[] = process.argv.slice(2),
+  deps: CliDeps = {}
+) {
+  const args = argv;
 
   // Interactive mode
   if (args.includes('--interactive') || args.includes('-i')) {
@@ -865,9 +985,9 @@ export async function runCli() {
 
   try {
     if (command === 'create-pool') {
-      await runCreatePool(commandArgs);
+      await runCreatePool(commandArgs, deps);
     } else if (command === 'liquidate') {
-      await runLiquidate(commandArgs);
+      await runLiquidate(commandArgs, deps);
     } else if (command === 'generate-types') {
       await runGenerateTypes(commandArgs);
     } else {
