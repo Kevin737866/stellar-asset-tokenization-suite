@@ -223,60 +223,60 @@ export default function DividendPanel({
 
   return (
     <div
-      className="max-w-6xl mx-auto space-y-6"
+      className="max-w-6xl mx-auto space-y-4 sm:space-y-6"
       role="region"
       aria-label="Dividend management panel"
     >
       {/* Yield Summary Cards */}
       <div
-        className="grid grid-cols-1 md:grid-cols-3 gap-4"
+        className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4"
         role="region"
         aria-label="Dividend yield summary"
       >
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="total-earned-label">
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="total-earned-label">
                   Total Earned
                 </p>
-                <p className="text-2xl font-bold" aria-labelledby="total-earned-label">
+                <p className="text-lg sm:text-2xl font-bold truncate" aria-labelledby="total-earned-label">
                   ${parseFloat(yieldSummary.totalEarned || '0').toLocaleString()}
                 </p>
               </div>
-              <DollarSign className="h-8 w-8 text-green-600" aria-hidden="true" />
+              <DollarSign className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-green-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="pending-label">
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="pending-label">
                   Pending
                 </p>
-                <p className="text-2xl font-bold" aria-labelledby="pending-label">
+                <p className="text-lg sm:text-2xl font-bold truncate" aria-labelledby="pending-label">
                   ${parseFloat(yieldSummary.pending || '0').toLocaleString()}
                 </p>
               </div>
-              <Clock className="h-8 w-8 text-yellow-600" aria-hidden="true" />
+              <Clock className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-yellow-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
 
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300" id="apy-label">
+        <Card className="col-span-2 sm:col-span-1">
+          <CardContent className="p-3 sm:p-6">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300" id="apy-label">
                   Annualized Yield
                 </p>
-                <p className="text-2xl font-bold" aria-labelledby="apy-label">
+                <p className="text-lg sm:text-2xl font-bold truncate" aria-labelledby="apy-label">
                   {(yieldSummary.annualizedYield || 0).toFixed(2)}%
                 </p>
               </div>
-              <TrendingUp className="h-8 w-8 text-blue-600" aria-hidden="true" />
+              <TrendingUp className="h-6 w-6 sm:h-8 sm:w-8 shrink-0 text-blue-600" aria-hidden="true" />
             </div>
           </CardContent>
         </Card>
@@ -296,9 +296,10 @@ export default function DividendPanel({
       )}
 
       {/* Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
           <Button
+            className="w-full sm:w-auto"
             onClick={handleClaimAll}
             disabled={isLoading || activeDistributions.length === 0}
             aria-label={
@@ -334,6 +335,7 @@ export default function DividendPanel({
 
         {isAdmin && (
           <Button
+            className="w-full sm:w-auto"
             variant="outline"
             onClick={() => setShowCreateForm(!showCreateForm)}
             aria-expanded={showCreateForm}
@@ -352,7 +354,7 @@ export default function DividendPanel({
             <CardTitle>Create New Distribution</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
               <div className="space-y-2">
                 <Label htmlFor="dist-token-address">Token Address</Label>
                 <Input
@@ -425,8 +427,8 @@ export default function DividendPanel({
         </Card>
       )}
 
-      <Tabs defaultValue="active" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-3" role="tablist" aria-label="Distribution tabs">
+      <Tabs defaultValue="active" className="space-y-4 sm:space-y-6">
+        <TabsList className="grid w-full grid-cols-3 text-xs sm:text-sm" role="tablist" aria-label="Distribution tabs">
           <TabsTrigger value="active" role="tab" aria-selected="true">
             Active ({activeDistributions.length})
           </TabsTrigger>
@@ -442,8 +444,8 @@ export default function DividendPanel({
         <TabsContent value="active" className="space-y-4" role="tabpanel" aria-label="Active distributions">
           {activeDistributions.length === 0 ? (
             <Card>
-              <CardContent className="p-8 text-center">
-                <DollarSign className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
+              <CardContent className="p-6 sm:p-8 text-center">
+                <DollarSign className="h-10 w-10 sm:h-12 sm:w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
                 <p className="text-gray-500 dark:text-gray-400">No active distributions</p>
                 <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                   Active dividend distributions will appear here
@@ -463,10 +465,10 @@ export default function DividendPanel({
                   role="article"
                   aria-label={`Distribution ${dist.distributionId}: ${dist.currency} ${dist.totalAmount}`}
                 >
-                  <CardContent className="p-6">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
+                  <CardContent className="p-4 sm:p-6">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 mb-2">
                           <h3 className="font-semibold text-lg">
                             Distribution #{dist.distributionId}
                           </h3>
@@ -477,36 +479,37 @@ export default function DividendPanel({
                             {getTimeRemaining(new Date(dist.claimDeadline))}
                           </Badge>
                         </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
                           <div>
-                            <p className="text-sm text-gray-600 dark:text-gray-400">Currency</p>
+                            <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Currency</p>
                             <p className="font-medium">{dist.currency}</p>
                           </div>
                           <div>
-                            <p className="text-sm text-gray-600 dark:text-gray-400">Total Amount</p>
-                            <p className="font-medium">
+                            <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Total Amount</p>
+                            <p className="font-medium text-sm sm:text-base">
                               {parseFloat(dist.totalAmount).toLocaleString()}
                             </p>
                           </div>
                           <div>
-                            <p className="text-sm text-gray-600 dark:text-gray-400">Per Token</p>
-                            <p className="font-medium">{parseFloat(dist.perTokenAmount).toFixed(6)}</p>
+                            <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Per Token</p>
+                            <p className="font-medium text-sm sm:text-base">{parseFloat(dist.perTokenAmount).toFixed(6)}</p>
                           </div>
                           <div>
-                            <p className="text-sm text-gray-600 dark:text-gray-400">Deadline</p>
+                            <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Deadline</p>
                             <p className="font-medium">
                               {new Date(dist.claimDeadline).toLocaleDateString()}
                             </p>
                           </div>
                         </div>
                       </div>
-                      <div className="flex flex-col items-end gap-1">
+                      <div className="flex flex-row items-center justify-between gap-1 sm:flex-col sm:items-end">
                         {gasEstimates[dist.distributionId] && (
                           <span className="text-xs text-gray-500 dark:text-gray-400" aria-label={`Estimated gas fee: ${gasEstimates[dist.distributionId].totalFee} stroops`}>
                             Gas: ~{gasEstimates[dist.distributionId].totalFee} stroops
                           </span>
                         )}
                         <Button
+                          className="w-full sm:w-auto"
                           onClick={() => handleClaim(dist.distributionId)}
                           disabled={claimLoading[dist.distributionId] || isLoading}
                           aria-label={`Claim dividend for distribution ${dist.distributionId}${gasEstimates[dist.distributionId] ? ', estimated gas: ' + gasEstimates[dist.distributionId].totalFee + ' stroops' : ''}`}
@@ -536,8 +539,8 @@ export default function DividendPanel({
         <TabsContent value="history" className="space-y-4" role="tabpanel" aria-label="Claim history">
           {claimHistory.length === 0 ? (
             <Card>
-              <CardContent className="p-8 text-center">
-                <History className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
+              <CardContent className="p-6 sm:p-8 text-center">
+                <History className="h-10 w-10 sm:h-12 sm:w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
                 <p className="text-gray-500 dark:text-gray-400">No claim history</p>
                 <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">
                   Your dividend claim history will appear here
@@ -546,9 +549,9 @@ export default function DividendPanel({
             </Card>
           ) : (
             <Card>
-              <CardContent className="p-6">
-                <div className="overflow-x-auto">
-                  <table className="w-full" role="table" aria-label="Dividend claim history">
+              <CardContent className="p-4 sm:p-6">
+                <div className="-mx-2 overflow-x-auto px-2 sm:mx-0 sm:px-0">
+                  <table className="w-full min-w-[520px]" role="table" aria-label="Dividend claim history">
                     <thead>
                       <tr className="text-left text-sm text-gray-600 dark:text-gray-300 border-b dark:border-gray-700">
                         <th className="pb-2 font-medium" scope="col">Date</th>
@@ -564,17 +567,17 @@ export default function DividendPanel({
                           key={`${claim.distributionId}-${index}`}
                           className="border-b dark:border-gray-700 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
                         >
-                          <td className="py-3">
+                          <td className="py-2 sm:py-3">
                             {new Date(claim.date).toLocaleDateString()}
                           </td>
-                          <td className="py-3">
+                          <td className="py-2 sm:py-3">
                             <Badge variant="outline">#{claim.distributionId}</Badge>
                           </td>
-                          <td className="py-3 font-medium">
+                          <td className="py-2 sm:py-3 font-medium">
                             {parseFloat(claim.amount).toLocaleString()}
                           </td>
-                          <td className="py-3">{claim.currency}</td>
-                          <td className="py-3">
+                          <td className="py-2 sm:py-3">{claim.currency}</td>
+                          <td className="py-2 sm:py-3">
                             <code className="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded" title={claim.txHash}>
                               {claim.txHash.slice(0, 8)}...
                             </code>
@@ -593,8 +596,8 @@ export default function DividendPanel({
         <TabsContent value="past" className="space-y-4" role="tabpanel" aria-label="Past distributions">
           {pastDistributions.length === 0 ? (
             <Card>
-              <CardContent className="p-8 text-center">
-                <History className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
+              <CardContent className="p-6 sm:p-8 text-center">
+                <History className="h-10 w-10 sm:h-12 sm:w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
                 <p className="text-gray-500">No past distributions</p>
               </CardContent>
             </Card>
@@ -606,16 +609,16 @@ export default function DividendPanel({
                 role="article"
                 aria-label={`Past distribution ${dist.distributionId}`}
               >
-                <CardContent className="p-6">
+                <CardContent className="p-4 sm:p-6">
                   <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
                         <h3 className="font-semibold text-lg">
                           Distribution #{dist.distributionId}
                         </h3>
                         <Badge variant="secondary">Closed</Badge>
                       </div>
-                      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-4">
                         <div>
                           <p className="text-sm text-gray-600 dark:text-gray-400">Currency</p>
                           <p className="font-medium">{dist.currency}</p>
