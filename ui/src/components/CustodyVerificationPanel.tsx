@@ -30,6 +30,7 @@ import {
   Search,
 } from 'lucide-react';
 import { useTheme } from '@/theme';
+import { WALLET_REJECTION_MESSAGE, runWalletRequest } from './walletRequest';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -222,21 +223,31 @@ export default function CustodyVerificationPanel({
     setSubmitting(true);
 
     try {
-      await onSubmitProof({
-        assetId,
-        type: proofForm.type,
-        custodian: '', // Will be filled by the connected wallet
-        proofHash: proofForm.proofHash,
-        metadata: proofForm.metadataKey
-          ? { [proofForm.metadataKey]: proofForm.metadataValue }
-          : {},
-      });
+      const outcome = await runWalletRequest(() =>
+        onSubmitProof({
+          assetId,
+          type: proofForm.type,
+          custodian: '', // Will be filled by the connected wallet
+          proofHash: proofForm.proofHash,
+          metadata: proofForm.metadataKey
+            ? { [proofForm.metadataKey]: proofForm.metadataValue }
+            : {},
+        })
+      );
 
-      setSubmitSuccess('Proof submitted successfully!');
-      setProofForm({ type: 'physical', proofHash: '', metadataKey: '', metadataValue: '' });
-      setTimeout(() => setSubmitSuccess(null), 5000);
-    } catch (err: any) {
-      setSubmitError(err?.message || 'Failed to submit proof');
+      if (outcome.status === 'success') {
+        setSubmitSuccess('Proof submitted successfully!');
+        setProofForm({ type: 'physical', proofHash: '', metadataKey: '', metadataValue: '' });
+        setTimeout(() => setSubmitSuccess(null), 5000);
+      } else {
+        // Rejected requests keep proofForm intact and the form open; nothing
+        // was submitted, so the entered proof is still safe to reuse.
+        setSubmitError(
+          outcome.status === 'rejected'
+            ? WALLET_REJECTION_MESSAGE
+            : (outcome.error as any)?.message || 'Failed to submit proof'
+        );
+      }
     } finally {
       setSubmitting(false);
     }

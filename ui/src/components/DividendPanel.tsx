@@ -10,6 +10,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, TrendingUp, Clock, DollarSign, History, Settings, Zap } from 'lucide-react';
+import { WALLET_REJECTION_MESSAGE, runWalletRequest } from './walletRequest';
 
 interface DividendDistribution {
   distributionId: number;
@@ -157,15 +158,17 @@ export default function DividendPanel({
   const handleCreateDistribution = async () => {
     if (!onCreateDistribution) return;
 
-    try {
+    const outcome = await runWalletRequest(async () => {
       const deadline = new Date(Date.now() + parseInt(createForm.deadlineDays) * 86400000);
-      await onCreateDistribution({
+      return onCreateDistribution({
         tokenAddress: createForm.tokenAddress,
         currency: createForm.currency,
         amount: createForm.amount,
         deadline,
       });
+    });
 
+    if (outcome.status === 'success') {
       setCreateForm({
         tokenAddress: '',
         currency: 'USDC',
@@ -173,8 +176,14 @@ export default function DividendPanel({
         deadlineDays: '30',
       });
       setShowCreateForm(false);
-    } catch (err: any) {
-      setClaimError(err.message || 'Failed to create distribution');
+    } else {
+      // A rejected request leaves createForm and the form open so all entered
+      // values remain available for review and retry.
+      setClaimError(
+        outcome.status === 'rejected'
+          ? WALLET_REJECTION_MESSAGE
+          : (outcome.error as any)?.message || 'Failed to create distribution'
+      );
     }
   };
 

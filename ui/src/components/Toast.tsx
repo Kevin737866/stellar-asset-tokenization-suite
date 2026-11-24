@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react';
+import { WALLET_REJECTION_MESSAGE, WALLET_REJECTION_TITLE, isWalletRejection } from './walletRequest';
 
 // Toast Types
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
@@ -183,6 +184,15 @@ export function useErrorTranslator() {
 
     const code = error?.code;
     const message = error?.message || '';
+
+    // Wallet rejection is not a transaction failure. Tell the user that their
+    // inputs were kept so they can review and retry deliberately.
+    if (isWalletRejection(error)) {
+      return {
+        title: WALLET_REJECTION_TITLE,
+        message: WALLET_REJECTION_MESSAGE,
+      };
+    }
 
     // Network errors
     if (code === 'NETWORK_ERROR' || message.includes('Network') || message.includes('fetch')) {
