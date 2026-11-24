@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
@@ -9,6 +9,21 @@ interface SecondaryMarketProps {
   userAddress: string;
 }
 
+interface FeeQuotePreview {
+  baseFee: string;
+  tradingFee: string;
+  totalFee: string;
+  feeCurrency: string;
+}
+
+const QUOTE_STALE_AFTER_MS = 15_000;
+
+function isValidPositiveNumber(value: string): boolean {
+  if (!value || value.trim() === '') return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0;
+}
+
 const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress }) => {
   const toast = useToast();
   const translateError = useErrorTranslator();
@@ -16,10 +31,10 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [orderBook, setOrderBook] = useState<OrderBook | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [vwap, setVwap] = useState<string>('0');
-  const [userOrders, setUserOrders] = useState<Order[]>([]);
+  const [userOrders] = useState<Order[]>([]);
   const [kycStatus, setKycStatus] = useState<boolean>(false);
-  const [dividendHalt, setDividendHalt] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [dividendHalt] = useState<boolean>(false);
+  const [statusMessage] = useState<string | null>(null);
 
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
@@ -30,12 +45,13 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [price, setPrice] = useState<string>('');
   const [amount, setAmount] = useState<string>('');
 
-  const [feePreview, setFeePreview] = useState<{
-    baseFee: string;
-    tradingFee: string;
-    totalFee: string;
-    feeCurrency: string;
-  } | null>(null);
+  const [feePreview, setFeePreview] = useState<FeeQuotePreview | null>(null);
+  const [isQuoteLoading, setIsQuoteLoading] = useState<boolean>(false);
+  const [quoteUpdatedAt, setQuoteUpdatedAt] = useState<number | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [isQuoteStale, setIsQuoteStale] = useState<boolean>(false);
+
+  const quoteRequestIdRef = useRef<number>(0);
 
   const [portfolioPnl, setPortfolioPnl] = useState<string | null>(null);
 
@@ -87,16 +103,23 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       } else {
         setPortfolioPnl(null);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       const { title, message } = translateError(err);
+      const errorObj = err as { code?: string; message?: string } | null;
 
-      if (err?.code === 'NETWORK_ERROR' || err?.message?.includes('fetch') || err?.message?.includes('Network')) {
+      if (
+        errorObj?.code === 'NETWORK_ERROR' ||
+        errorObj?.message?.includes('fetch') ||
+        errorObj?.message?.includes('Network')
+      ) {
         setIsNetworkError(true);
       }
 
       setFetchError(message);
       if (showToasts) {
-        toast.error(title, message, () => fetchMarketData(true));
+        toast.error(title, message, () => {
+          void fetchMarketData(true);
+        });
       }
     } finally {
       setIsLoadingData(false);
@@ -104,31 +127,88 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   }, [sdk, asset, userAddress, toast, translateError]);
 
   const fetchFeePreview = useCallback(async () => {
-    if (!price || !amount || parseFloat(price) <= 0 || parseFloat(amount) <= 0) {
+    if (!isValidPositiveNumber(price) || !isValidPositiveNumber(amount)) {
+      quoteRequestIdRef.current += 1;
+      setIsQuoteLoading(false);
       setFeePreview(null);
+      setQuoteUpdatedAt(null);
+      setQuoteError(null);
+      setIsQuoteStale(false);
       return;
     }
+
+    const reqId = ++quoteRequestIdRef.current;
+    setIsQuoteLoading(true);
+    setQuoteError(null);
+
     try {
       const fee = await sdk.marketClient.estimateTradingFee(side as OrderType, amount, price);
+      if (reqId !== quoteRequestIdRef.current) return;
+
       setFeePreview(fee);
-    } catch {
-      setFeePreview(null);
+      setQuoteUpdatedAt(Date.now());
+      setQuoteError(null);
+      setIsQuoteStale(false);
+    } catch (err: unknown) {
+      if (reqId !== quoteRequestIdRef.current) return;
+      const { message } = translateError(err);
+      setQuoteError(message || 'Unable to refresh quote');
+      setIsQuoteStale(true);
+    } finally {
+      if (reqId === quoteRequestIdRef.current) {
+        setIsQuoteLoading(false);
+      }
     }
-  }, [sdk, side, price, amount]);
+  }, [sdk, side, price, amount, translateError]);
 
   useEffect(() => {
-    const timer = setTimeout(fetchFeePreview, 300);
+    if (!isValidPositiveNumber(price) || !isValidPositiveNumber(amount)) {
+      quoteRequestIdRef.current += 1;
+      setIsQuoteLoading(false);
+      setFeePreview(null);
+      setQuoteUpdatedAt(null);
+      setQuoteError(null);
+      setIsQuoteStale(false);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void fetchFeePreview();
+    }, 300);
     return () => clearTimeout(timer);
-  }, [fetchFeePreview]);
+  }, [fetchFeePreview, price, amount]);
 
   useEffect(() => {
-    fetchMarketData(true);
-    const interval = setInterval(() => fetchMarketData(false), 5000);
+    if (!feePreview || quoteUpdatedAt === null) {
+      setIsQuoteStale(false);
+      return;
+    }
+
+    const evaluateQuoteStaleness = () => {
+      const expired = Date.now() - quoteUpdatedAt >= QUOTE_STALE_AFTER_MS;
+      setIsQuoteStale(expired || quoteError !== null);
+    };
+
+    evaluateQuoteStaleness();
+    const interval = setInterval(evaluateQuoteStaleness, 1_000);
+    return () => clearInterval(interval);
+  }, [feePreview, quoteUpdatedAt, quoteError]);
+
+  useEffect(() => {
+    void fetchMarketData(true);
+    const interval = setInterval(() => {
+      void fetchMarketData(false);
+    }, 5000);
     return () => clearInterval(interval);
   }, [fetchMarketData]);
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!userAddress || !userAddress.trim()) {
+      toast.warning('Wallet Required', 'Please connect a valid wallet address before placing an order.');
+      return;
+    }
 
     if (!kycStatus) {
       toast.warning(
@@ -145,11 +225,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       return;
     }
 
-    if (!price || parseFloat(price) <= 0) {
+    if (!isValidPositiveNumber(price)) {
       toast.warning('Invalid Price', 'Please enter a valid price greater than zero.');
       return;
     }
-    if (!amount || parseFloat(amount) <= 0) {
+    if (!isValidPositiveNumber(amount)) {
       toast.warning('Invalid Amount', 'Please enter a valid amount greater than zero.');
       return;
     }
@@ -172,18 +252,29 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
         'Order Placed',
         `${side.toUpperCase()} order for ${amount} @ ${price} placed successfully.`
       );
-      fetchMarketData();
+      void fetchMarketData();
       setPrice('');
       setAmount('');
+      setFeePreview(null);
+      setQuoteUpdatedAt(null);
+      setQuoteError(null);
+      setIsQuoteStale(false);
       setLastOrderParams(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
       const { title, message } = translateError(err);
       toast.error(title, message, () => {
         if (lastOrderParams) {
           setSide(lastOrderParams.side);
           setPrice(lastOrderParams.price);
           setAmount(lastOrderParams.amount);
-          handlePlaceOrder(new Event('submit') as any);
+          void sdk.marketClient.placeLimitOrder(
+            userAddress,
+            asset.token_address,
+            lastOrderParams.side,
+            lastOrderParams.price,
+            lastOrderParams.amount,
+            Math.floor(Date.now() / 1000) + 86400 * 7
+          );
         }
       });
     } finally {
@@ -193,7 +284,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
 
   const handleRetryFetch = () => {
     setIsLoadingData(true);
-    fetchMarketData();
+    void fetchMarketData();
   };
 
   const handleSideKeyDown = (targetSide: 'buy' | 'sell') => (e: React.KeyboardEvent) => {
@@ -202,6 +293,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       setSide(targetSide);
     }
   };
+
+  const showQuotePanel =
+    isValidPositiveNumber(price) &&
+    isValidPositiveNumber(amount) &&
+    (isQuoteLoading || feePreview !== null || quoteError !== null);
 
   if (isNetworkError && !isLoadingData) {
     return (
@@ -397,23 +493,86 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
               />
             </div>
 
-            {feePreview && (
-              <div className="bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-3 text-sm">
-                <div className="font-medium text-blue-800 dark:text-blue-300 mb-1">Fee Preview</div>
-                <div className="grid grid-cols-3 gap-2 text-xs text-gray-600 dark:text-gray-400">
-                  <div>
-                    <span className="block text-gray-400">Base Fee</span>
-                    <span className="font-medium">{feePreview.baseFee} {feePreview.feeCurrency}</span>
+            {showQuotePanel && (
+              <div
+                className={`border rounded-lg p-3 mb-3 text-sm ${
+                  isQuoteStale || quoteError
+                    ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700'
+                    : 'bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800'
+                }`}
+                aria-live="polite"
+              >
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-blue-800 dark:text-blue-300">Fee Preview</span>
+                    {isQuoteLoading && (
+                      <span
+                        data-testid="quote-loading-indicator"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 dark:text-blue-300"
+                      >
+                        <span className="inline-block animate-spin">⟳</span>
+                        Loading quote...
+                      </span>
+                    )}
                   </div>
-                  <div>
-                    <span className="block text-gray-400">Trading Fee</span>
-                    <span className="font-medium">{feePreview.tradingFee} {feePreview.feeCurrency}</span>
-                  </div>
-                  <div>
-                    <span className="block text-gray-400">Total</span>
-                    <span className="font-medium text-blue-700 dark:text-blue-300">{feePreview.totalFee} {feePreview.feeCurrency}</span>
+
+                  <div className="flex items-center gap-2">
+                    {isQuoteStale && (
+                      <span
+                        data-testid="quote-stale-indicator"
+                        role="status"
+                        className="bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-200 px-2 py-0.5 rounded text-xs font-semibold"
+                      >
+                        Stale Quote
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void fetchFeePreview();
+                      }}
+                      disabled={isQuoteLoading}
+                      className="text-xs underline text-blue-700 dark:text-blue-300 disabled:opacity-50"
+                    >
+                      Refresh quote
+                    </button>
                   </div>
                 </div>
+
+                {feePreview ? (
+                  <>
+                    <div className="grid grid-cols-3 gap-2 text-xs text-gray-600 dark:text-gray-400">
+                      <div>
+                        <span className="block text-gray-400">Base Fee</span>
+                        <span className="font-medium">{feePreview.baseFee} {feePreview.feeCurrency}</span>
+                      </div>
+                      <div>
+                        <span className="block text-gray-400">Trading Fee</span>
+                        <span className="font-medium">{feePreview.tradingFee} {feePreview.feeCurrency}</span>
+                      </div>
+                      <div>
+                        <span className="block text-gray-400">Total</span>
+                        <span className="font-medium text-blue-700 dark:text-blue-300">{feePreview.totalFee} {feePreview.feeCurrency}</span>
+                      </div>
+                    </div>
+                    {quoteUpdatedAt !== null && (
+                      <div className="mt-1.5 text-[11px] text-gray-500 dark:text-gray-400 flex items-center justify-between">
+                        <span>Updated: {new Date(quoteUpdatedAt).toLocaleTimeString()}</span>
+                        {isQuoteStale && (
+                          <span className="text-amber-800 dark:text-amber-300">
+                            {quoteError
+                              ? `Quote refresh failed (${quoteError}); showing last known quote.`
+                              : `Quote older than ${Math.floor(QUOTE_STALE_AFTER_MS / 1000)}s; refresh recommended.`}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-xs text-amber-800 dark:text-amber-300">
+                    {isQuoteLoading ? 'Fetching fee quote...' : quoteError || 'Quote unavailable'}
+                  </p>
+                )}
               </div>
             )}
 
