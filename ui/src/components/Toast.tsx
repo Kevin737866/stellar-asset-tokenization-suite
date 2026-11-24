@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react';
+import { explainWalletPermissionError } from './walletPermissionErrors';
 
 // Toast Types
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
@@ -11,8 +12,15 @@ export interface ToastMessage {
   type: ToastType;
   title: string;
   message?: string;
+  recoverySteps?: string[];
   duration?: number;
   retryAction?: () => void;
+}
+
+export interface TranslatedError {
+  title: string;
+  message: string;
+  recoverySteps?: string[];
 }
 
 interface ToastContextType {
@@ -21,7 +29,12 @@ interface ToastContextType {
   removeToast: (id: string) => void;
   clearToasts: () => void;
   success: (title: string, message?: string) => void;
-  error: (title: string, message?: string, retryAction?: () => void) => void;
+  error: (
+    title: string,
+    message?: string,
+    retryAction?: () => void,
+    recoverySteps?: string[]
+  ) => void;
   warning: (title: string, message?: string) => void;
   info: (title: string, message?: string) => void;
 }
@@ -96,6 +109,16 @@ const ToastItem: React.FC<{
         {toast.message && (
           <p className="text-sm text-gray-600 dark:text-gray-300 mt-0.5">{toast.message}</p>
         )}
+        {toast.recoverySteps && toast.recoverySteps.length > 0 && (
+          <ol
+            className="mt-2 list-decimal list-inside space-y-1 text-xs text-gray-600 dark:text-gray-300"
+            aria-label="Recovery steps"
+          >
+            {toast.recoverySteps.map((step, index) => (
+              <li key={index}>{step}</li>
+            ))}
+          </ol>
+        )}
         {toast.retryAction && toast.type === 'error' && (
           <button
             onClick={() => {
@@ -142,8 +165,12 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   );
 
   const error = useCallback(
-    (title: string, message?: string, retryAction?: () => void) =>
-      addToast({ type: 'error', title, message, retryAction }),
+    (
+      title: string,
+      message?: string,
+      retryAction?: () => void,
+      recoverySteps?: string[]
+    ) => addToast({ type: 'error', title, message, retryAction, recoverySteps }),
     [addToast]
   );
 
@@ -176,10 +203,20 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   );
 };
 
-// Hook to convert contract errors to user-friendly messages
+// Hook to convert contract and wallet errors to user-friendly messages
 export function useErrorTranslator() {
-  const translateError = useCallback((error: any): { title: string; message: string } => {
+  const translateError = useCallback((error: any): TranslatedError => {
     if (!error) return { title: 'Unknown Error', message: 'An unexpected error occurred.' };
+
+    // Wallet permission and authorization errors with actionable recovery steps
+    const walletPermissionError = explainWalletPermissionError(error);
+    if (walletPermissionError) {
+      return {
+        title: walletPermissionError.title,
+        message: walletPermissionError.message,
+        recoverySteps: walletPermissionError.recoverySteps,
+      };
+    }
 
     const code = error?.code;
     const message = error?.message || '';
