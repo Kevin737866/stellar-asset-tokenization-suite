@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Address } from 'stellar-sdk';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
@@ -70,11 +71,13 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       const tr = await sdk.marketClient.getRecentTrades(asset.token_address);
       const v = await sdk.marketClient.getVWAP(asset.token_address);
       const kyc = await sdk.complianceClient.getKYCStatus(userAddress);
+      const orders = await sdk.marketClient.getUserOrders(new Address(userAddress));
 
       setOrderBook(ob);
       setTrades(tr);
       setVwap(v);
       setKycStatus(kyc.is_verified);
+      setUserOrders(orders);
       setFetchError(null);
       setIsNetworkError(false);
 
