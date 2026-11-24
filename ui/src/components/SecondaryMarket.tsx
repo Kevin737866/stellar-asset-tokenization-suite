@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
+import { formatUnixTimestamp } from './timestampFormat';
 
 interface SecondaryMarketProps {
   sdk: StellarRWASDK;
@@ -451,7 +452,9 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
                     <tr key={i} className={`border-b border-gray-100 dark:border-gray-800 ${
                       trade.side === 'buy' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
                     }`}>
-                      <td className="py-1.5">{new Date(trade.timestamp * 1000).toLocaleTimeString()}</td>
+                      <td className="py-1.5" title={formatUnixTimestamp(trade.timestamp)}>
+                        {formatUnixTimestamp(trade.timestamp, { variant: 'time' })}
+                      </td>
                       <td className="py-1.5 font-medium">{trade.fill_price}</td>
                       <td className="py-1.5">{trade.fill_amount}</td>
                     </tr>

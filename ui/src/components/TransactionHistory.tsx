@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import { formatTimestamp } from './timestampFormat';
 import {
   ChevronLeft,
   ChevronRight,
@@ -179,16 +180,7 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
     setCurrentPage(1);
   };
 
-  const formatDate = (date: Date) => {
-    const d = new Date(date);
-    return d.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
+  const formatDate = (date: Date) => formatTimestamp(date);
 
   // Loading skeleton
   if (isLoading) {

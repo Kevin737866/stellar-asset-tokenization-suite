@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { formatUnixTimestamp } from './timestampFormat';
 import {
   Shield,
   Clock,
@@ -137,13 +138,7 @@ const TYPE_LABELS: Record<AttestationProof['type'], string> = {
 };
 
 function formatDate(ts: number): string {
-  return new Date(ts * 1000).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return formatUnixTimestamp(ts);
 }
 
 function getDaysUntil(ts: number): number {
