@@ -8,6 +8,8 @@ import { Badge } from '@/components/ui/badge';
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   ArrowUpDown,
   ExternalLink,
   Calendar,
@@ -40,10 +42,24 @@ export interface Transaction {
   fee?: string;
 }
 
+/** Allowed page-size options surfaced in the rows-per-page selector. */
+export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
+export type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
+
+export const DEFAULT_PAGE_SIZE: PageSize = 20;
+
+/** Maximum number of numbered page buttons shown before ellipsis collapses them. */
+const MAX_PAGE_BUTTONS = 5;
+
 interface TransactionHistoryProps {
   transactions: Transaction[];
   onOpenExplorer?: (txHash: string) => void;
   isLoading?: boolean;
+  /**
+   * Initial number of rows shown per page.
+   * Accepts any value from PAGE_SIZE_OPTIONS; defaults to DEFAULT_PAGE_SIZE.
+   */
+  defaultPageSize?: PageSize;
 }
 
 const STATUS_STYLES: Record<TransactionStatus, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; icon: React.FC<{ className?: string }> }> = {
@@ -66,9 +82,62 @@ const TYPE_LABELS: Record<Exclude<TransactionType, 'all'>, string> = {
   unstake: 'Unstake',
 };
 
-const ITEMS_PER_PAGE = 20;
+// ── Pagination helpers ───────────────────────────────────────────────────────
 
-export default function TransactionHistory({ transactions, onOpenExplorer, isLoading = false }: TransactionHistoryProps) {
+/**
+ * Build the array of page numbers (and 'ellipsis' sentinels) to render as
+ * numbered buttons in the pagination bar.
+ *
+ * Rules:
+ * - Always show first and last page.
+ * - Show up to MAX_PAGE_BUTTONS consecutive pages centred around currentPage.
+ * - Insert an '...' sentinel wherever a gap exists between shown pages.
+ */
+export function buildPageRange(currentPage: number, totalPages: number): Array<number | 'ellipsis-start' | 'ellipsis-end'> {
+  if (totalPages <= MAX_PAGE_BUTTONS + 2) {
+    // Enough room to show every page without ellipsis
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+
+  const half = Math.floor(MAX_PAGE_BUTTONS / 2);
+  let rangeStart = Math.max(2, currentPage - half);
+  let rangeEnd = Math.min(totalPages - 1, currentPage + half);
+
+  // Clamp so the window always has MAX_PAGE_BUTTONS entries
+  if (rangeEnd - rangeStart + 1 < MAX_PAGE_BUTTONS) {
+    if (currentPage - 1 < totalPages - currentPage) {
+      rangeEnd = Math.min(totalPages - 1, rangeStart + MAX_PAGE_BUTTONS - 1);
+    } else {
+      rangeStart = Math.max(2, rangeEnd - MAX_PAGE_BUTTONS + 1);
+    }
+  }
+
+  const pages: Array<number | 'ellipsis-start' | 'ellipsis-end'> = [1];
+
+  if (rangeStart > 2) {
+    pages.push('ellipsis-start');
+  }
+
+  for (let p = rangeStart; p <= rangeEnd; p++) {
+    pages.push(p);
+  }
+
+  if (rangeEnd < totalPages - 1) {
+    pages.push('ellipsis-end');
+  }
+
+  pages.push(totalPages);
+  return pages;
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
+
+export default function TransactionHistory({
+  transactions,
+  onOpenExplorer,
+  isLoading = false,
+  defaultPageSize = DEFAULT_PAGE_SIZE,
+}: TransactionHistoryProps) {
   // Filter state
   const [filterType, setFilterType] = useState<TransactionType>('all');
   const [filterToken, setFilterToken] = useState<string>('all');
@@ -78,10 +147,15 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState<PageSize>(defaultPageSize);
+  const [jumpValue, setJumpValue] = useState('');
+
+  // Sort state
   const [sortField, setSortField] = useState<'date' | 'amount' | 'type' | 'status'>('date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
-  // Get unique tokens for filter dropdown
+  // ── Derived data ───────────────────────────────────────────────────────────
+
   const uniqueTokens = useMemo(() => {
     const tokenSet = new Map<string, string>();
     transactions.forEach((tx) => {
@@ -90,19 +164,12 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
     return Array.from(tokenSet.entries());
   }, [transactions]);
 
-  // Filter transactions
   const filteredTransactions = useMemo(() => {
     return transactions.filter((tx) => {
-      // Type filter
       if (filterType !== 'all' && tx.type !== filterType) return false;
-
-      // Token filter
       if (filterToken !== 'all' && tx.token !== filterToken) return false;
-
-      // Status filter
       if (filterStatus !== 'all' && tx.status !== filterStatus) return false;
 
-      // Date range filter
       if (dateRange.start) {
         const txDate = new Date(tx.date);
         const startDate = new Date(dateRange.start);
@@ -115,7 +182,6 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
         if (txDate > endDate) return false;
       }
 
-      // Search query
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase();
         const matchesSearch =
@@ -131,7 +197,6 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
     });
   }, [transactions, filterType, filterToken, filterStatus, dateRange, searchQuery]);
 
-  // Sort transactions
   const sortedTransactions = useMemo(() => {
     const sorted = [...filteredTransactions];
     sorted.sort((a, b) => {
@@ -155,21 +220,30 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
     return sorted;
   }, [filteredTransactions, sortField, sortDirection]);
 
-  // Paginate
-  const totalPages = Math.ceil(sortedTransactions.length / ITEMS_PER_PAGE);
-  const paginatedTransactions = useMemo(() => {
-    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-    return sortedTransactions.slice(startIndex, startIndex + ITEMS_PER_PAGE);
-  }, [sortedTransactions, currentPage]);
+  const totalPages = Math.max(1, Math.ceil(sortedTransactions.length / pageSize));
 
-  // Reset page on filter change
-  const handleFilterChange = useCallback((setter: Function, value: any) => {
+  // Clamp currentPage whenever totalPages shrinks (e.g. after filtering)
+  const safePage = Math.min(currentPage, totalPages);
+
+  const paginatedTransactions = useMemo(() => {
+    const startIndex = (safePage - 1) * pageSize;
+    return sortedTransactions.slice(startIndex, startIndex + pageSize);
+  }, [sortedTransactions, safePage, pageSize]);
+
+  const pageRange = useMemo(
+    () => buildPageRange(safePage, totalPages),
+    [safePage, totalPages],
+  );
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  /** Reset to page 1 whenever a filter changes so users never land on a blank page. */
+  const handleFilterChange = useCallback(<T,>(setter: React.Dispatch<React.SetStateAction<T>>, value: T) => {
     setter(value);
     setCurrentPage(1);
   }, []);
 
-  // Sort toggle
-  const handleSort = (field: typeof sortField) => {
+  const handleSort = useCallback((field: typeof sortField) => {
     if (sortField === field) {
       setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
     } else {
@@ -177,7 +251,37 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
       setSortDirection('desc');
     }
     setCurrentPage(1);
-  };
+  }, [sortField]);
+
+  const handlePageSizeChange = useCallback((value: string) => {
+    const newSize = parseInt(value, 10) as PageSize;
+    setPageSize(newSize);
+    setCurrentPage(1);
+    setJumpValue('');
+  }, []);
+
+  /** Navigate to a specific page. Clamps to valid range silently. */
+  const goToPage = useCallback(
+    (page: number) => {
+      const clamped = Math.max(1, Math.min(page, totalPages));
+      setCurrentPage(clamped);
+      setJumpValue('');
+    },
+    [totalPages],
+  );
+
+  const handleJumpSubmit = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const parsed = parseInt(jumpValue, 10);
+      if (!isNaN(parsed)) {
+        goToPage(parsed);
+      }
+    },
+    [jumpValue, goToPage],
+  );
+
+  // ── Formatters ─────────────────────────────────────────────────────────────
 
   const formatDate = (date: Date) => {
     const d = new Date(date);
@@ -190,7 +294,8 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
     });
   };
 
-  // Loading skeleton
+  // ── Loading skeleton ───────────────────────────────────────────────────────
+
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -207,6 +312,8 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
       </div>
     );
   }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-4">
@@ -443,57 +550,144 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
         </>
       )}
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between pt-4 border-t">
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Page {currentPage} of {totalPages} ({sortedTransactions.length} results)
-          </p>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
-            >
-              <ChevronLeft className="h-4 w-4" />
-              Previous
-            </Button>
-            <div className="flex gap-1">
-              {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
-                let pageNum: number;
-                if (totalPages <= 5) {
-                  pageNum = i + 1;
-                } else if (currentPage <= 3) {
-                  pageNum = i + 1;
-                } else if (currentPage >= totalPages - 2) {
-                  pageNum = totalPages - 4 + i;
-                } else {
-                  pageNum = currentPage - 2 + i;
+      {/* ── Pagination Controls ─────────────────────────────────────────────── */}
+      {sortedTransactions.length > 0 && (
+        <div
+          className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t"
+          role="navigation"
+          aria-label="Transaction history pagination"
+        >
+          {/* Left: summary + rows-per-page */}
+          <div className="flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
+            <span>
+              {sortedTransactions.length === 0
+                ? 'No results'
+                : `${(safePage - 1) * pageSize + 1}–${Math.min(safePage * pageSize, sortedTransactions.length)} of ${sortedTransactions.length}`}
+            </span>
+            <label className="flex items-center gap-1.5">
+              <span className="whitespace-nowrap">Rows per page</span>
+              <Select value={String(pageSize)} onValueChange={handlePageSizeChange}>
+                <SelectTrigger className="h-8 w-20 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PAGE_SIZE_OPTIONS.map((opt) => (
+                    <SelectItem key={opt} value={String(opt)}>
+                      {opt}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          </div>
+
+          {/* Centre: page number buttons */}
+          {totalPages > 1 && (
+            <div className="flex items-center gap-1" role="group" aria-label="Page navigation">
+              {/* First page */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => goToPage(1)}
+                disabled={safePage === 1}
+                aria-label="First page"
+                title="First page"
+                className="w-8 h-8 p-0"
+              >
+                <ChevronsLeft className="h-4 w-4" />
+              </Button>
+
+              {/* Previous page */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => goToPage(safePage - 1)}
+                disabled={safePage === 1}
+                aria-label="Previous page"
+                title="Previous page"
+                className="w-8 h-8 p-0"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+
+              {/* Numbered pages with ellipsis */}
+              {pageRange.map((entry, idx) => {
+                if (entry === 'ellipsis-start' || entry === 'ellipsis-end') {
+                  return (
+                    <span
+                      key={entry}
+                      className="w-8 h-8 flex items-center justify-center text-gray-400 text-sm select-none"
+                      aria-hidden="true"
+                    >
+                      …
+                    </span>
+                  );
                 }
                 return (
                   <Button
-                    key={pageNum}
-                    variant={pageNum === currentPage ? 'default' : 'outline'}
+                    key={`page-${entry}`}
+                    variant={entry === safePage ? 'default' : 'outline'}
                     size="sm"
-                    onClick={() => setCurrentPage(pageNum)}
-                    className="w-9 h-9"
+                    onClick={() => goToPage(entry)}
+                    aria-label={`Page ${entry}`}
+                    aria-current={entry === safePage ? 'page' : undefined}
+                    className="w-8 h-8 p-0 text-xs"
                   >
-                    {pageNum}
+                    {entry}
                   </Button>
                 );
               })}
+
+              {/* Next page */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => goToPage(safePage + 1)}
+                disabled={safePage === totalPages}
+                aria-label="Next page"
+                title="Next page"
+                className="w-8 h-8 p-0"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+
+              {/* Last page */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => goToPage(totalPages)}
+                disabled={safePage === totalPages}
+                aria-label="Last page"
+                title="Last page"
+                className="w-8 h-8 p-0"
+              >
+                <ChevronsRight className="h-4 w-4" />
+              </Button>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage === totalPages}
-            >
-              Next
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
+          )}
+
+          {/* Right: jump-to-page */}
+          {totalPages > 1 && (
+            <form onSubmit={handleJumpSubmit} className="flex items-center gap-2">
+              <label htmlFor="jump-to-page" className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                Go to
+              </label>
+              <Input
+                id="jump-to-page"
+                type="number"
+                min={1}
+                max={totalPages}
+                value={jumpValue}
+                onChange={(e) => setJumpValue(e.target.value)}
+                className="h-8 w-16 text-xs text-center"
+                placeholder={String(safePage)}
+                aria-label={`Jump to page (1–${totalPages})`}
+              />
+              <Button type="submit" variant="outline" size="sm" className="h-8 text-xs px-3">
+                Go
+              </Button>
+            </form>
+          )}
         </div>
       )}
     </div>
