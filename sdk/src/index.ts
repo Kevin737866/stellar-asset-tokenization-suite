@@ -98,6 +98,98 @@ export {
   type ErrorInfo,
 } from './errors';
 
+// ─── Transaction Lifecycle Callback Types ────────────────────────────────────
+
+/**
+ * Lifecycle phase of a Stellar transaction.
+ * - `'submit'`: Transaction is being built and submitted to the Soroban RPC node.
+ * - `'confirm'`: Submitted transaction is being confirmed on-chain.
+ */
+export type TransactionLifecyclePhase = 'submit' | 'confirm';
+
+/**
+ * Status of a transaction lifecycle phase.
+ */
+export type TransactionLifecycleStatus = 'pending' | 'success' | 'error';
+
+/**
+ * Event payload delivered to a {@link TransactionLifecycleCallback} during the
+ * `submit` and `confirm` phases of a transaction.
+ */
+export interface TransactionLifecycleEvent {
+  /** Lifecycle phase being reported (`'submit'` or `'confirm'`). */
+  phase: TransactionLifecyclePhase;
+  /** Outcome/state of this phase (`'pending'`, `'success'`, or `'error'`). */
+  status: TransactionLifecycleStatus;
+  /** Transaction hash once known (available on submit success and confirm events). */
+  transactionHash?: string;
+  /** Human-readable operation identifier (e.g. `'batch'`, `'deployCompleteRWAToken'`). */
+  operation?: string;
+  /** Source / signer Stellar account address, when available. */
+  source?: string;
+  /** Ledger sequence number on which the transaction was confirmed, when available. */
+  ledger?: number;
+  /** Error message when `status` is `'error'`. */
+  errorMessage?: string;
+  /** Epoch timestamp in milliseconds when the event was emitted. */
+  timestamp: number;
+}
+
+/**
+ * Observer callback invoked during transaction `submit` and `confirm` phases.
+ *
+ * Errors thrown by the callback are caught and logged so observer failures
+ * never abort or mask an in-flight on-chain transaction.
+ */
+export type TransactionLifecycleCallback = (
+  event: TransactionLifecycleEvent,
+) => void | Promise<void>;
+
+/**
+ * Optional per-call transaction lifecycle hook.
+ */
+export interface TransactionLifecycleOptions {
+  /** Callback invoked during the transaction `submit` and `confirm` phases. */
+  onLifecycle?: TransactionLifecycleCallback;
+}
+
+/**
+ * Validate an optional lifecycle callback.
+ * Throws {@link InvalidParametersError} if provided and not a function.
+ */
+function validateLifecycleCallback(
+  callback: unknown,
+  fieldName: string,
+): asserts callback is TransactionLifecycleCallback | undefined {
+  if (callback !== undefined && typeof callback !== 'function') {
+    throw new InvalidParametersError(`${fieldName} must be a function`);
+  }
+}
+
+/**
+ * Safely invoke a lifecycle callback without allowing observer exceptions
+ * to corrupt transaction execution or mask on-chain outcomes.
+ */
+async function emitLifecycleEvent(
+  callback: TransactionLifecycleCallback | undefined,
+  event: TransactionLifecycleEvent,
+  logger: Logger,
+): Promise<void> {
+  if (!callback) {
+    return;
+  }
+  try {
+    await callback(event);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn('Transaction lifecycle callback threw an error', {
+      phase: event.phase,
+      status: event.status,
+      error: msg,
+    });
+  }
+}
+
 // ─── BatchTransactionBuilder ──────────────────────────────────────────────────
 
 /**
@@ -142,13 +234,34 @@ export class BatchTransactionBuilder {
   private readonly serverUrl: string;
   private readonly networkPassphrase: string;
   private readonly logger: Logger;
+  private _lifecycleCallback?: TransactionLifecycleCallback;
 
-  constructor(serverUrl: string, networkPassphrase: string) {
+  constructor(
+    serverUrl: string,
+    networkPassphrase: string,
+    onLifecycle?: TransactionLifecycleCallback,
+  ) {
     validateServerUrl(serverUrl, 'serverUrl');
     validateNonEmptyString(networkPassphrase, 'networkPassphrase');
+    validateLifecycleCallback(onLifecycle, 'onLifecycle');
     this.serverUrl = serverUrl;
     this.networkPassphrase = networkPassphrase;
+    this._lifecycleCallback = onLifecycle;
     this.logger = createLogger('BatchTransactionBuilder');
+  }
+
+  /**
+   * Register or clear a lifecycle callback invoked during the `submit` and
+   * `confirm` phases of {@link submit}.
+   *
+   * @param callback - Observer function, or `undefined` to clear.
+   * @returns `this` — supports method chaining.
+   * @throws {InvalidParametersError} if `callback` is neither a function nor `undefined`.
+   */
+  onLifecycle(callback: TransactionLifecycleCallback | undefined): this {
+    validateLifecycleCallback(callback, 'callback');
+    this._lifecycleCallback = callback;
+    return this;
   }
 
   // ─── add ───────────────────────────────────────────────────────────────────
@@ -243,7 +356,7 @@ export class BatchTransactionBuilder {
    */
   async submit(
     source: Address,
-    txOptions: TransactionOptions = {},
+    txOptions: TransactionOptions & TransactionLifecycleOptions = {},
   ): Promise<BatchTransactionResult> {
     validateAddress(source, 'source');
     if (this.operations.length === 0) {
@@ -257,20 +370,38 @@ export class BatchTransactionBuilder {
     if (txOptions.timeout != null && (typeof txOptions.timeout !== 'number' || txOptions.timeout <= 0)) {
       throw new InvalidParametersError('txOptions.timeout must be a positive number');
     }
+    validateLifecycleCallback(txOptions.onLifecycle, 'txOptions.onLifecycle');
 
+    const lifecycleCallback = txOptions.onLifecycle ?? this._lifecycleCallback;
+    const sourceStr = source.toString();
     const estimatedFee = parseInt(this.estimateGas(), 10);
     const fee = txOptions.fee ?? estimatedFee;
 
     this.logger.info('Submitting batch transaction', {
-      source: source.toString(),
+      source: sourceStr,
       operationCount: this.operations.length,
       estimatedFee,
     });
 
+    let activePhase: TransactionLifecyclePhase = 'submit';
+    let submittedHash: string | undefined;
+
+    await emitLifecycleEvent(
+      lifecycleCallback,
+      {
+        phase: 'submit',
+        status: 'pending',
+        operation: 'batch',
+        source: sourceStr,
+        timestamp: Date.now(),
+      },
+      this.logger,
+    );
+
     try {
       const { SorobanRpc, TransactionBuilder, Operation } = await import('stellar-sdk');
       const server = new SorobanRpc.Server(this.serverUrl);
-      const account = await server.getAccount(source.toString());
+      const account = await server.getAccount(sourceStr);
 
       const builder = new TransactionBuilder(account, {
         fee: fee.toString(),
@@ -299,6 +430,62 @@ export class BatchTransactionBuilder {
       }
 
       const hash: string = (response as any).hash;
+      submittedHash = hash;
+
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: 'submit',
+          status: 'success',
+          transactionHash: hash,
+          operation: 'batch',
+          source: sourceStr,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+
+      activePhase = 'confirm';
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: 'confirm',
+          status: 'pending',
+          transactionHash: hash,
+          operation: 'batch',
+          source: sourceStr,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+
+      let confirmedLedger: number | undefined;
+      if (typeof (server as any).getTransaction === 'function') {
+        const txStatus = await (server as any).getTransaction(hash);
+        if (txStatus && txStatus.status === 'FAILED') {
+          throw new TransactionError(
+            `Batch failed during confirmation: ${JSON.stringify(txStatus.resultXdr ?? txStatus.error ?? '')}`
+          );
+        }
+        if (txStatus && typeof txStatus.ledger === 'number') {
+          confirmedLedger = txStatus.ledger;
+        }
+      }
+
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: 'confirm',
+          status: 'success',
+          transactionHash: hash,
+          operation: 'batch',
+          source: sourceStr,
+          ledger: confirmedLedger,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+
       const operationResults: BatchTransactionResult['operationResults'] =
         this.operations.map(op => ({ label: op.label, success: true }));
 
@@ -316,6 +503,20 @@ export class BatchTransactionBuilder {
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: activePhase,
+          status: 'error',
+          transactionHash: submittedHash,
+          operation: 'batch',
+          source: sourceStr,
+          errorMessage: msg,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+
       this.logger.error('Batch transaction failed — all operations reverted', {
         error: msg,
         operationCount: this.operations.length,
@@ -362,12 +563,20 @@ export class StellarRWASDK {
   /** Active retry policy for transient network failures (Issue #191). */
   public retryConfig: RetryConfig;
   private _retryListener?: RetryEventListener;
+  private _txLifecycleCallback?: TransactionLifecycleCallback;
 
-  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
+  constructor(
+    config: RWASDKConfig & {
+      retry?: Partial<RetryConfig>;
+      onTransactionLifecycle?: TransactionLifecycleCallback;
+    },
+  ) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    validateLifecycleCallback(config.onTransactionLifecycle, 'config.onTransactionLifecycle');
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
+    this._txLifecycleCallback = config.onTransactionLifecycle;
     this.logger = createLogger('StellarRWASDK');
     this.logger.info('Initializing SDK', { network: config.stellar.network, serverUrl: config.stellar.serverUrl });
     
@@ -424,6 +633,21 @@ export class StellarRWASDK {
   }
 
   /**
+   * Register or clear a global transaction lifecycle callback for `submit` and
+   * `confirm` phases. Propagated automatically to builders created via
+   * {@link createBatch} and used by {@link deployCompleteRWAToken}.
+   *
+   * @param callback - Observer function, or `undefined` to clear.
+   * @returns `this` — supports method chaining.
+   * @throws {InvalidParametersError} if `callback` is neither a function nor `undefined`.
+   */
+  onTransactionLifecycle(callback: TransactionLifecycleCallback | undefined): this {
+    validateLifecycleCallback(callback, 'callback');
+    this._txLifecycleCallback = callback;
+    return this;
+  }
+
+  /**
    * Create a new {@link BatchTransactionBuilder} pre-configured with this
    * SDK's network settings.
    *
@@ -442,6 +666,7 @@ export class StellarRWASDK {
     return new BatchTransactionBuilder(
       this.config.stellar.serverUrl,
       this.config.stellar.passphrase,
+      this._txLifecycleCallback,
     );
   }
 
@@ -568,7 +793,7 @@ export class StellarRWASDK {
   async deployCompleteRWAToken(
     deployer: Address,
     options: DeploymentOptions,
-    txOptions: TransactionOptions = {}
+    txOptions: TransactionOptions & TransactionLifecycleOptions = {}
   ): Promise<{
     tokenAddress: Address;
     assetFactoryHash: string;
@@ -587,12 +812,59 @@ export class StellarRWASDK {
         throw new InvalidParametersError('txOptions.timeout must be a positive number');
       }
     }
+    validateLifecycleCallback(txOptions.onLifecycle, 'txOptions.onLifecycle');
+
+    const lifecycleCallback = txOptions.onLifecycle ?? this._txLifecycleCallback;
+    const deployerStr = deployer.toString();
+    let activePhase: TransactionLifecyclePhase = 'submit';
+    let submittedHash: string | undefined;
+
+    await emitLifecycleEvent(
+      lifecycleCallback,
+      {
+        phase: 'submit',
+        status: 'pending',
+        operation: 'deployCompleteRWAToken',
+        source: deployerStr,
+        timestamp: Date.now(),
+      },
+      this.logger,
+    );
+
     try {
       // Step 1: Deploy the RWA token
       const tokenResult = await this.assetFactory.deployRWAToken(
         deployer,
         options,
         txOptions
+      );
+      submittedHash = tokenResult.transactionHash;
+
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: 'submit',
+          status: 'success',
+          transactionHash: submittedHash,
+          operation: 'deployCompleteRWAToken',
+          source: deployerStr,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+
+      activePhase = 'confirm';
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: 'confirm',
+          status: 'pending',
+          transactionHash: submittedHash,
+          operation: 'deployCompleteRWAToken',
+          source: deployerStr,
+          timestamp: Date.now(),
+        },
+        this.logger,
       );
 
       // Step 2: Initialize compliance for the token (if needed)
@@ -621,6 +893,19 @@ export class StellarRWASDK {
         dividendHash = tokenResult.assetFactoryHash;
       }
 
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: 'confirm',
+          status: 'success',
+          transactionHash: submittedHash,
+          operation: 'deployCompleteRWAToken',
+          source: deployerStr,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+
       return {
         tokenAddress: tokenResult.tokenAddress,
         assetFactoryHash: tokenResult.transactionHash,
@@ -629,7 +914,21 @@ export class StellarRWASDK {
         marketHash
       };
     } catch (error) {
-      throw new ContractError(`Complete deployment failed: ${error.message}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      await emitLifecycleEvent(
+        lifecycleCallback,
+        {
+          phase: activePhase,
+          status: 'error',
+          transactionHash: submittedHash,
+          operation: 'deployCompleteRWAToken',
+          source: deployerStr,
+          errorMessage: msg,
+          timestamp: Date.now(),
+        },
+        this.logger,
+      );
+      throw new ContractError(`Complete deployment failed: ${msg}`);
     }
   }
 
