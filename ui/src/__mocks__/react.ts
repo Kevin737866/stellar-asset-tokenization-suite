@@ -12,7 +12,6 @@ const React = {
   useContext: () => undefined,
   FC: undefined,
 };
-
 export default React;
 export const useState = React.useState;
 export const useMemo = React.useMemo;

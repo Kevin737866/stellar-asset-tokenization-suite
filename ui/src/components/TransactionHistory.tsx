@@ -6,10 +6,6 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import {
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   ArrowUpDown,
   ExternalLink,
   Calendar,
@@ -18,14 +14,26 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
-  AlertCircle,
   Loader2,
   Inbox,
 } from 'lucide-react';
+import { usePagination } from '@/hooks/usePagination';
+import Pagination from '@/components/Pagination';
 
-// Transaction Types
+// ── Transaction Types ─────────────────────────────────────────────────────────
+
 export type TransactionStatus = 'completed' | 'pending' | 'failed' | 'cancelled' | 'processing';
-export type TransactionType = 'transfer' | 'mint' | 'burn' | 'trade' | 'dividend' | 'lock' | 'unlock' | 'stake' | 'unstake' | 'all';
+export type TransactionType =
+  | 'transfer'
+  | 'mint'
+  | 'burn'
+  | 'trade'
+  | 'dividend'
+  | 'lock'
+  | 'unlock'
+  | 'stake'
+  | 'unstake'
+  | 'all';
 
 export interface Transaction {
   id: string;
@@ -42,14 +50,56 @@ export interface Transaction {
   fee?: string;
 }
 
+// ── Pagination exports (used by tests and parent components) ──────────────────
+
 /** Allowed page-size options surfaced in the rows-per-page selector. */
 export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 export type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
-
 export const DEFAULT_PAGE_SIZE: PageSize = 20;
 
-/** Maximum number of numbered page buttons shown before ellipsis collapses them. */
+/** Maximum consecutive numbered buttons shown before ellipsis collapses them. */
 const MAX_PAGE_BUTTONS = 5;
+
+/**
+ * Build the array of page numbers (and ellipsis sentinels) to render as
+ * numbered buttons in the pagination bar.
+ *
+ * Rules:
+ * - Always includes page 1 and the last page.
+ * - Shows up to MAX_PAGE_BUTTONS consecutive pages centred around currentPage.
+ * - Inserts an ellipsis sentinel wherever a gap exists between shown pages.
+ */
+export function buildPageRange(
+  currentPage: number,
+  totalPages: number,
+): Array<number | 'ellipsis-start' | 'ellipsis-end'> {
+  if (totalPages <= MAX_PAGE_BUTTONS + 2) {
+    // Enough room to show every page without any ellipsis.
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+
+  const half = Math.floor(MAX_PAGE_BUTTONS / 2);
+  let rangeStart = Math.max(2, currentPage - half);
+  let rangeEnd = Math.min(totalPages - 1, currentPage + half);
+
+  // Clamp so the window always has exactly MAX_PAGE_BUTTONS entries.
+  if (rangeEnd - rangeStart + 1 < MAX_PAGE_BUTTONS) {
+    if (currentPage - 1 < totalPages - currentPage) {
+      rangeEnd = Math.min(totalPages - 1, rangeStart + MAX_PAGE_BUTTONS - 1);
+    } else {
+      rangeStart = Math.max(2, rangeEnd - MAX_PAGE_BUTTONS + 1);
+    }
+  }
+
+  const pages: Array<number | 'ellipsis-start' | 'ellipsis-end'> = [1];
+  if (rangeStart > 2) pages.push('ellipsis-start');
+  for (let p = rangeStart; p <= rangeEnd; p++) pages.push(p);
+  if (rangeEnd < totalPages - 1) pages.push('ellipsis-end');
+  pages.push(totalPages);
+  return pages;
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
 
 interface TransactionHistoryProps {
   transactions: Transaction[];
@@ -62,7 +112,12 @@ interface TransactionHistoryProps {
   defaultPageSize?: PageSize;
 }
 
-const STATUS_STYLES: Record<TransactionStatus, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; icon: React.FC<{ className?: string }> }> = {
+// ── Style maps ────────────────────────────────────────────────────────────────
+
+const STATUS_STYLES: Record<
+  TransactionStatus,
+  { variant: 'default' | 'secondary' | 'destructive' | 'outline'; icon: React.FC<{ className?: string }> }
+> = {
   completed: { variant: 'default', icon: CheckCircle2 },
   pending: { variant: 'secondary', icon: Clock },
   failed: { variant: 'destructive', icon: XCircle },
@@ -82,55 +137,7 @@ const TYPE_LABELS: Record<Exclude<TransactionType, 'all'>, string> = {
   unstake: 'Unstake',
 };
 
-// ── Pagination helpers ───────────────────────────────────────────────────────
-
-/**
- * Build the array of page numbers (and 'ellipsis' sentinels) to render as
- * numbered buttons in the pagination bar.
- *
- * Rules:
- * - Always show first and last page.
- * - Show up to MAX_PAGE_BUTTONS consecutive pages centred around currentPage.
- * - Insert an '...' sentinel wherever a gap exists between shown pages.
- */
-export function buildPageRange(currentPage: number, totalPages: number): Array<number | 'ellipsis-start' | 'ellipsis-end'> {
-  if (totalPages <= MAX_PAGE_BUTTONS + 2) {
-    // Enough room to show every page without ellipsis
-    return Array.from({ length: totalPages }, (_, i) => i + 1);
-  }
-
-  const half = Math.floor(MAX_PAGE_BUTTONS / 2);
-  let rangeStart = Math.max(2, currentPage - half);
-  let rangeEnd = Math.min(totalPages - 1, currentPage + half);
-
-  // Clamp so the window always has MAX_PAGE_BUTTONS entries
-  if (rangeEnd - rangeStart + 1 < MAX_PAGE_BUTTONS) {
-    if (currentPage - 1 < totalPages - currentPage) {
-      rangeEnd = Math.min(totalPages - 1, rangeStart + MAX_PAGE_BUTTONS - 1);
-    } else {
-      rangeStart = Math.max(2, rangeEnd - MAX_PAGE_BUTTONS + 1);
-    }
-  }
-
-  const pages: Array<number | 'ellipsis-start' | 'ellipsis-end'> = [1];
-
-  if (rangeStart > 2) {
-    pages.push('ellipsis-start');
-  }
-
-  for (let p = rangeStart; p <= rangeEnd; p++) {
-    pages.push(p);
-  }
-
-  if (rangeEnd < totalPages - 1) {
-    pages.push('ellipsis-end');
-  }
-
-  pages.push(totalPages);
-  return pages;
-}
-
-// ── Component ────────────────────────────────────────────────────────────────
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function TransactionHistory({
   transactions,
@@ -138,24 +145,21 @@ export default function TransactionHistory({
   isLoading = false,
   defaultPageSize = DEFAULT_PAGE_SIZE,
 }: TransactionHistoryProps) {
-  // Filter state
+  // ── Filter state ────────────────────────────────────────────────────────────
   const [filterType, setFilterType] = useState<TransactionType>('all');
   const [filterToken, setFilterToken] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' });
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Pagination state
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState<PageSize>(defaultPageSize);
-  const [jumpValue, setJumpValue] = useState('');
-
-  // Sort state
+  // ── Sort state ──────────────────────────────────────────────────────────────
   const [sortField, setSortField] = useState<'date' | 'amount' | 'type' | 'status'>('date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
-  // ── Derived data ───────────────────────────────────────────────────────────
+  // ── Page-size state (rows-per-page selector) ────────────────────────────────
+  const [pageSize, setPageSize] = useState<PageSize>(defaultPageSize);
 
+  // ── Derived: unique tokens for the token filter dropdown ───────────────────
   const uniqueTokens = useMemo(() => {
     const tokenSet = new Map<string, string>();
     transactions.forEach((tx) => {
@@ -164,6 +168,7 @@ export default function TransactionHistory({
     return Array.from(tokenSet.entries());
   }, [transactions]);
 
+  // ── Derived: filtered transactions ─────────────────────────────────────────
   const filteredTransactions = useMemo(() => {
     return transactions.filter((tx) => {
       if (filterType !== 'all' && tx.type !== filterType) return false;
@@ -171,131 +176,110 @@ export default function TransactionHistory({
       if (filterStatus !== 'all' && tx.status !== filterStatus) return false;
 
       if (dateRange.start) {
-        const txDate = new Date(tx.date);
         const startDate = new Date(dateRange.start);
-        if (txDate < startDate) return false;
+        if (new Date(tx.date) < startDate) return false;
       }
       if (dateRange.end) {
-        const txDate = new Date(tx.date);
         const endDate = new Date(dateRange.end);
         endDate.setHours(23, 59, 59, 999);
-        if (txDate > endDate) return false;
+        if (new Date(tx.date) > endDate) return false;
       }
 
       if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase();
-        const matchesSearch =
-          tx.txHash.toLowerCase().includes(query) ||
-          tx.tokenSymbol.toLowerCase().includes(query) ||
-          tx.counterpartyLabel?.toLowerCase().includes(query) ||
-          tx.counterparty.toLowerCase().includes(query) ||
-          tx.amount.toLowerCase().includes(query);
-        if (!matchesSearch) return false;
+        const q = searchQuery.toLowerCase();
+        const hit =
+          tx.txHash.toLowerCase().includes(q) ||
+          tx.tokenSymbol.toLowerCase().includes(q) ||
+          (tx.counterpartyLabel?.toLowerCase().includes(q) ?? false) ||
+          tx.counterparty.toLowerCase().includes(q) ||
+          tx.amount.toLowerCase().includes(q);
+        if (!hit) return false;
       }
 
       return true;
     });
   }, [transactions, filterType, filterToken, filterStatus, dateRange, searchQuery]);
 
+  // ── Derived: sorted transactions ────────────────────────────────────────────
   const sortedTransactions = useMemo(() => {
     const sorted = [...filteredTransactions];
     sorted.sort((a, b) => {
-      let comparison = 0;
+      let cmp = 0;
       switch (sortField) {
         case 'date':
-          comparison = new Date(a.date).getTime() - new Date(b.date).getTime();
+          cmp = new Date(a.date).getTime() - new Date(b.date).getTime();
           break;
         case 'amount':
-          comparison = parseFloat(a.amount) - parseFloat(b.amount);
+          cmp = parseFloat(a.amount) - parseFloat(b.amount);
           break;
         case 'type':
-          comparison = a.type.localeCompare(b.type);
+          cmp = a.type.localeCompare(b.type);
           break;
         case 'status':
-          comparison = a.status.localeCompare(b.status);
+          cmp = a.status.localeCompare(b.status);
           break;
       }
-      return sortDirection === 'asc' ? comparison : -comparison;
+      return sortDirection === 'asc' ? cmp : -cmp;
     });
     return sorted;
   }, [filteredTransactions, sortField, sortDirection]);
 
-  const totalPages = Math.max(1, Math.ceil(sortedTransactions.length / pageSize));
+  // ── Pagination hook ─────────────────────────────────────────────────────────
+  const pagination = usePagination({
+    totalItems: sortedTransactions.length,
+    pageSize,
+  });
 
-  // Clamp currentPage whenever totalPages shrinks (e.g. after filtering)
-  const safePage = Math.min(currentPage, totalPages);
-
-  const paginatedTransactions = useMemo(() => {
-    const startIndex = (safePage - 1) * pageSize;
-    return sortedTransactions.slice(startIndex, startIndex + pageSize);
-  }, [sortedTransactions, safePage, pageSize]);
-
-  const pageRange = useMemo(
-    () => buildPageRange(safePage, totalPages),
-    [safePage, totalPages],
+  const paginatedTransactions = useMemo(
+    () => sortedTransactions.slice(pagination.startIndex, pagination.endIndex),
+    [sortedTransactions, pagination.startIndex, pagination.endIndex],
   );
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
+  // ── Handlers ────────────────────────────────────────────────────────────────
 
-  /** Reset to page 1 whenever a filter changes so users never land on a blank page. */
-  const handleFilterChange = useCallback(<T,>(setter: React.Dispatch<React.SetStateAction<T>>, value: T) => {
-    setter(value);
-    setCurrentPage(1);
-  }, []);
-
-  const handleSort = useCallback((field: typeof sortField) => {
-    if (sortField === field) {
-      setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortField(field);
-      setSortDirection('desc');
-    }
-    setCurrentPage(1);
-  }, [sortField]);
-
-  const handlePageSizeChange = useCallback((value: string) => {
-    const newSize = parseInt(value, 10) as PageSize;
-    setPageSize(newSize);
-    setCurrentPage(1);
-    setJumpValue('');
-  }, []);
-
-  /** Navigate to a specific page. Clamps to valid range silently. */
-  const goToPage = useCallback(
-    (page: number) => {
-      const clamped = Math.max(1, Math.min(page, totalPages));
-      setCurrentPage(clamped);
-      setJumpValue('');
+  const resetAndCall = useCallback(
+    (fn: () => void) => {
+      fn();
+      pagination.reset();
     },
-    [totalPages],
+    [pagination],
   );
 
-  const handleJumpSubmit = useCallback(
-    (e: React.FormEvent) => {
-      e.preventDefault();
-      const parsed = parseInt(jumpValue, 10);
-      if (!isNaN(parsed)) {
-        goToPage(parsed);
+  const handleSort = useCallback(
+    (field: typeof sortField) => {
+      if (sortField === field) {
+        setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
+      } else {
+        setSortField(field);
+        setSortDirection('desc');
       }
+      pagination.reset();
     },
-    [jumpValue, goToPage],
+    [sortField, pagination],
   );
 
-  // ── Formatters ─────────────────────────────────────────────────────────────
+  const handlePageSizeChange = useCallback(
+    (value: string) => {
+      setPageSize(Number(value) as PageSize);
+      pagination.reset();
+    },
+    [pagination],
+  );
 
-  const formatDate = (date: Date) => {
-    const d = new Date(date);
-    return d.toLocaleDateString('en-US', {
+  const formatDate = (date: Date) =>
+    new Date(date).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
     });
-  };
 
-  // ── Loading skeleton ───────────────────────────────────────────────────────
+  // Row-range summary ("Showing 21–40 of 95")
+  const fromRow = sortedTransactions.length === 0 ? 0 : pagination.startIndex + 1;
+  const toRow = pagination.endIndex;
 
+  // ── Loading skeleton ─────────────────────────────────────────────────────────
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -313,8 +297,7 @@ export default function TransactionHistory({
     );
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-
+  // ── Render ───────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
       {/* Filters Bar */}
@@ -324,14 +307,17 @@ export default function TransactionHistory({
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <Input
             value={searchQuery}
-            onChange={(e) => handleFilterChange(setSearchQuery, e.target.value)}
-            placeholder="Search by hash, token, address..."
+            onChange={(e) => resetAndCall(() => setSearchQuery(e.target.value))}
+            placeholder="Search by hash, token, address…"
             className="pl-9"
           />
         </div>
 
         {/* Type Filter */}
-        <Select value={filterType} onValueChange={(v) => handleFilterChange(setFilterType, v as TransactionType)}>
+        <Select
+          value={filterType}
+          onValueChange={(v) => resetAndCall(() => setFilterType(v as TransactionType))}
+        >
           <SelectTrigger>
             <Filter className="h-4 w-4 mr-2" />
             <SelectValue placeholder="All Types" />
@@ -347,7 +333,10 @@ export default function TransactionHistory({
         </Select>
 
         {/* Token Filter */}
-        <Select value={filterToken} onValueChange={(v) => handleFilterChange(setFilterToken, v)}>
+        <Select
+          value={filterToken}
+          onValueChange={(v) => resetAndCall(() => setFilterToken(v))}
+        >
           <SelectTrigger>
             <SelectValue placeholder="All Tokens" />
           </SelectTrigger>
@@ -362,7 +351,10 @@ export default function TransactionHistory({
         </Select>
 
         {/* Status Filter */}
-        <Select value={filterStatus} onValueChange={(v) => handleFilterChange(setFilterStatus, v)}>
+        <Select
+          value={filterStatus}
+          onValueChange={(v) => resetAndCall(() => setFilterStatus(v))}
+        >
           <SelectTrigger>
             <SelectValue placeholder="All Statuses" />
           </SelectTrigger>
@@ -377,23 +369,29 @@ export default function TransactionHistory({
         </Select>
       </div>
 
-      {/* Date Range Picker Row */}
+      {/* Date Range Picker */}
       <div className="flex flex-wrap items-center gap-3">
-        <Calendar className="h-4 w-4 text-gray-400" />
+        <Calendar className="h-4 w-4 text-gray-400" aria-hidden="true" />
         <Input
           type="date"
           value={dateRange.start}
-          onChange={(e) => setDateRange((prev) => ({ ...prev, start: e.target.value }))}
+          onChange={(e) => {
+            setDateRange((prev) => ({ ...prev, start: e.target.value }));
+            pagination.reset();
+          }}
           className="w-auto"
-          aria-label="Start date"
+          aria-label="Filter start date"
         />
-        <span className="text-gray-400 text-sm">to</span>
+        <span className="text-gray-400 text-sm" aria-hidden="true">to</span>
         <Input
           type="date"
           value={dateRange.end}
-          onChange={(e) => setDateRange((prev) => ({ ...prev, end: e.target.value }))}
+          onChange={(e) => {
+            setDateRange((prev) => ({ ...prev, end: e.target.value }));
+            pagination.reset();
+          }}
           className="w-auto"
-          aria-label="End date"
+          aria-label="Filter end date"
         />
         {(dateRange.start || dateRange.end) && (
           <Button
@@ -401,24 +399,44 @@ export default function TransactionHistory({
             size="sm"
             onClick={() => {
               setDateRange({ start: '', end: '' });
-              setCurrentPage(1);
+              pagination.reset();
             }}
           >
-            Clear
+            Clear dates
           </Button>
         )}
       </div>
 
-      {/* Results Summary */}
-      <div className="text-sm text-gray-500">
-        {filteredTransactions.length} transaction{filteredTransactions.length !== 1 ? 's' : ''}
-        {filteredTransactions.length !== transactions.length && ` (filtered from ${transactions.length})`}
+      {/* Results Summary + Rows-per-page selector */}
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          {sortedTransactions.length > 0
+            ? `Showing ${fromRow}–${toRow} of ${sortedTransactions.length} transaction${sortedTransactions.length !== 1 ? 's' : ''}`
+            : `${filteredTransactions.length} transaction${filteredTransactions.length !== 1 ? 's' : ''}`}
+          {filteredTransactions.length !== transactions.length &&
+            ` (filtered from ${transactions.length})`}
+        </p>
+        <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+          <span>Rows per page</span>
+          <Select value={String(pageSize)} onValueChange={handlePageSizeChange}>
+            <SelectTrigger className="w-20 h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAGE_SIZE_OPTIONS.map((opt) => (
+                <SelectItem key={opt} value={String(opt)}>
+                  {opt}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* Empty State */}
-      {sortedTransactions.length === 0 && !isLoading && (
+      {sortedTransactions.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 text-gray-400 dark:text-gray-500">
-          <Inbox className="h-16 w-16 mb-4 text-gray-300 dark:text-gray-600" />
+          <Inbox className="h-16 w-16 mb-4 text-gray-300 dark:text-gray-600" aria-hidden="true" />
           <p className="text-lg font-medium text-gray-500 dark:text-gray-400">No transactions found</p>
           <p className="text-sm mt-1">
             {transactions.length === 0
@@ -428,69 +446,80 @@ export default function TransactionHistory({
         </div>
       )}
 
-      {/* Desktop Table */}
+      {/* Transaction list */}
       {sortedTransactions.length > 0 && (
         <>
+          {/* Desktop Table */}
           <div className="hidden md:block overflow-x-auto rounded-lg border">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm" aria-label="Transaction history">
               <thead className="bg-gray-50 dark:bg-gray-800 border-b dark:border-gray-700">
                 <tr>
                   <th
-                    className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
+                    className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 cursor-pointer hover:text-gray-900 dark:hover:text-gray-100 select-none"
                     onClick={() => handleSort('type')}
+                    aria-sort={sortField === 'type' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                   >
                     <div className="flex items-center gap-1">
-                      Type <ArrowUpDown className="h-3 w-3" />
+                      Type <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
                     </div>
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold text-gray-600">Token</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300">Token</th>
                   <th
-                    className="px-4 py-3 text-right font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
+                    className="px-4 py-3 text-right font-semibold text-gray-600 dark:text-gray-300 cursor-pointer hover:text-gray-900 dark:hover:text-gray-100 select-none"
                     onClick={() => handleSort('amount')}
+                    aria-sort={sortField === 'amount' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                   >
                     <div className="flex items-center justify-end gap-1">
-                      Amount <ArrowUpDown className="h-3 w-3" />
+                      Amount <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
                     </div>
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold text-gray-600">Counterparty</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300">Counterparty</th>
                   <th
-                    className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
+                    className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 cursor-pointer hover:text-gray-900 dark:hover:text-gray-100 select-none"
                     onClick={() => handleSort('date')}
+                    aria-sort={sortField === 'date' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                   >
                     <div className="flex items-center gap-1">
-                      Date <ArrowUpDown className="h-3 w-3" />
+                      Date <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
                     </div>
                   </th>
                   <th
-                    className="px-4 py-3 text-center font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
+                    className="px-4 py-3 text-center font-semibold text-gray-600 dark:text-gray-300 cursor-pointer hover:text-gray-900 dark:hover:text-gray-100 select-none"
                     onClick={() => handleSort('status')}
+                    aria-sort={sortField === 'status' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
                   >
                     <div className="flex items-center justify-center gap-1">
-                      Status <ArrowUpDown className="h-3 w-3" />
+                      Status <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
                     </div>
                   </th>
-                  <th className="px-4 py-3 text-right font-semibold text-gray-600">Tx Hash</th>
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600 dark:text-gray-300">Tx Hash</th>
                 </tr>
               </thead>
-              <tbody className="divide-y">
+              <tbody className="divide-y dark:divide-gray-700">
                 {paginatedTransactions.map((tx) => {
                   const StatusIcon = STATUS_STYLES[tx.status].icon;
                   return (
-                    <tr key={tx.id} className="hover:bg-gray-50 transition-colors">
+                    <tr key={tx.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
                       <td className="px-4 py-3">
                         <Badge variant="outline">{TYPE_LABELS[tx.type]}</Badge>
                       </td>
-                      <td className="px-4 py-3 font-medium">{tx.tokenSymbol}</td>
-                      <td className="px-4 py-3 text-right font-mono text-sm">
+                      <td className="px-4 py-3 font-medium dark:text-gray-200">{tx.tokenSymbol}</td>
+                      <td className="px-4 py-3 text-right font-mono text-sm dark:text-gray-200">
                         {parseFloat(tx.amount).toLocaleString(undefined, { maximumFractionDigits: 6 })}
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">
-                        {tx.counterpartyLabel || `${tx.counterparty.slice(0, 6)}...${tx.counterparty.slice(-4)}`}
+                        {tx.counterpartyLabel ||
+                          `${tx.counterparty.slice(0, 6)}…${tx.counterparty.slice(-4)}`}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{formatDate(tx.date)}</td>
+                      <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
+                        {formatDate(tx.date)}
+                      </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-1">
-                          <StatusIcon className={`h-3.5 w-3.5 ${tx.status === 'processing' ? 'animate-spin' : ''}`} />
+                          <StatusIcon
+                            className={`h-3.5 w-3.5 ${tx.status === 'processing' ? 'animate-spin' : ''}`}
+                            aria-hidden="true"
+                          />
                           <span className="text-xs capitalize">{tx.status}</span>
                         </div>
                       </td>
@@ -498,10 +527,10 @@ export default function TransactionHistory({
                         <button
                           onClick={() => onOpenExplorer?.(tx.txHash)}
                           className="text-blue-600 hover:text-blue-800 font-mono text-xs flex items-center justify-end gap-1 hover:underline"
-                          title="View on Stellar Explorer"
+                          aria-label={`View transaction ${tx.txHash} on Stellar Explorer`}
                         >
-                          {tx.txHash.slice(0, 8)}...{tx.txHash.slice(-6)}
-                          <ExternalLink className="h-3 w-3" />
+                          {tx.txHash.slice(0, 8)}…{tx.txHash.slice(-6)}
+                          <ExternalLink className="h-3 w-3" aria-hidden="true" />
                         </button>
                       </td>
                     </tr>
@@ -516,179 +545,64 @@ export default function TransactionHistory({
             {paginatedTransactions.map((tx) => {
               const StatusIcon = STATUS_STYLES[tx.status].icon;
               return (
-                <div key={tx.id} className="border rounded-lg p-4 space-y-2 bg-white shadow-sm">
+                <div
+                  key={tx.id}
+                  className="border rounded-lg p-4 space-y-2 bg-white dark:bg-gray-900 shadow-sm"
+                >
                   <div className="flex justify-between items-start">
                     <div className="flex items-center gap-2">
                       <Badge variant="outline">{TYPE_LABELS[tx.type]}</Badge>
                       <div className="flex items-center gap-1 text-xs">
-                        <StatusIcon className={`h-3 w-3 ${tx.status === 'processing' ? 'animate-spin' : ''}`} />
+                        <StatusIcon
+                          className={`h-3 w-3 ${tx.status === 'processing' ? 'animate-spin' : ''}`}
+                          aria-hidden="true"
+                        />
                         <span className="capitalize">{tx.status}</span>
                       </div>
                     </div>
-                    <span className="font-mono text-sm font-semibold">
+                    <span className="font-mono text-sm font-semibold dark:text-gray-100">
                       {parseFloat(tx.amount).toLocaleString(undefined, { maximumFractionDigits: 6 })}
                     </span>
                   </div>
-                  <div className="flex justify-between text-sm text-gray-600">
+                  <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300">
                     <span>{tx.tokenSymbol}</span>
-                    <span>{tx.counterpartyLabel || `${tx.counterparty.slice(0, 4)}...${tx.counterparty.slice(-4)}`}</span>
+                    <span>
+                      {tx.counterpartyLabel ||
+                        `${tx.counterparty.slice(0, 4)}…${tx.counterparty.slice(-4)}`}
+                    </span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-xs text-gray-400 dark:text-gray-500">{formatDate(tx.date)}</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">
+                      {formatDate(tx.date)}
+                    </span>
                     <button
                       onClick={() => onOpenExplorer?.(tx.txHash)}
                       className="text-xs text-blue-600 hover:underline flex items-center gap-1"
+                      aria-label={`View transaction ${tx.txHash} on Stellar Explorer`}
                     >
-                      {tx.txHash.slice(0, 6)}...{tx.txHash.slice(-4)}
-                      <ExternalLink className="h-3 w-3" />
+                      {tx.txHash.slice(0, 6)}…{tx.txHash.slice(-4)}
+                      <ExternalLink className="h-3 w-3" aria-hidden="true" />
                     </button>
                   </div>
                 </div>
               );
             })}
           </div>
+
+          {/* Pagination controls */}
+          <Pagination
+            currentPage={pagination.currentPage}
+            totalPages={pagination.totalPages}
+            totalItems={sortedTransactions.length}
+            hasPreviousPage={pagination.hasPreviousPage}
+            hasNextPage={pagination.hasNextPage}
+            pageWindow={pagination.pageWindow}
+            onPageChange={pagination.goToPage}
+            onFirstPage={pagination.goToFirstPage}
+            onLastPage={pagination.goToLastPage}
+            label="Transaction history pagination"
+          />
         </>
-      )}
-
-      {/* ── Pagination Controls ─────────────────────────────────────────────── */}
-      {sortedTransactions.length > 0 && (
-        <div
-          className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t"
-          role="navigation"
-          aria-label="Transaction history pagination"
-        >
-          {/* Left: summary + rows-per-page */}
-          <div className="flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
-            <span>
-              {sortedTransactions.length === 0
-                ? 'No results'
-                : `${(safePage - 1) * pageSize + 1}–${Math.min(safePage * pageSize, sortedTransactions.length)} of ${sortedTransactions.length}`}
-            </span>
-            <label className="flex items-center gap-1.5">
-              <span className="whitespace-nowrap">Rows per page</span>
-              <Select value={String(pageSize)} onValueChange={handlePageSizeChange}>
-                <SelectTrigger className="h-8 w-20 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PAGE_SIZE_OPTIONS.map((opt) => (
-                    <SelectItem key={opt} value={String(opt)}>
-                      {opt}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </label>
-          </div>
-
-          {/* Centre: page number buttons */}
-          {totalPages > 1 && (
-            <div className="flex items-center gap-1" role="group" aria-label="Page navigation">
-              {/* First page */}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => goToPage(1)}
-                disabled={safePage === 1}
-                aria-label="First page"
-                title="First page"
-                className="w-8 h-8 p-0"
-              >
-                <ChevronsLeft className="h-4 w-4" />
-              </Button>
-
-              {/* Previous page */}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => goToPage(safePage - 1)}
-                disabled={safePage === 1}
-                aria-label="Previous page"
-                title="Previous page"
-                className="w-8 h-8 p-0"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-
-              {/* Numbered pages with ellipsis */}
-              {pageRange.map((entry, idx) => {
-                if (entry === 'ellipsis-start' || entry === 'ellipsis-end') {
-                  return (
-                    <span
-                      key={entry}
-                      className="w-8 h-8 flex items-center justify-center text-gray-400 text-sm select-none"
-                      aria-hidden="true"
-                    >
-                      …
-                    </span>
-                  );
-                }
-                return (
-                  <Button
-                    key={`page-${entry}`}
-                    variant={entry === safePage ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => goToPage(entry)}
-                    aria-label={`Page ${entry}`}
-                    aria-current={entry === safePage ? 'page' : undefined}
-                    className="w-8 h-8 p-0 text-xs"
-                  >
-                    {entry}
-                  </Button>
-                );
-              })}
-
-              {/* Next page */}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => goToPage(safePage + 1)}
-                disabled={safePage === totalPages}
-                aria-label="Next page"
-                title="Next page"
-                className="w-8 h-8 p-0"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-
-              {/* Last page */}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => goToPage(totalPages)}
-                disabled={safePage === totalPages}
-                aria-label="Last page"
-                title="Last page"
-                className="w-8 h-8 p-0"
-              >
-                <ChevronsRight className="h-4 w-4" />
-              </Button>
-            </div>
-          )}
-
-          {/* Right: jump-to-page */}
-          {totalPages > 1 && (
-            <form onSubmit={handleJumpSubmit} className="flex items-center gap-2">
-              <label htmlFor="jump-to-page" className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                Go to
-              </label>
-              <Input
-                id="jump-to-page"
-                type="number"
-                min={1}
-                max={totalPages}
-                value={jumpValue}
-                onChange={(e) => setJumpValue(e.target.value)}
-                className="h-8 w-16 text-xs text-center"
-                placeholder={String(safePage)}
-                aria-label={`Jump to page (1–${totalPages})`}
-              />
-              <Button type="submit" variant="outline" size="sm" className="h-8 text-xs px-3">
-                Go
-              </Button>
-            </form>
-          )}
-        </div>
       )}
     </div>
   );
