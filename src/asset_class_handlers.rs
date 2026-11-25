@@ -116,6 +116,16 @@ impl AssetClassHandlers {
         renewable_energy::create_rec_config(env, base_config, rec_config)
     }
 
+    /// Issue #383: renewable-energy meter reading configuration with explicit
+    /// reading period and energy unit.
+    pub fn create_meter_reading_config(
+        env: Env,
+        base_config: AssetConfig,
+        meter_config: renewable_energy::MeterReadingConfig,
+    ) -> AssetConfig {
+        renewable_energy::create_meter_reading_config(env, base_config, meter_config)
+    }
+
     /// Issue #170: intellectual property asset class (patents, trademarks,
     /// copyrights and trade secrets).
     pub fn create_ip_config(
