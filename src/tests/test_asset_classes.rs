@@ -10,6 +10,7 @@ use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules};
 use crate::commodity::{self, AgriculturalConfig};
 use crate::intellectual_property::{self, IPConfig};
 use crate::real_estate::{self, RealEstateConfig};
+use crate::renewable_energy::{self, EnergyUnit, MeterReadingConfig, MeterReadingPeriod};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -311,4 +312,292 @@ fn intellectual_property_defaults_match_spec() {
         AssetClass::IntellectualProperty,
     )
     .is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Issue #383: renewable-energy meter reading periods and units
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn hourly_meter_config(env: &Env) -> MeterReadingConfig {
+    MeterReadingConfig {
+        meter_id: Symbol::new(env, "METER01"),
+        period: MeterReadingPeriod::Hourly,
+        unit: EnergyUnit::KWh,
+        start_timestamp: 1_000_000,
+        end_timestamp: 1_000_000 + 3_600,
+        reading_value: 250,
+    }
+}
+
+// ── success path ──────────────────────────────────────────────────────────────
+
+#[test]
+fn hourly_meter_reading_records_all_metadata() {
+    let env = Env::default();
+    let config =
+        renewable_energy::create_meter_reading_config(env.clone(), base_config(&env), hourly_meter_config(&env));
+
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "reading_period")).unwrap(),
+        soroban_sdk::String::from_str(&env, "hourly")
+    );
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "energy_unit")).unwrap(),
+        soroban_sdk::String::from_str(&env, "kWh")
+    );
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "meter_id")).unwrap(),
+        soroban_sdk::String::from_str(&env, "METER01")
+    );
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "reading_value")).unwrap(),
+        soroban_sdk::String::from_str(&env, "250")
+    );
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "period_start")).unwrap(),
+        soroban_sdk::String::from_str(&env, "1000000")
+    );
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "period_end")).unwrap(),
+        soroban_sdk::String::from_str(&env, "1003600")
+    );
+}
+
+#[test]
+fn reading_wh_normalisation_is_correct_for_kwh() {
+    let env = Env::default();
+    // 250 kWh → 250 000 Wh
+    let config =
+        renewable_energy::create_meter_reading_config(env.clone(), base_config(&env), hourly_meter_config(&env));
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "reading_wh")).unwrap(),
+        soroban_sdk::String::from_str(&env, "250000")
+    );
+}
+
+#[test]
+fn reading_wh_normalisation_is_correct_for_mwh() {
+    let env = Env::default();
+    // 1 MWh daily period → 1 000 000 Wh
+    let config = renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "METER02"),
+            period: MeterReadingPeriod::Daily,
+            unit: EnergyUnit::MWh,
+            start_timestamp: 0,
+            end_timestamp: 86_400,
+            reading_value: 1,
+        },
+    );
+    assert_eq!(
+        config.metadata.get(Symbol::new(&env, "reading_wh")).unwrap(),
+        soroban_sdk::String::from_str(&env, "1000000")
+    );
+}
+
+#[test]
+fn all_periods_accepted_with_correct_duration() {
+    let env = Env::default();
+    let cases: &[(MeterReadingPeriod, u64, &str)] = &[
+        (MeterReadingPeriod::Hourly,    3_600,      "hourly"),
+        (MeterReadingPeriod::Daily,     86_400,     "daily"),
+        (MeterReadingPeriod::Weekly,    604_800,    "weekly"),
+        (MeterReadingPeriod::Monthly,   2_592_000,  "monthly"),
+        (MeterReadingPeriod::Quarterly, 7_776_000,  "quarterly"),
+        (MeterReadingPeriod::Annual,    31_536_000, "annual"),
+    ];
+
+    for (period, duration, label) in cases {
+        let config = renewable_energy::create_meter_reading_config(
+            env.clone(),
+            base_config(&env),
+            MeterReadingConfig {
+                meter_id: Symbol::new(&env, "M"),
+                period: *period,
+                unit: EnergyUnit::KWh,
+                start_timestamp: 1_000_000,
+                end_timestamp: 1_000_000 + duration,
+                reading_value: 10,
+            },
+        );
+        assert_eq!(
+            config.metadata.get(Symbol::new(&env, "reading_period")).unwrap(),
+            soroban_sdk::String::from_str(&env, label)
+        );
+    }
+}
+
+#[test]
+fn all_units_accepted_and_labelled_correctly() {
+    let env = Env::default();
+    let cases: &[(EnergyUnit, &str)] = &[
+        (EnergyUnit::Wh,  "Wh"),
+        (EnergyUnit::KWh, "kWh"),
+        (EnergyUnit::MWh, "MWh"),
+        (EnergyUnit::GWh, "GWh"),
+    ];
+
+    for (unit, label) in cases {
+        let config = renewable_energy::create_meter_reading_config(
+            env.clone(),
+            base_config(&env),
+            MeterReadingConfig {
+                meter_id: Symbol::new(&env, "M"),
+                period: MeterReadingPeriod::Hourly,
+                unit: *unit,
+                start_timestamp: 0,
+                end_timestamp: 3_600,
+                reading_value: 1,
+            },
+        );
+        assert_eq!(
+            config.metadata.get(Symbol::new(&env, "energy_unit")).unwrap(),
+            soroban_sdk::String::from_str(&env, label)
+        );
+    }
+}
+
+#[test]
+fn handler_delegates_to_renewable_energy_module() {
+    let env = Env::default();
+    let config = AssetClassHandlers::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        hourly_meter_config(&env),
+    );
+    assert!(config.metadata.contains_key(Symbol::new(&env, "reading_period")));
+    assert!(config.metadata.contains_key(Symbol::new(&env, "energy_unit")));
+}
+
+// ── period helper unit tests ──────────────────────────────────────────────────
+
+#[test]
+fn period_duration_seconds_matches_spec() {
+    assert_eq!(renewable_energy::period_duration_seconds(MeterReadingPeriod::Hourly),    3_600);
+    assert_eq!(renewable_energy::period_duration_seconds(MeterReadingPeriod::Daily),     86_400);
+    assert_eq!(renewable_energy::period_duration_seconds(MeterReadingPeriod::Weekly),    604_800);
+    assert_eq!(renewable_energy::period_duration_seconds(MeterReadingPeriod::Monthly),   2_592_000);
+    assert_eq!(renewable_energy::period_duration_seconds(MeterReadingPeriod::Quarterly), 7_776_000);
+    assert_eq!(renewable_energy::period_duration_seconds(MeterReadingPeriod::Annual),    31_536_000);
+}
+
+#[test]
+fn unit_wh_multiplier_matches_spec() {
+    assert_eq!(renewable_energy::unit_wh_multiplier(EnergyUnit::Wh),  1);
+    assert_eq!(renewable_energy::unit_wh_multiplier(EnergyUnit::KWh), 1_000);
+    assert_eq!(renewable_energy::unit_wh_multiplier(EnergyUnit::MWh), 1_000_000);
+    assert_eq!(renewable_energy::unit_wh_multiplier(EnergyUnit::GWh), 1_000_000_000);
+}
+
+// ── failure / boundary cases ──────────────────────────────────────────────────
+
+#[test]
+#[should_panic]
+fn reading_value_zero_rejected() {
+    let env = Env::default();
+    renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "M"),
+            period: MeterReadingPeriod::Hourly,
+            unit: EnergyUnit::KWh,
+            start_timestamp: 0,
+            end_timestamp: 3_600,
+            reading_value: 0,
+        },
+    );
+}
+
+#[test]
+#[should_panic]
+fn reading_value_negative_rejected() {
+    let env = Env::default();
+    renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "M"),
+            period: MeterReadingPeriod::Hourly,
+            unit: EnergyUnit::KWh,
+            start_timestamp: 0,
+            end_timestamp: 3_600,
+            reading_value: -1,
+        },
+    );
+}
+
+#[test]
+#[should_panic]
+fn end_before_start_rejected() {
+    let env = Env::default();
+    renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "M"),
+            period: MeterReadingPeriod::Hourly,
+            unit: EnergyUnit::KWh,
+            start_timestamp: 1_000,
+            end_timestamp: 500,
+            reading_value: 100,
+        },
+    );
+}
+
+#[test]
+#[should_panic]
+fn end_equal_to_start_rejected() {
+    let env = Env::default();
+    renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "M"),
+            period: MeterReadingPeriod::Hourly,
+            unit: EnergyUnit::KWh,
+            start_timestamp: 1_000,
+            end_timestamp: 1_000,
+            reading_value: 100,
+        },
+    );
+}
+
+#[test]
+#[should_panic]
+fn duration_mismatch_with_period_rejected() {
+    let env = Env::default();
+    // Hourly period but 2-hour window → invalid
+    renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "M"),
+            period: MeterReadingPeriod::Hourly,
+            unit: EnergyUnit::KWh,
+            start_timestamp: 0,
+            end_timestamp: 7_200, // 2 hours, not 1
+            reading_value: 100,
+        },
+    );
+}
+
+#[test]
+#[should_panic]
+fn daily_period_with_hourly_window_rejected() {
+    let env = Env::default();
+    renewable_energy::create_meter_reading_config(
+        env.clone(),
+        base_config(&env),
+        MeterReadingConfig {
+            meter_id: Symbol::new(&env, "M"),
+            period: MeterReadingPeriod::Daily,
+            unit: EnergyUnit::MWh,
+            start_timestamp: 0,
+            end_timestamp: 3_600, // 1 hour, not 24
+            reading_value: 5,
+        },
+    );
 }
