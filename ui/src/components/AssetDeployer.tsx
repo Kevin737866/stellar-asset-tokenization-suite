@@ -8,13 +8,39 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Loader2, Building2, Package, FileText, DollarSign, Home, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
+import {
+  Loader2,
+  Building2,
+  Package,
+  FileText,
+  DollarSign,
+  AlertCircle,
+  RefreshCw,
+  WifiOff,
+  Wallet,
+  CheckCircle2,
+  LogOut,
+} from 'lucide-react';
 import { AssetType, DeploymentOptions } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+import {
+  DISCONNECTED_WALLET_STATE,
+  WalletControlProps,
+  WalletState,
+  canDeployWithWallet,
+  executeWalletConnect,
+  executeWalletDisconnect,
+  formatWalletAddress,
+  resolveWalletState,
+} from './walletState';
 
-interface AssetDeployerProps {
+interface AssetDeployerProps extends WalletControlProps {
   onDeploy: (options: DeploymentOptions) => Promise<{ transactionHash: string; tokenAddress: string }>;
   isLoading?: boolean;
+  /** Optional custom wallet connect handler; defaults to Freighter wallet connection. */
+  onConnectWallet?: () => Promise<string | { address: string; network?: string | null } | void> | void;
+  /** Optional custom wallet disconnect handler. */
+  onDisconnectWallet?: () => Promise<void> | void;
 }
 
 const assetTypeIcons = {
@@ -37,7 +63,17 @@ const assetTypeDescriptions = {
   intellectual_property: 'Tokenize patents, trademarks, and other IP assets',
 };
 
-export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDeployerProps) {
+export default function AssetDeployer({
+  onDeploy,
+  isLoading = false,
+  walletAddress,
+  walletNetwork,
+  isWalletConnected,
+  isConnectingWallet,
+  walletError,
+  onConnectWallet,
+  onDisconnectWallet,
+}: AssetDeployerProps) {
   const toast = useToast();
   const translateError = useErrorTranslator();
 
@@ -57,6 +93,113 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
   const [deployError, setDeployError] = useState<string | null>(null);
   const [isNetworkError, setIsNetworkError] = useState(false);
   const [lastDeploymentOptions, setLastDeploymentOptions] = useState<DeploymentOptions | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string>('');
+  const [internalWallet, setInternalWallet] = useState<WalletState>(DISCONNECTED_WALLET_STATE);
+
+  const errorId = (field: string) => `asset-${field}-error`;
+
+  const effectiveWallet = resolveWalletState(
+    {
+      walletAddress,
+      walletNetwork,
+      isWalletConnected,
+      isConnectingWallet,
+      walletError,
+    },
+    internalWallet
+  );
+
+  const deployGate = canDeployWithWallet(effectiveWallet);
+
+  const handleConnectWallet = useCallback(async () => {
+    if (effectiveWallet.status === 'connecting') {
+      return;
+    }
+
+    setDeployError(null);
+    setInternalWallet({
+      status: 'connecting',
+      address: null,
+      network: null,
+      error: null,
+    });
+    setStatusMessage('Connecting to Stellar wallet...');
+
+    const nextState = await executeWalletConnect(async () => {
+      if (onConnectWallet) {
+        const res = await onConnectWallet();
+        if (res === undefined) {
+          // Controlled parent manages wallet state via props
+          return walletAddress
+            ? { address: walletAddress, network: walletNetwork ?? null }
+            : null;
+        }
+        return res;
+      }
+
+      const freighter = await import('@stellar/freighter-api');
+      const installed = await freighter.isConnected();
+      if (!installed) {
+        throw new Error(
+          'Freighter wallet extension was not detected. Please install or unlock Freighter and try again.'
+        );
+      }
+
+      if (typeof freighter.requestAccess === 'function') {
+        await freighter.requestAccess();
+      }
+
+      const address = await freighter.getPublicKey();
+      let network: string | null = null;
+      if (typeof freighter.getNetwork === 'function') {
+        try {
+          network = await freighter.getNetwork();
+        } catch {
+          network = null;
+        }
+      }
+
+      return { address, network };
+    });
+
+    // If parent is controlling wallet props and onConnectWallet returned void,
+    // reset internal connecting state so controlled props remain the source of truth.
+    if (onConnectWallet && walletAddress !== undefined && nextState.status === 'error' && !nextState.address) {
+      setInternalWallet(DISCONNECTED_WALLET_STATE);
+      return;
+    }
+
+    setInternalWallet(nextState);
+
+    if (nextState.status === 'connected' && nextState.address) {
+      const shortAddr = formatWalletAddress(nextState.address);
+      setStatusMessage(`Wallet connected: ${shortAddr}`);
+      toast.success('Wallet Connected', `Connected to ${shortAddr}`);
+    } else if (nextState.error) {
+      setStatusMessage(`Wallet connection failed: ${nextState.error}`);
+      toast.error('Wallet Connection Failed', nextState.error);
+    }
+  }, [effectiveWallet.status, onConnectWallet, walletAddress, walletNetwork, toast]);
+
+  const handleDisconnectWallet = useCallback(async () => {
+    const { state, error } = await executeWalletDisconnect(
+      effectiveWallet,
+      onDisconnectWallet
+    );
+
+    if (error) {
+      setStatusMessage(`Wallet disconnect failed: ${error}`);
+      toast.error('Wallet Disconnect Failed', error);
+      return;
+    }
+
+    setInternalWallet(state);
+    setDeployError(null);
+    setIsNetworkError(false);
+    setLastDeploymentOptions(null);
+    setStatusMessage('Wallet disconnected');
+    toast.info('Wallet Disconnected', 'Connect a wallet to deploy RWA tokens.');
+  }, [effectiveWallet, onDisconnectWallet, toast]);
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
@@ -106,6 +249,15 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     // Clear previous error state
     setDeployError(null);
     setIsNetworkError(false);
+
+    const authCheck = canDeployWithWallet(effectiveWallet);
+    if (!authCheck.allowed) {
+      const reason = authCheck.reason || 'Connect a Stellar wallet before deploying an asset.';
+      setDeployError(reason);
+      setStatusMessage(reason);
+      toast.warning('Wallet Required', reason);
+      return;
+    }
 
     if (!validateForm()) {
       toast.warning('Form Validation', 'Please fix the highlighted fields before submitting.');
@@ -161,7 +313,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     } finally {
       setIsSubmitting(false);
     }
-  }, [formData, validateForm, onDeploy, toast, translateError]);
+  }, [effectiveWallet, formData, validateForm, onDeploy, toast, translateError]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -225,6 +377,115 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
           </CardTitle>
         </CardHeader>
         <CardContent>
+          {/* Wallet Connection Status */}
+          <div
+            className="mb-6 rounded-lg border p-4 bg-gray-50 dark:bg-gray-900/50"
+            role="region"
+            aria-label="Wallet connection status"
+          >
+            {effectiveWallet.status === 'connected' && effectiveWallet.address ? (
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0" aria-hidden="true" />
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium">Wallet Connected</span>
+                      <Badge variant="outline" className="text-green-700 dark:text-green-300 border-green-500/50">
+                        Ready to Deploy
+                      </Badge>
+                      {effectiveWallet.network && (
+                        <Badge variant="secondary">{effectiveWallet.network}</Badge>
+                      )}
+                    </div>
+                    <p
+                      className="text-xs font-mono text-gray-600 dark:text-gray-400 mt-0.5"
+                      title={effectiveWallet.address}
+                    >
+                      {formatWalletAddress(effectiveWallet.address)}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDisconnectWallet}
+                  disabled={isSubmitting || isLoading}
+                  aria-label="Disconnect wallet"
+                >
+                  <LogOut className="h-4 w-4 mr-1.5" aria-hidden="true" />
+                  Disconnect
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <Wallet className="h-5 w-5 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" aria-hidden="true" />
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium">
+                          {effectiveWallet.status === 'connecting'
+                            ? 'Connecting Wallet...'
+                            : 'Wallet Disconnected'}
+                        </span>
+                        <Badge variant="outline" className="text-amber-700 dark:text-amber-300 border-amber-500/50">
+                          {effectiveWallet.status === 'connecting' ? 'Connecting' : 'Action Required'}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                        Connect a Stellar wallet (such as Freighter) to sign and deploy your RWA token contract.
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleConnectWallet}
+                    disabled={effectiveWallet.status === 'connecting' || isSubmitting || isLoading}
+                    aria-busy={effectiveWallet.status === 'connecting'}
+                    aria-label={
+                      effectiveWallet.status === 'connecting'
+                        ? 'Connecting wallet, please wait'
+                        : 'Connect Stellar wallet'
+                    }
+                  >
+                    {effectiveWallet.status === 'connecting' ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-1.5 animate-spin" aria-hidden="true" />
+                        Connecting...
+                      </>
+                    ) : (
+                      <>
+                        <Wallet className="h-4 w-4 mr-1.5" aria-hidden="true" />
+                        Connect Wallet
+                      </>
+                    )}
+                  </Button>
+                </div>
+
+                {effectiveWallet.status === 'error' && effectiveWallet.error && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" aria-hidden="true" />
+                    <AlertDescription className="flex items-center justify-between flex-1 gap-2">
+                      <span>{effectiveWallet.error}</span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleConnectWallet}
+                        disabled={isSubmitting || isLoading}
+                      >
+                        <RefreshCw className="h-3 w-3 mr-1" aria-hidden="true" />
+                        Retry
+                      </Button>
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Network Error Banner */}
           {isNetworkError && (
             <Alert variant="destructive" className="mb-4">
@@ -535,8 +796,14 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
               </Button>
               <Button
                 type="submit"
-                disabled={isSubmitting || isLoading}
-                aria-label={isSubmitting || isLoading ? 'Deploying token, please wait' : 'Deploy token'}
+                disabled={!deployGate.allowed || isSubmitting || isLoading}
+                aria-label={
+                  !deployGate.allowed
+                    ? deployGate.reason || 'Connect a wallet to deploy token'
+                    : isSubmitting || isLoading
+                      ? 'Deploying token, please wait'
+                      : 'Deploy token'
+                }
                 aria-busy={isSubmitting || isLoading}
               >
                 {isSubmitting || isLoading ? (
@@ -544,6 +811,8 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
                     Deploying...
                   </>
+                ) : !deployGate.allowed ? (
+                  'Connect Wallet to Deploy'
                 ) : (
                   'Deploy Token'
                 )}
