@@ -288,6 +288,90 @@ export interface SimulationOptions {
   feeEstimation?: boolean;
 }
 
+// ─── Transaction Signing & Submission Types ───────────────────────────────────
+
+/**
+ * Options that control how {@link StellarRWASDK.signAndSubmit} signs and
+ * submits a pre-built Stellar transaction.
+ *
+ * **Authorization** — the caller must supply the secret key of the account
+ * that is the transaction's source (or one of its required signers for
+ * multi-signature setups). Passing the wrong key causes an `UNAUTHORIZED`
+ * error at the network level.
+ *
+ * **Simulation** — by default every transaction is pre-flighted against
+ * Soroban RPC before it is submitted. Set `skipSimulation: true` only for
+ * trusted, low-risk operations (e.g. recurring internal batch jobs) where
+ * the latency of an extra round-trip is unacceptable.
+ */
+export interface SigningOptions {
+  /**
+   * Base64-encoded transaction envelope XDR to sign and submit.
+   * When omitted the caller must pass a live transaction object via the `tx`
+   * parameter of `signAndSubmit`.
+   */
+  memo?: string;
+
+  /**
+   * Override the network fee for this submission (in stroops).
+   * Defaults to the SDK-configured fee or the simulation estimate.
+   */
+  fee?: number;
+
+  /**
+   * Maximum ledger lifetime for the transaction (in seconds).
+   * Defaults to {@link DEFAULT_TIMEOUT_SECONDS}.
+   */
+  timeout?: number;
+
+  /**
+   * When `true`, skip the pre-flight Soroban simulation step.
+   * The transaction is signed and submitted immediately.
+   *
+   * **Risk**: skipping simulation means contract panics and insufficient-fee
+   * errors are discovered only after submission and fees are spent.
+   */
+  skipSimulation?: boolean;
+
+  /**
+   * When `true`, do not poll for the transaction's final on-ledger status.
+   * `signAndSubmit` returns as soon as the network acknowledges receipt.
+   * The result's `confirmed` field will be `false`.
+   */
+  skipConfirmation?: boolean;
+
+  /**
+   * Maximum number of status-poll attempts before giving up on confirmation.
+   * Each poll waits approximately 2 seconds (one Stellar ledger close).
+   * Defaults to `10`.
+   */
+  confirmationPolls?: number;
+}
+
+/**
+ * Result returned by {@link StellarRWASDK.signAndSubmit}.
+ */
+export interface SignAndSubmitResult {
+  /** Stellar transaction hash of the submitted envelope. */
+  transactionHash: string;
+
+  /**
+   * `true` when the transaction reached `SUCCESS` status on-chain.
+   * `false` when submission was acknowledged but confirmation was skipped
+   * (`skipConfirmation: true`) or timed out.
+   */
+  confirmed: boolean;
+
+  /** The simulation result, or `null` when simulation was skipped. */
+  simulation: SimulationResult | null;
+
+  /** Fee paid in stroops (as a decimal string). */
+  fee: string;
+
+  /** Final on-ledger status string from the RPC node, e.g. `'SUCCESS'`. */
+  status: string;
+}
+
 // ─── Batch Transaction Types ─────────────────────────────────────────────────
 
 /**
