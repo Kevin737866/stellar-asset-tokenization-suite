@@ -340,6 +340,53 @@ export interface BatchTransactionResult {
   estimatedGas: string;
 }
 
+// ─── Invocation Result Types (Issue #390) ─────────────────────────────────────
+
+/** Broad category used to branch on a failed contract invocation. */
+export type InvocationFailureKind =
+  | 'validation'
+  | 'authorization'
+  | 'contract'
+  | 'transaction'
+  | 'network'
+  | 'unknown';
+
+/** Context attached to a failure so callers can identify the invocation. */
+export interface InvocationContext {
+  contractId?: string;
+  functionName?: string;
+  transactionHash?: string;
+  operationIndex?: number;
+}
+
+/** Typed, serialisable description of a failed contract invocation. */
+export interface ContractInvocationFailure extends InvocationContext {
+  kind: InvocationFailureKind;
+  code: ErrorCode;
+  message: string;
+  suggestion: string;
+  /** Soroban contract error number, when one could be extracted. */
+  contractErrorNumber?: number;
+  /** Original error details (e.g. batch `operationResults`), when available. */
+  details?: unknown;
+}
+
+export interface InvocationSuccess<T> {
+  success: true;
+  value: T;
+}
+
+export interface InvocationFailure {
+  success: false;
+  error: ContractInvocationFailure;
+}
+
+/**
+ * Result of a contract invocation. Failures are values rather than thrown
+ * exceptions, so callers must handle them explicitly.
+ */
+export type InvocationResult<T> = InvocationSuccess<T> | InvocationFailure;
+
 export interface TransferOptions {
   from?: Address;
   to?: Address;

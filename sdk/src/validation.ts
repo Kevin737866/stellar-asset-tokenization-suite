@@ -1,7 +1,8 @@
+import { DEFAULT_DECIMALS } from './constants';
+import { exactDecimalToScaled, parseExactDecimal } from './decimal';
 import { InvalidParametersError } from './errors';
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
-const AMOUNT_REGEX = /^\d+(\.\d+)?$/;
 const CONTRACT_ID_REGEX = /^[A-Z2-7]{56}$/;
 
 export function validateAddress(address: unknown, name: string): void {
@@ -25,11 +26,14 @@ export function validateAmount(amount: unknown, name: string): void {
     throw new InvalidParametersError(`${name} is required`);
   }
   if (typeof amount === 'string') {
-    if (!AMOUNT_REGEX.test(amount)) {
-      throw new InvalidParametersError(`Invalid ${name}: must be a positive number`);
-    }
-    const num = parseFloat(amount);
-    if (num <= 0) {
+    // Parse with bigint only: `parseFloat` would round long decimals and can
+    // underflow tiny positive values to zero. (Issue #388)
+    const parsed = parseExactDecimal(amount, {
+      name,
+      allowNegative: false,
+      allowPositiveSign: false,
+    });
+    if (parsed.unscaled <= 0n) {
       throw new InvalidParametersError(`Invalid ${name}: must be greater than zero`);
     }
     return;
@@ -115,12 +119,24 @@ export function validateEnum<T extends Record<string, string | number>>(value: u
   }
 }
 
+/**
+ * Scale a decimal string to an 18-decimal integer.
+ *
+ * Uses exact parsing (no `parseFloat`/`Number`). For backwards compatibility
+ * fractional digits beyond 18 are still truncated; callers that need to reject
+ * that loss of precision should use `parseExactScaledAmount` from `decimal.ts`.
+ */
 export function safeParseAmount(value: string, name: string): bigint {
-  if (!AMOUNT_REGEX.test(value)) {
-    throw new InvalidParametersError(`Invalid ${name}: must be a valid positive number`);
-  }
-  const [whole, fractional = ''] = value.split('.');
-  const wholeBigInt = BigInt(whole.replace(/^0+/, '') || '0');
-  const fractionalBigInt = fractional ? BigInt(fractional.padEnd(18, '0').slice(0, 18)) : 0n;
-  return wholeBigInt * BigInt(10) ** BigInt(18) + fractionalBigInt;
+  const parsed = parseExactDecimal(value, {
+    name,
+    allowNegative: false,
+    allowPositiveSign: false,
+  });
+  const truncated = parsed.scale > DEFAULT_DECIMALS
+    ? {
+        unscaled: parsed.unscaled / (10n ** BigInt(parsed.scale - DEFAULT_DECIMALS)),
+        scale: DEFAULT_DECIMALS,
+      }
+    : parsed;
+  return exactDecimalToScaled(truncated, DEFAULT_DECIMALS, { name });
 }
