@@ -98,6 +98,34 @@ export {
   type ErrorInfo,
 } from './errors';
 
+// ─── Configurable Fee Strategy & Safe Protocol Bounds ────────────────────────
+import {
+  DEFAULT_FEE_STRATEGY,
+  DEFAULT_MAX_FEE_STROOPS,
+  STELLAR_MAX_PROTOCOL_FEE_STROOPS,
+  STELLAR_MIN_BASE_FEE_STROOPS,
+  resolveTransactionFee,
+  validateFeeStrategy,
+  type FeeStrategyConfig,
+  type FeeStrategyContext,
+  type FeeStrategyMode,
+  type ResolvedFeeResult,
+} from './feeStrategy';
+
+export {
+  DEFAULT_FEE_STRATEGY,
+  DEFAULT_MAX_FEE_STROOPS,
+  FeeStrategyError,
+  STELLAR_MAX_PROTOCOL_FEE_STROOPS,
+  STELLAR_MIN_BASE_FEE_STROOPS,
+  resolveTransactionFee,
+  validateFeeStrategy,
+  type FeeStrategyConfig,
+  type FeeStrategyContext,
+  type FeeStrategyMode,
+  type ResolvedFeeResult,
+} from './feeStrategy';
+
 // ─── BatchTransactionBuilder ──────────────────────────────────────────────────
 
 /**
@@ -142,13 +170,45 @@ export class BatchTransactionBuilder {
   private readonly serverUrl: string;
   private readonly networkPassphrase: string;
   private readonly logger: Logger;
+  private feeStrategy?: FeeStrategyConfig;
 
-  constructor(serverUrl: string, networkPassphrase: string) {
+  constructor(serverUrl: string, networkPassphrase: string, feeStrategy?: FeeStrategyConfig) {
     validateServerUrl(serverUrl, 'serverUrl');
     validateNonEmptyString(networkPassphrase, 'networkPassphrase');
     this.serverUrl = serverUrl;
     this.networkPassphrase = networkPassphrase;
     this.logger = createLogger('BatchTransactionBuilder');
+    if (feeStrategy !== undefined) {
+      this.feeStrategy = validateFeeStrategy(feeStrategy);
+    }
+  }
+
+  /**
+   * Configure or replace the fee strategy for this batch builder.
+   * Validation runs before mutation so an invalid strategy never alters state.
+   */
+  setFeeStrategy(strategy: FeeStrategyConfig): this {
+    this.feeStrategy = validateFeeStrategy(strategy);
+    return this;
+  }
+
+  /** Return a copy of the configured fee strategy, if any. */
+  getFeeStrategy(): FeeStrategyConfig | undefined {
+    return this.feeStrategy ? { ...this.feeStrategy } : undefined;
+  }
+
+  /**
+   * Resolve the batch transaction fee using the configured fee strategy
+   * (or {@link DEFAULT_FEE_STRATEGY} when none is set) within safe protocol bounds.
+   */
+  resolveFee(overrideFeeStroops?: number): ResolvedFeeResult {
+    const strategy = this.feeStrategy ?? DEFAULT_FEE_STRATEGY;
+    const estimatedFeeStroops = parseInt(this.estimateGas(), 10);
+    return resolveTransactionFee(strategy, {
+      operationCount: Math.max(1, this.operations.length),
+      estimatedFeeStroops,
+      overrideFeeStroops,
+    });
   }
 
   // ─── add ───────────────────────────────────────────────────────────────────
@@ -259,7 +319,9 @@ export class BatchTransactionBuilder {
     }
 
     const estimatedFee = parseInt(this.estimateGas(), 10);
-    const fee = txOptions.fee ?? estimatedFee;
+    const fee = this.feeStrategy
+      ? this.resolveFee(txOptions.fee).feeStroops
+      : (txOptions.fee ?? estimatedFee);
 
     this.logger.info('Submitting batch transaction', {
       source: source.toString(),
@@ -270,6 +332,12 @@ export class BatchTransactionBuilder {
     try {
       const { SorobanRpc, TransactionBuilder, Operation } = await import('stellar-sdk');
       const server = new SorobanRpc.Server(this.serverUrl);
+      if (typeof (server as any).getNetwork === 'function') {
+        const networkInfo = await (server as any).getNetwork();
+        if (networkInfo && typeof networkInfo.passphrase === 'string') {
+          verifyNetworkPassphrase(this.networkPassphrase, networkInfo.passphrase);
+        }
+      }
       const account = await server.getAccount(source.toString());
 
       const builder = new TransactionBuilder(account, {
@@ -290,6 +358,10 @@ export class BatchTransactionBuilder {
       const tx = builder
         .setTimeout(txOptions.timeout ?? DEFAULT_TIMEOUT_SECONDS)
         .build();
+
+      if (tx && typeof (tx as any).networkPassphrase === 'string') {
+        verifyNetworkPassphrase(tx as { networkPassphrase?: string }, this.networkPassphrase);
+      }
 
       const response = await server.sendTransaction(tx);
       if ((response as any).status === 'ERROR') {
@@ -362,10 +434,14 @@ export class StellarRWASDK {
   /** Active retry policy for transient network failures (Issue #191). */
   public retryConfig: RetryConfig;
   private _retryListener?: RetryEventListener;
+  private _feeStrategy: FeeStrategyConfig;
 
-  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
+  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig>; feeStrategy?: FeeStrategyConfig }) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    this._feeStrategy = config.feeStrategy
+      ? validateFeeStrategy(config.feeStrategy)
+      : { ...DEFAULT_FEE_STRATEGY };
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
@@ -438,10 +514,34 @@ export class StellarRWASDK {
    * const result = await batch.submit(signerAddress);
    * ```
    */
-  createBatch(): BatchTransactionBuilder {
+  /**
+   * Return a copy of the active transaction fee strategy.
+   */
+  getFeeStrategy(): FeeStrategyConfig {
+    return { ...this._feeStrategy };
+  }
+
+  /**
+   * Update the SDK's transaction fee strategy.
+   * Validation runs before mutation so failed updates leave existing state unchanged.
+   */
+  setFeeStrategy(strategy: FeeStrategyConfig): void {
+    this._feeStrategy = validateFeeStrategy(strategy);
+  }
+
+  /**
+   * Resolve a transaction fee in stroops using the SDK's active fee strategy
+   * and safe protocol bounds.
+   */
+  resolveTransactionFee(context: FeeStrategyContext): ResolvedFeeResult {
+    return resolveTransactionFee(this._feeStrategy, context);
+  }
+
+  createBatch(feeStrategy?: FeeStrategyConfig): BatchTransactionBuilder {
     return new BatchTransactionBuilder(
       this.config.stellar.serverUrl,
       this.config.stellar.passphrase,
+      feeStrategy ?? this._feeStrategy,
     );
   }
 
@@ -855,6 +955,180 @@ export class StellarRWASDK {
     const server = options.server ?? new SorobanRpc.Server(this.config.stellar.serverUrl);
     return estimateGas(operation, { ...params, ...options, server });
   }
+
+  /**
+   * Verify that a transaction's network passphrase (or an explicit passphrase string)
+   * matches this SDK's configured network passphrase before signing.
+   *
+   * Prevents accidental cross-network signing (e.g. signing a mainnet transaction
+   * with a testnet configuration).
+   *
+   * @param transactionOrPassphrase - A Stellar transaction object with `networkPassphrase`, or a raw passphrase string.
+   * @param options - Optional overrides for `expectedPassphrase` and `expectedNetwork`.
+   * @returns Verification result confirming the matched passphrase.
+   * @throws {InvalidParametersError} if inputs or expected network configuration are invalid.
+   * @throws {TransactionError} if the network passphrase does not match.
+   */
+  verifyNetworkPassphrase(
+    transactionOrPassphrase: string | { networkPassphrase?: string },
+    options: NetworkPassphraseVerificationOptions = {},
+  ): NetworkPassphraseVerificationResult {
+    const expectedPassphrase = options.expectedPassphrase ?? this.config.stellar.passphrase;
+    return verifyNetworkPassphrase(transactionOrPassphrase, expectedPassphrase, {
+      expectedNetwork: options.expectedNetwork,
+    });
+  }
+
+  /**
+   * Verify a transaction's network passphrase and then sign it with the provided signer(s).
+   *
+   * If passphrase verification fails, `transaction.sign()` is never invoked so the
+   * transaction remains unmodified (no partial state changes).
+   *
+   * @param transaction - Stellar transaction supporting `networkPassphrase` and `sign(...)`.
+   * @param signers - A single signer (e.g. `Keypair`) or non-empty array of signers.
+   * @param options - Optional overrides for `expectedPassphrase` and `expectedNetwork`.
+   * @returns The signed transaction.
+   * @throws {InvalidParametersError} if transaction, signers, or passphrase inputs are invalid.
+   * @throws {TransactionError} if the transaction's network passphrase does not match.
+   */
+  signTransaction<T extends { networkPassphrase?: string; sign: (...signers: any[]) => void }>(
+    transaction: T,
+    signers: any | any[],
+    options: NetworkPassphraseVerificationOptions = {},
+  ): T {
+    const expectedPassphrase = options.expectedPassphrase ?? this.config.stellar.passphrase;
+    return signTransactionWithPassphraseVerification(transaction, signers, expectedPassphrase, {
+      expectedNetwork: options.expectedNetwork,
+    });
+  }
+}
+
+// ─── Network Passphrase Verification ──────────────────────────────────────────
+
+export interface NetworkPassphraseVerificationOptions {
+  /**
+   * Expected Stellar network passphrase.
+   * When omitted on `StellarRWASDK` methods, defaults to `config.stellar.passphrase`.
+   */
+  expectedPassphrase?: string;
+  /**
+   * Optional known Stellar network name (`testnet`, `mainnet`, `futurenet`, `standalone`).
+   * When provided, also asserts that `expectedPassphrase` matches `STELLAR_NETWORKS[expectedNetwork].passphrase`.
+   */
+  expectedNetwork?: keyof typeof STELLAR_NETWORKS;
+}
+
+export interface NetworkPassphraseVerificationResult {
+  verified: true;
+  networkPassphrase: string;
+  matchedNetwork?: string;
+}
+
+/**
+ * Verify that a transaction's network passphrase (or a raw passphrase string)
+ * exactly matches the expected Stellar network passphrase before signing.
+ *
+ * Uses strict byte-for-byte equality because Stellar hashes the network
+ * passphrase directly into the transaction signature payload.
+ *
+ * @param transactionOrPassphrase - Transaction object containing `networkPassphrase`, or a passphrase string.
+ * @param expectedPassphrase - The expected Stellar network passphrase.
+ * @param options - Optional `expectedNetwork` to cross-check against `STELLAR_NETWORKS`.
+ * @returns {@link NetworkPassphraseVerificationResult} when verification succeeds.
+ * @throws {InvalidParametersError} if any required input is missing, empty, or references an unknown network.
+ * @throws {TransactionError} if the actual passphrase does not match `expectedPassphrase`.
+ */
+export function verifyNetworkPassphrase(
+  transactionOrPassphrase: string | { networkPassphrase?: string },
+  expectedPassphrase: string,
+  options: { expectedNetwork?: keyof typeof STELLAR_NETWORKS } = {},
+): NetworkPassphraseVerificationResult {
+  validateNonEmptyString(expectedPassphrase, 'expectedPassphrase');
+
+  if (options.expectedNetwork !== undefined) {
+    const knownNetwork = STELLAR_NETWORKS[options.expectedNetwork];
+    if (!knownNetwork) {
+      throw new InvalidParametersError(
+        `Unknown Stellar network: ${String(options.expectedNetwork)}`
+      );
+    }
+    if (expectedPassphrase !== knownNetwork.passphrase) {
+      throw new InvalidParametersError(
+        `Expected passphrase does not match network "${String(options.expectedNetwork)}" ` +
+        `(expected "${knownNetwork.passphrase}", got "${expectedPassphrase}")`
+      );
+    }
+  }
+
+  let actualPassphrase: unknown;
+  if (typeof transactionOrPassphrase === 'string') {
+    actualPassphrase = transactionOrPassphrase;
+  } else if (transactionOrPassphrase != null && typeof transactionOrPassphrase === 'object') {
+    actualPassphrase = transactionOrPassphrase.networkPassphrase;
+  } else {
+    throw new InvalidParametersError(
+      'Transaction or network passphrase is required for verification'
+    );
+  }
+
+  validateNonEmptyString(actualPassphrase as string, 'transaction.networkPassphrase');
+
+  if (actualPassphrase !== expectedPassphrase) {
+    throw new TransactionError(
+      `Network passphrase mismatch before signing: expected "${expectedPassphrase}", got "${actualPassphrase}"`,
+      {
+        expectedPassphrase,
+        actualPassphrase,
+      }
+    );
+  }
+
+  const matchedNetwork = Object.entries(STELLAR_NETWORKS).find(
+    ([, cfg]) => cfg.passphrase === actualPassphrase
+  )?.[0];
+
+  return {
+    verified: true,
+    networkPassphrase: actualPassphrase as string,
+    matchedNetwork,
+  };
+}
+
+/**
+ * Verify a transaction's network passphrase before invoking `transaction.sign(...)`.
+ *
+ * Guarantees that `transaction.sign` is never called if verification fails,
+ * preventing cross-network replay and leaving no partial signature state.
+ *
+ * @param transaction - Stellar transaction with `networkPassphrase` and `sign(...)`.
+ * @param signers - A single signer or non-empty array of signers.
+ * @param expectedPassphrase - The expected Stellar network passphrase.
+ * @param options - Optional `expectedNetwork` to cross-check against `STELLAR_NETWORKS`.
+ * @returns The signed transaction.
+ * @throws {InvalidParametersError} if `transaction`, `signers`, or passphrase arguments are invalid.
+ * @throws {TransactionError} if the transaction's network passphrase does not match `expectedPassphrase`.
+ */
+export function signTransactionWithPassphraseVerification<
+  T extends { networkPassphrase?: string; sign: (...signers: any[]) => void }
+>(
+  transaction: T,
+  signers: any | any[],
+  expectedPassphrase: string,
+  options: { expectedNetwork?: keyof typeof STELLAR_NETWORKS } = {},
+): T {
+  if (transaction == null || typeof transaction !== 'object' || typeof transaction.sign !== 'function') {
+    throw new InvalidParametersError('A signable transaction object with a sign() method is required');
+  }
+
+  const signerList = Array.isArray(signers) ? signers : [signers];
+  if (signerList.length === 0 || signerList.some((s) => s == null)) {
+    throw new InvalidParametersError('At least one valid signer is required');
+  }
+
+  verifyNetworkPassphrase(transaction, expectedPassphrase, options);
+  transaction.sign(...signerList);
+  return transaction;
 }
 
 // ─── Factory Function ─────────────────────────────────────────────────────────
