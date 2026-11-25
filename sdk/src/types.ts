@@ -338,6 +338,11 @@ export interface BatchTransactionResult {
   totalFee: string;
   /** Estimated gas for the batch — sum of per-operation fees plus overhead. */
   estimatedGas: string;
+  /**
+   * Pre-flight transaction simulation result, when simulation was executed
+   * before submission.
+   */
+  simulation?: SimulationResult;
 }
 
 export interface TransferOptions {

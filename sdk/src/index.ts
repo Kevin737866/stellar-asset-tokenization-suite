@@ -39,6 +39,14 @@ import {
 // ─── All public types re-exported from the types module ───────────────────────
 // This is the SINGLE re-export of every shared type. No other module should
 // re-export from types.ts to prevent accidental circular paths.
+import type {
+  SimulationResult,
+  SimulationEvent,
+  StorageChange,
+  SimulationOptions,
+  BatchTransactionOperation,
+  BatchTransactionResult,
+} from './types';
 export * from './types';
 
 // ─── Custody module exports ───────────────────────────────────────────────────
@@ -112,6 +120,50 @@ const BATCH_BASE_OP_FEE = 100;
 
 /** Fixed overhead added on top of summed per-operation fees to cover envelope costs. */
 const BATCH_OVERHEAD_FEE = 1000;
+
+/**
+ * Normalize a raw Soroban RPC simulation response into the public
+ * {@link SimulationResult} shape.
+ */
+function normalizeSimulationResult(simulation: any): SimulationResult {
+  if (!simulation || typeof simulation !== 'object') {
+    return {
+      success: false,
+      events: [],
+      returnValue: null,
+      gasUsed: '0',
+      storageChanges: [],
+      errorMessage: 'Simulation returned no result',
+    };
+  }
+
+  const events: SimulationEvent[] = (simulation.events || []).map((evt: any) => ({
+    contractId: evt.contractId || '',
+    topics: evt.topic || evt.topics || [],
+    data: evt.data ?? null,
+  }));
+
+  const storageChanges: StorageChange[] = (simulation.stateChanges || [])
+    .filter((change: any) => change.type === 'contract_data')
+    .map((change: any) => ({
+      contractId: change.contractId || '',
+      key: change.key || '',
+      oldValue: change.oldValue,
+      newValue: change.newValue,
+    }));
+
+  const isSuccess = simulation.result !== undefined && !simulation.error;
+  const errorMessage = simulation.error || (isSuccess ? undefined : 'Simulation returned no result');
+
+  return {
+    success: isSuccess,
+    events,
+    returnValue: simulation.result ?? null,
+    gasUsed: String(simulation.cost?.cpuInsns || 0),
+    storageChanges,
+    errorMessage,
+  };
+}
 
 /**
  * Builder for creating and submitting multi-operation Stellar transactions.
@@ -243,7 +295,7 @@ export class BatchTransactionBuilder {
    */
   async submit(
     source: Address,
-    txOptions: TransactionOptions = {},
+    txOptions: TransactionOptions & SimulationOptions = {},
   ): Promise<BatchTransactionResult> {
     validateAddress(source, 'source');
     if (this.operations.length === 0) {
@@ -256,6 +308,9 @@ export class BatchTransactionBuilder {
     }
     if (txOptions.timeout != null && (typeof txOptions.timeout !== 'number' || txOptions.timeout <= 0)) {
       throw new InvalidParametersError('txOptions.timeout must be a positive number');
+    }
+    if (txOptions.skipSimulation != null && typeof txOptions.skipSimulation !== 'boolean') {
+      throw new InvalidParametersError('txOptions.skipSimulation must be a boolean');
     }
 
     const estimatedFee = parseInt(this.estimateGas(), 10);
@@ -291,10 +346,31 @@ export class BatchTransactionBuilder {
         .setTimeout(txOptions.timeout ?? DEFAULT_TIMEOUT_SECONDS)
         .build();
 
+      let simulation: SimulationResult | undefined;
+      if (txOptions.skipSimulation) {
+        simulation = {
+          success: true,
+          events: [],
+          gasUsed: '0',
+          storageChanges: [],
+        };
+      } else if (typeof (server as any).simulateTransaction === 'function') {
+        const rawSimulation = await (server as any).simulateTransaction(tx);
+        simulation = normalizeSimulationResult(rawSimulation);
+        if (!simulation.success) {
+          const simMsg = simulation.errorMessage || 'Transaction simulation failed';
+          throw new TransactionError(
+            `Batch simulation failed: ${simMsg}`,
+            { simulation },
+          );
+        }
+      }
+
       const response = await server.sendTransaction(tx);
       if ((response as any).status === 'ERROR') {
         throw new TransactionError(
-          `Batch rejected by network: ${JSON.stringify((response as any).errorResult ?? '')}`
+          `Batch rejected by network: ${JSON.stringify((response as any).errorResult ?? '')}`,
+          simulation ? { simulation } : undefined,
         );
       }
 
@@ -313,9 +389,11 @@ export class BatchTransactionBuilder {
         operationResults,
         totalFee: fee.toString(),
         estimatedGas: estimatedFee.toString(),
+        ...(simulation ? { simulation } : {}),
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      const simulation: SimulationResult | undefined = (err as any)?.details?.simulation;
       this.logger.error('Batch transaction failed — all operations reverted', {
         error: msg,
         operationCount: this.operations.length,
@@ -326,7 +404,7 @@ export class BatchTransactionBuilder {
 
       throw new TransactionError(
         `Batch failed — all ${this.operations.length} operations reverted: ${msg}`,
-        { operationResults },
+        simulation ? { operationResults, simulation } : { operationResults },
       );
     }
   }
@@ -757,48 +835,28 @@ export class StellarRWASDK {
       };
     }
 
+    if (tx == null) {
+      throw new InvalidParametersError('tx is required for transaction simulation');
+    }
+
     try {
-      const server = new (await import('stellar-sdk')).Server(this.config.stellar.serverUrl);
+      const sdkModule = await import('stellar-sdk');
+      const ServerCtor = (sdkModule as any).SorobanRpc?.Server ?? (sdkModule as any).Server;
+      const server = new ServerCtor(this.config.stellar.serverUrl);
       const simulation = await server.simulateTransaction(tx);
+      const result = normalizeSimulationResult(simulation);
 
-      // Extract events from simulation
-      const events: SimulationEvent[] = (simulation.events || []).map((evt: any) => ({
-        contractId: evt.contractId || '',
-        topics: evt.topic || [],
-        data: evt.data || null,
-      }));
-
-      // Extract storage changes
-      const storageChanges: StorageChange[] = (simulation.stateChanges || [])
-        .filter((change: any) => change.type === 'contract_data')
-        .map((change: any) => ({
-          contractId: change.contractId || '',
-          key: change.key || '',
-          oldValue: change.oldValue,
-          newValue: change.newValue,
-        }));
-
-      // Determine success from simulation result
-      const isSuccess = simulation.result !== undefined && !simulation.error;
-      const errorMessage = simulation.error || (isSuccess ? undefined : 'Simulation returned no result');
-
-      const result: SimulationResult = {
-        success: isSuccess,
-        events,
-        returnValue: simulation.result || null,
-        gasUsed: String(simulation.cost?.cpuInsns || 0),
-        storageChanges,
-        errorMessage,
-      };
-
-      if (!isSuccess) {
-        this.logger.warn('Transaction simulation failed', { errorMessage, gasUsed: result.gasUsed });
+      if (!result.success) {
+        this.logger.warn('Transaction simulation failed', {
+          errorMessage: result.errorMessage,
+          gasUsed: result.gasUsed,
+        });
       } else {
         this.logger.info('Transaction simulation succeeded', { gasUsed: result.gasUsed });
       }
 
       return result;
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error('Transaction simulation error', { error: error.message });
       throw new TransactionError(`Transaction simulation failed: ${error.message}`, error);
     }
