@@ -32,9 +32,87 @@ import {
   RefreshCw,
   AlertCircle,
   WifiOff,
+  PauseCircle,
+  Snowflake,
+  ShieldAlert,
 } from 'lucide-react';
 import { AssetInfo, Balance, AssetHolding, Portfolio } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+
+export interface TokenStatusSummary {
+  isPaused: boolean;
+  isFrozen: boolean;
+  isRestricted: boolean;
+  statusLabel: string;
+  restrictionReason: string | null;
+}
+
+export function getTokenRestrictionStatus(
+  asset: Pick<AssetInfo, 'isPaused' | 'isFrozen'>
+): TokenStatusSummary {
+  const isPaused = Boolean(asset.isPaused);
+  const isFrozen = Boolean(asset.isFrozen);
+  const isRestricted = isPaused || isFrozen;
+
+  if (isPaused && isFrozen) {
+    return {
+      isPaused,
+      isFrozen,
+      isRestricted,
+      statusLabel: 'Paused & Frozen',
+      restrictionReason:
+        'This token is currently paused and frozen. Transfers, locking, unlocking, and dividend claims are disabled.',
+    };
+  }
+
+  if (isPaused) {
+    return {
+      isPaused,
+      isFrozen,
+      isRestricted,
+      statusLabel: 'Paused',
+      restrictionReason:
+        'This token is currently paused by the issuer. Transfers, locking, unlocking, and dividend claims are temporarily disabled.',
+    };
+  }
+
+  if (isFrozen) {
+    return {
+      isPaused,
+      isFrozen,
+      isRestricted,
+      statusLabel: 'Frozen',
+      restrictionReason:
+        'This token is currently frozen. Transfers, locking, unlocking, and dividend claims are restricted.',
+    };
+  }
+
+  return {
+    isPaused: false,
+    isFrozen: false,
+    isRestricted: false,
+    statusLabel: 'Active',
+    restrictionReason: null,
+  };
+}
+
+export function getPortfolioRestrictionCounts(assets: AssetHolding[]): {
+  pausedCount: number;
+  frozenCount: number;
+  restrictedCount: number;
+} {
+  let pausedCount = 0;
+  let frozenCount = 0;
+  let restrictedCount = 0;
+
+  for (const holding of assets) {
+    if (holding.asset.isPaused) pausedCount += 1;
+    if (holding.asset.isFrozen) frozenCount += 1;
+    if (holding.asset.isPaused || holding.asset.isFrozen) restrictedCount += 1;
+  }
+
+  return { pausedCount, frozenCount, restrictedCount };
+}
 
 interface OwnershipDashboardProps {
   userAddress: string;
@@ -91,9 +169,20 @@ export default function OwnershipDashboard({
   const totalValue = parseFloat(portfolio.totalValue);
   const totalDividends = parseFloat(portfolio.totalDividends);
   const totalVotingPower = parseFloat(portfolio.votingPower);
+  const { pausedCount, frozenCount, restrictedCount } = getPortfolioRestrictionCounts(portfolio.assets);
+  const selectedAssetStatus = selectedAsset ? getTokenRestrictionStatus(selectedAsset.asset) : null;
+
+  const findHoldingByAddress = (assetAddress: string): AssetHolding | undefined =>
+    portfolio.assets.find((h) => String(h.asset.tokenAddress) === String(assetAddress));
 
   const handleLockTokens = async () => {
     if (!selectedAsset || !lockAmount || !lockPeriod) return;
+
+    const status = getTokenRestrictionStatus(selectedAsset.asset);
+    if (status.isRestricted) {
+      setLockError(status.restrictionReason);
+      return;
+    }
 
     // Inline validation
     const amount = parseFloat(lockAmount);
@@ -142,6 +231,18 @@ export default function OwnershipDashboard({
   };
 
   const handleUnlockTokens = async (assetAddress: string, amount: string) => {
+    const holding = findHoldingByAddress(assetAddress);
+    if (holding) {
+      const status = getTokenRestrictionStatus(holding.asset);
+      if (status.isRestricted) {
+        setUnlockError((prev) => ({
+          ...prev,
+          [assetAddress]: status.restrictionReason ?? 'Token operations are currently restricted.',
+        }));
+        return;
+      }
+    }
+
     setIsUnlocking(assetAddress);
     setUnlockError((prev) => ({ ...prev, [assetAddress]: '' }));
     setIsNetworkError(false);
@@ -173,6 +274,18 @@ export default function OwnershipDashboard({
   };
 
   const handleClaimDividends = async (assetAddress: string, distributionId: number) => {
+    const holding = findHoldingByAddress(assetAddress);
+    if (holding) {
+      const status = getTokenRestrictionStatus(holding.asset);
+      if (status.isRestricted) {
+        setClaimError((prev) => ({
+          ...prev,
+          [assetAddress]: status.restrictionReason ?? 'Token operations are currently restricted.',
+        }));
+        return;
+      }
+    }
+
     setIsClaiming(assetAddress);
     setClaimError((prev) => ({ ...prev, [assetAddress]: '' }));
     setIsNetworkError(false);
@@ -232,6 +345,26 @@ export default function OwnershipDashboard({
           <WifiOff className="h-4 w-4" />
           <AlertDescription>
             Network connection error. Please check your connection to the Stellar network and try again.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Portfolio Pause/Freeze Status Banner */}
+      {restrictedCount > 0 && (
+        <Alert variant="destructive" role="status" aria-label="Token restriction status">
+          <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+          <AlertDescription>
+            {restrictedCount === 1
+              ? '1 asset in your portfolio has active restrictions'
+              : `${restrictedCount} assets in your portfolio have active restrictions`}
+            {' ('}
+            {[
+              pausedCount > 0 ? `${pausedCount} paused` : null,
+              frozenCount > 0 ? `${frozenCount} frozen` : null,
+            ]
+              .filter(Boolean)
+              .join(', ')}
+            {'). Token operations are disabled for affected assets.'}
           </AlertDescription>
         </Alert>
       )}
@@ -304,6 +437,16 @@ export default function OwnershipDashboard({
                 >
                   {portfolio.assets.length}
                 </p>
+                {restrictedCount > 0 && (
+                  <p className="text-xs text-red-600 dark:text-red-400 mt-1">
+                    {[
+                      pausedCount > 0 ? `${pausedCount} paused` : null,
+                      frozenCount > 0 ? `${frozenCount} frozen` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                )}
               </div>
               <Wallet className="h-8 w-8 text-orange-600" aria-hidden="true" />
             </div>
@@ -438,7 +581,7 @@ export default function OwnershipDashboard({
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 mt-4">
+                      <div className="flex flex-wrap items-center gap-2 mt-4">
                         <Badge
                           variant={holding.balance.lockedAmount === '0' ? 'secondary' : 'default'}
                         >
@@ -446,10 +589,27 @@ export default function OwnershipDashboard({
                             ? 'Unlocked'
                             : `${parseFloat(holding.balance.lockedAmount).toLocaleString()} Locked`}
                         </Badge>
-                        <Badge variant="outline">
-                          {holding.asset.isPaused ? 'Paused' : 'Active'}
-                        </Badge>
+                        {holding.asset.isPaused ? (
+                          <Badge variant="destructive" className="flex items-center gap-1">
+                            <PauseCircle className="h-3 w-3" aria-hidden="true" />
+                            Paused
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">Active</Badge>
+                        )}
+                        {holding.asset.isFrozen && (
+                          <Badge variant="destructive" className="flex items-center gap-1">
+                            <Snowflake className="h-3 w-3" aria-hidden="true" />
+                            Frozen
+                          </Badge>
+                        )}
                       </div>
+                      {(holding.asset.isPaused || holding.asset.isFrozen) && (
+                        <p className="text-xs text-red-600 dark:text-red-400 mt-2 flex items-center gap-1">
+                          <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                          {getTokenRestrictionStatus(holding.asset).restrictionReason}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </CardContent>
@@ -481,11 +641,26 @@ export default function OwnershipDashboard({
                     const addr = holding.asset.tokenAddress;
                     const isClaimInProgress = isClaiming === addr;
                     const errorMsg = claimError[addr];
+                    const status = getTokenRestrictionStatus(holding.asset);
                     return (
                       <div key={index}>
                         <div className="flex justify-between items-center p-3 border dark:border-gray-700 rounded">
                           <div>
-                            <p className="font-medium">{holding.asset.name}</p>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="font-medium">{holding.asset.name}</p>
+                              {status.isPaused && (
+                                <Badge variant="destructive" className="flex items-center gap-1">
+                                  <PauseCircle className="h-3 w-3" aria-hidden="true" />
+                                  Paused
+                                </Badge>
+                              )}
+                              {status.isFrozen && (
+                                <Badge variant="destructive" className="flex items-center gap-1">
+                                  <Snowflake className="h-3 w-3" aria-hidden="true" />
+                                  Frozen
+                                </Badge>
+                              )}
+                            </div>
                             <p className="text-sm text-gray-600 dark:text-gray-300">{holding.asset.symbol}</p>
                           </div>
                           <div className="text-right">
@@ -495,7 +670,8 @@ export default function OwnershipDashboard({
                             <Button
                               size="sm"
                               variant="outline"
-                              disabled={isClaimInProgress}
+                              disabled={isClaimInProgress || status.isRestricted}
+                              title={status.restrictionReason ?? undefined}
                               onClick={() => handleClaimDividends(addr, 0)}
                             >
                               {isClaimInProgress ? (
@@ -553,7 +729,28 @@ export default function OwnershipDashboard({
                     role="form"
                     aria-label={`Lock tokens for ${selectedAsset.asset.name}`}
                   >
-                    <h4 className="font-medium">Lock Tokens for {selectedAsset.asset.name}</h4>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="font-medium">Lock Tokens for {selectedAsset.asset.name}</h4>
+                      {selectedAssetStatus?.isPaused && (
+                        <Badge variant="destructive" className="flex items-center gap-1">
+                          <PauseCircle className="h-3 w-3" aria-hidden="true" />
+                          Paused
+                        </Badge>
+                      )}
+                      {selectedAssetStatus?.isFrozen && (
+                        <Badge variant="destructive" className="flex items-center gap-1">
+                          <Snowflake className="h-3 w-3" aria-hidden="true" />
+                          Frozen
+                        </Badge>
+                      )}
+                    </div>
+
+                    {selectedAssetStatus?.isRestricted && (
+                      <Alert variant="destructive">
+                        <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+                        <AlertDescription>{selectedAssetStatus.restrictionReason}</AlertDescription>
+                      </Alert>
+                    )}
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div>
@@ -562,12 +759,13 @@ export default function OwnershipDashboard({
                           id="lock-amount"
                           type="number"
                           value={lockAmount}
+                          disabled={selectedAssetStatus?.isRestricted}
                           onChange={(e) => {
                             setLockAmount(e.target.value);
                             if (lockError) setLockError(null);
                           }}
                           placeholder="Amount to lock"
-                          className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                          className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none disabled:opacity-50"
                           aria-required="true"
                         />
                       </div>
@@ -577,17 +775,27 @@ export default function OwnershipDashboard({
                           id="lock-period"
                           type="number"
                           value={lockPeriod}
+                          disabled={selectedAssetStatus?.isRestricted}
                           onChange={(e) => {
                             setLockPeriod(e.target.value);
                             if (lockError) setLockError(null);
                           }}
                           placeholder="Lock period"
-                          className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                          className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none disabled:opacity-50"
                           aria-required="true"
                         />
                       </div>
                       <div className="flex items-end">
-                        <Button onClick={handleLockTokens} disabled={isLocking || !lockAmount || !lockPeriod}>
+                        <Button
+                          onClick={handleLockTokens}
+                          disabled={
+                            isLocking ||
+                            !lockAmount ||
+                            !lockPeriod ||
+                            Boolean(selectedAssetStatus?.isRestricted)
+                          }
+                          title={selectedAssetStatus?.restrictionReason ?? undefined}
+                        >
                           {isLocking ? (
                             <>
                               <Loader2 className="h-4 w-4 mr-1 animate-spin" />
@@ -620,11 +828,26 @@ export default function OwnershipDashboard({
                     const addr = holding.asset.tokenAddress;
                     const isUnlockInProgress = isUnlocking === addr;
                     const errorMsg = unlockError[addr];
+                    const status = getTokenRestrictionStatus(holding.asset);
                     return (
                       <div key={index}>
                         <div className="flex justify-between items-center p-3 border dark:border-gray-700 rounded">
                           <div>
-                            <p className="font-medium">{holding.asset.name}</p>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="font-medium">{holding.asset.name}</p>
+                              {status.isPaused && (
+                                <Badge variant="destructive" className="flex items-center gap-1">
+                                  <PauseCircle className="h-3 w-3" aria-hidden="true" />
+                                  Paused
+                                </Badge>
+                              )}
+                              {status.isFrozen && (
+                                <Badge variant="destructive" className="flex items-center gap-1">
+                                  <Snowflake className="h-3 w-3" aria-hidden="true" />
+                                  Frozen
+                                </Badge>
+                              )}
+                            </div>
                             <p className="text-sm text-gray-600">
                               Locked: {holding.balance.lockedAmount} | Voting: {holding.balance.votingPower}
                             </p>
@@ -634,7 +857,8 @@ export default function OwnershipDashboard({
                               <Button
                                 size="sm"
                                 variant="outline"
-                                disabled={isUnlockInProgress}
+                                disabled={isUnlockInProgress || status.isRestricted}
+                                title={status.restrictionReason ?? undefined}
                                 onClick={() =>
                                   handleUnlockTokens(addr, holding.balance.lockedAmount)
                                 }
