@@ -98,6 +98,35 @@ export {
   type ErrorInfo,
 } from './errors';
 
+// ─── Configurable Fee Strategy & Safe Protocol Bounds ────────────────────────
+import {
+  DEFAULT_FEE_STRATEGY,
+  DEFAULT_MAX_FEE_STROOPS,
+  FeeStrategyError,
+  STELLAR_MAX_PROTOCOL_FEE_STROOPS,
+  STELLAR_MIN_BASE_FEE_STROOPS,
+  resolveTransactionFee,
+  validateFeeStrategy,
+  type FeeStrategyConfig,
+  type FeeStrategyContext,
+  type FeeStrategyMode,
+  type ResolvedFeeResult,
+} from './feeStrategy';
+
+export {
+  DEFAULT_FEE_STRATEGY,
+  DEFAULT_MAX_FEE_STROOPS,
+  FeeStrategyError,
+  STELLAR_MAX_PROTOCOL_FEE_STROOPS,
+  STELLAR_MIN_BASE_FEE_STROOPS,
+  resolveTransactionFee,
+  validateFeeStrategy,
+  type FeeStrategyConfig,
+  type FeeStrategyContext,
+  type FeeStrategyMode,
+  type ResolvedFeeResult,
+} from './feeStrategy';
+
 // ─── BatchTransactionBuilder ──────────────────────────────────────────────────
 
 /**
@@ -142,13 +171,45 @@ export class BatchTransactionBuilder {
   private readonly serverUrl: string;
   private readonly networkPassphrase: string;
   private readonly logger: Logger;
+  private feeStrategy?: FeeStrategyConfig;
 
-  constructor(serverUrl: string, networkPassphrase: string) {
+  constructor(serverUrl: string, networkPassphrase: string, feeStrategy?: FeeStrategyConfig) {
     validateServerUrl(serverUrl, 'serverUrl');
     validateNonEmptyString(networkPassphrase, 'networkPassphrase');
     this.serverUrl = serverUrl;
     this.networkPassphrase = networkPassphrase;
     this.logger = createLogger('BatchTransactionBuilder');
+    if (feeStrategy !== undefined) {
+      this.feeStrategy = validateFeeStrategy(feeStrategy);
+    }
+  }
+
+  /**
+   * Configure or replace the fee strategy for this batch builder.
+   * Validation runs before mutation so an invalid strategy never alters state.
+   */
+  setFeeStrategy(strategy: FeeStrategyConfig): this {
+    this.feeStrategy = validateFeeStrategy(strategy);
+    return this;
+  }
+
+  /** Return a copy of the configured fee strategy, if any. */
+  getFeeStrategy(): FeeStrategyConfig | undefined {
+    return this.feeStrategy ? { ...this.feeStrategy } : undefined;
+  }
+
+  /**
+   * Resolve the batch transaction fee using the configured fee strategy
+   * (or {@link DEFAULT_FEE_STRATEGY} when none is set) within safe protocol bounds.
+   */
+  resolveFee(overrideFeeStroops?: number): ResolvedFeeResult {
+    const strategy = this.feeStrategy ?? DEFAULT_FEE_STRATEGY;
+    const estimatedFeeStroops = parseInt(this.estimateGas(), 10);
+    return resolveTransactionFee(strategy, {
+      operationCount: Math.max(1, this.operations.length),
+      estimatedFeeStroops,
+      overrideFeeStroops,
+    });
   }
 
   // ─── add ───────────────────────────────────────────────────────────────────
@@ -259,7 +320,9 @@ export class BatchTransactionBuilder {
     }
 
     const estimatedFee = parseInt(this.estimateGas(), 10);
-    const fee = txOptions.fee ?? estimatedFee;
+    const fee = this.feeStrategy
+      ? this.resolveFee(txOptions.fee).feeStroops
+      : (txOptions.fee ?? estimatedFee);
 
     this.logger.info('Submitting batch transaction', {
       source: source.toString(),
@@ -362,10 +425,14 @@ export class StellarRWASDK {
   /** Active retry policy for transient network failures (Issue #191). */
   public retryConfig: RetryConfig;
   private _retryListener?: RetryEventListener;
+  private _feeStrategy: FeeStrategyConfig;
 
-  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
+  constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig>; feeStrategy?: FeeStrategyConfig }) {
     validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
     validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    this._feeStrategy = config.feeStrategy
+      ? validateFeeStrategy(config.feeStrategy)
+      : { ...DEFAULT_FEE_STRATEGY };
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
@@ -438,10 +505,34 @@ export class StellarRWASDK {
    * const result = await batch.submit(signerAddress);
    * ```
    */
-  createBatch(): BatchTransactionBuilder {
+  /**
+   * Return a copy of the active transaction fee strategy.
+   */
+  getFeeStrategy(): FeeStrategyConfig {
+    return { ...this._feeStrategy };
+  }
+
+  /**
+   * Update the SDK's transaction fee strategy.
+   * Validation runs before mutation so failed updates leave existing state unchanged.
+   */
+  setFeeStrategy(strategy: FeeStrategyConfig): void {
+    this._feeStrategy = validateFeeStrategy(strategy);
+  }
+
+  /**
+   * Resolve a transaction fee in stroops using the SDK's active fee strategy
+   * and safe protocol bounds.
+   */
+  resolveTransactionFee(context: FeeStrategyContext): ResolvedFeeResult {
+    return resolveTransactionFee(this._feeStrategy, context);
+  }
+
+  createBatch(feeStrategy?: FeeStrategyConfig): BatchTransactionBuilder {
     return new BatchTransactionBuilder(
       this.config.stellar.serverUrl,
       this.config.stellar.passphrase,
+      feeStrategy ?? this._feeStrategy,
     );
   }
 
