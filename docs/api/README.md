@@ -18,5 +18,7 @@ This directory contains contract and SDK API reference documentation for the Ste
 - [SDK: DividendClient](./sdk-dividend-client.md)
 - [SDK: MarketClient](./sdk-market-client.md)
 - [SDK: CustodyClient](./sdk-custody-client.md)
+- [SDK: Typed invocation results](./sdk-invocation-results.md)
+- [SDK: Exact decimal parsing](./sdk-exact-decimals.md)
 
 

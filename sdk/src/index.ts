@@ -24,6 +24,9 @@ import {
   STELLAR_NETWORKS,
 } from './constants';
 import { createLogger, Logger } from './logger';
+import { exactDecimalToScaled, parseExactDecimal } from './decimal';
+import { toInvocationResult } from './invocationResult';
+import type { InvocationContext, InvocationResult } from './types';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 import {
   GasEstimator,
@@ -97,6 +100,29 @@ export {
   SUGGESTED_ACTIONS,
   type ErrorInfo,
 } from './errors';
+
+// ─── Exact decimal utilities (Issue #388) ────────────────────────────────────
+export {
+  exactDecimalToScaled,
+  formatExactDecimal,
+  parseExactDecimal,
+  parseExactScaledAmount,
+  scaledToExactDecimal,
+  type ExactDecimal,
+  type ParseExactDecimalOptions,
+} from './decimal';
+
+// ─── Typed invocation results (Issue #390) ───────────────────────────────────
+export {
+  contractInvocationFailureFromError,
+  invocationFailure,
+  invocationSuccess,
+  isInvocationFailure,
+  isInvocationSuccess,
+  toInvocationResult,
+  toInvocationResultSync,
+  unwrapInvocationResult,
+} from './invocationResult';
 
 // ─── BatchTransactionBuilder ──────────────────────────────────────────────────
 
@@ -331,6 +357,22 @@ export class BatchTransactionBuilder {
     }
   }
 
+  /**
+   * Non-throwing variant of {@link submit} for contract invocation failures.
+   *
+   * Returns a discriminated {@link InvocationResult}: `success: true` carries
+   * the batch result, `success: false` carries a typed failure with error code,
+   * category and suggestion. The transaction is still atomic — a failure means
+   * no operation was committed — and the per-operation outcomes are available
+   * under `error.details.operationResults`.
+   */
+  async submitResult(
+    source: Address,
+    txOptions: TransactionOptions = {},
+  ): Promise<InvocationResult<BatchTransactionResult>> {
+    return toInvocationResult(() => this.submit(source, txOptions));
+  }
+
   // ─── Utility ───────────────────────────────────────────────────────────────
 
   /** Number of operations currently queued. */
@@ -443,6 +485,20 @@ export class StellarRWASDK {
       this.config.stellar.serverUrl,
       this.config.stellar.passphrase,
     );
+  }
+
+  /**
+   * Execute any SDK/client operation and receive a typed
+   * {@link InvocationResult} instead of an exception. (Issue #390)
+   *
+   * @param operation Contract invocation (or any async work) to run.
+   * @param context   Optional contract/function identifiers attached to a failure.
+   */
+  async withInvocationResult<T>(
+    operation: () => Promise<T> | T,
+    context: InvocationContext = {}
+  ): Promise<InvocationResult<T>> {
+    return toInvocationResult(operation, context);
   }
 
   /**
@@ -931,15 +987,18 @@ export function formatAmount(amount: string | number, decimals: number = DEFAULT
 }
 
 export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS): string {
-  if (!/^\d+(\.\d+)?$/.test(amount)) {
-    throw new InvalidParametersError('Invalid amount format');
+  // Exact string parsing: no `Number`/`parseFloat` conversion. Fractional
+  // digits beyond `decimals` are truncated for backwards compatibility; use
+  // `parseExactScaledAmount` to reject them instead. (Issue #388)
+  const parsed = parseExactDecimal(amount, {
+    name: 'amount format',
+    allowNegative: false,
+    allowPositiveSign: false,
+  });
+  if (parsed.scale > decimals) {
+    return (parsed.unscaled / (10n ** BigInt(parsed.scale - decimals))).toString();
   }
-  const [whole, fractional = ''] = amount.split('.');
-  const wholeBigInt = safeBigInt(whole.replace(/[^0-9-]/g, '') || '0');
-  const fractionalBigInt = fractional ? safeBigInt(fractional.padEnd(decimals, '0').slice(0, decimals)) : 0n;
-  const divisor = safeBigInt(10) ** safeBigInt(decimals);
-  
-  return (wholeBigInt * divisor + fractionalBigInt).toString();
+  return exactDecimalToScaled(parsed, decimals, { name: 'amount' }).toString();
 }
 
 // ─── Default export ───────────────────────────────────────────────────────────

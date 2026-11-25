@@ -68,8 +68,11 @@ export function createLogger(component: string, minLevel?: LogLevel): Logger {
   return new Logger(component, minLevel);
 }
 
+// Use `globalThis` so this module type-checks in Node-only builds (no DOM lib).
+const browserWindow = (globalThis as { window?: { document?: unknown } }).window;
+
 export const isBrowser: boolean =
-  typeof window !== 'undefined' && typeof window.document !== 'undefined';
+  browserWindow !== undefined && browserWindow.document !== undefined;
 
 export const isNode: boolean =
   typeof process !== 'undefined' && process.versions != null && process.versions.node != null;
