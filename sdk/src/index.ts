@@ -1,5 +1,28 @@
 // Main SDK exports
 import { Address } from 'stellar-sdk';
+import {
+  parseJSON,
+  serializeBigInts,
+  stringifyJSON,
+  type BatchTransactionOperation,
+  type BatchTransactionResult,
+  type DeploymentOptions,
+  type Portfolio,
+  type RWASDKConfig,
+  type SimulationEvent,
+  type SimulationOptions,
+  type SimulationResult,
+  type StellarNetwork,
+  type StorageChange,
+  type TransactionOptions,
+} from './types';
+import {
+  assertSupportedStellarNetwork,
+  validateTypedNetworkConfig,
+  type TypedNetworkConfigInput,
+  type TypedNetworkConfigValidationOptions,
+  type TypedNetworkConfigValidationResult,
+} from './core';
 import { AssetFactory } from './assetFactory';
 import { TokenClient } from './tokenClient';
 import { DividendClient } from './dividendClient';
@@ -14,8 +37,11 @@ import {
   ContractError,
   TransactionError,
   HorizonError,
+  defaultRetryConfig,
   parseHorizonError,
   describeHorizonError,
+  type RetryConfig,
+  type RetryEventListener,
 } from './errors';
 import {
   DEFAULT_DECIMALS,
@@ -364,8 +390,10 @@ export class StellarRWASDK {
   private _retryListener?: RetryEventListener;
 
   constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
-    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    // Validate the entire configuration before allocating anything. A failure
+    // here aborts construction, so no partially configured SDK escapes (#389).
+    this.validateConfig(config);
+
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
@@ -453,9 +481,27 @@ export class StellarRWASDK {
   }
 
   /**
-   * Update configuration
+   * Update configuration.
+   *
+   * The merged configuration is validated with the same typed network validator
+   * used at construction time *before* any state is changed. If validation
+   * fails, the existing config and all existing client instances remain intact.
    */
   updateConfig(newConfig: Partial<RWASDKConfig>): void {
+    if (newConfig == null || typeof newConfig !== 'object') {
+      throw new InvalidParametersError('New SDK configuration is required');
+    }
+
+    const candidate: RWASDKConfig = {
+      ...this.config,
+      ...newConfig,
+      stellar: { ...this.config.stellar, ...(newConfig.stellar ?? {}) },
+      contracts: { ...this.config.contracts, ...(newConfig.contracts ?? {}) },
+    };
+
+    // Validate first so a rejected update leaves no partial state behind (#389).
+    this.validateConfig(candidate);
+
     if (newConfig.stellar?.serverUrl) {
       validateServerUrl(newConfig.stellar.serverUrl, 'config.stellar.serverUrl');
     }
@@ -478,7 +524,7 @@ export class StellarRWASDK {
       validateAddress(newConfig.contracts.custodyValidator, 'config.contracts.custodyValidator');
     }
     this.logger.info('Updating SDK configuration', { newConfig: Object.keys(newConfig) });
-    this.config = { ...this.config, ...newConfig };
+    this.config = candidate;
     
     // Reinitialize clients with new config
     this.assetFactory = new AssetFactory(
@@ -508,7 +554,7 @@ export class StellarRWASDK {
     protocolVersion: number;
   }> {
     try {
-      const server = new (await import('stellar-sdk')).Server(this.config.stellar.serverUrl);
+      const server = new (await import('stellar-sdk') as any).Server(this.config.stellar.serverUrl);
       const network = await server.network();
       
       return {
@@ -524,30 +570,34 @@ export class StellarRWASDK {
   }
 
   /**
-   * Validate configuration
+   * Validate a configuration with the typed network validator before any
+   * client is created (issue #389).
+   *
+   * Called by the constructor and by {@link updateConfig} with the candidate
+   * configuration, so a rejection never leaves partial state behind. Can also
+   * be called explicitly by consumers to pre-flight a configuration object.
+   *
+   * @param config - Configuration to check; defaults to the active config.
+   * @throws {InvalidParametersError} if any network or contract field is
+   *   missing or malformed.
    */
-  validateConfig(): void {
-    if (!this.config.stellar) {
+  validateConfig(config: RWASDKConfig = this.config): void {
+    if (config == null || typeof config !== 'object') {
+      throw new InvalidParametersError('SDK configuration is required');
+    }
+    if (!config.stellar) {
       throw new InvalidParametersError('Stellar configuration is required');
     }
 
-    if (!this.config.stellar.network) {
-      throw new InvalidParametersError('Stellar network is required');
-    }
+    // Typed validation of the network section (network name, HTTP(S) URLs,
+    // passphrase and timeout bounds) replaces the previous presence-only checks.
+    validateTypedNetworkConfig(config.stellar);
 
-    if (!this.config.stellar.serverUrl) {
-      throw new InvalidParametersError('Stellar server URL is required');
-    }
-
-    if (!this.config.stellar.passphrase) {
-      throw new InvalidParametersError('Stellar passphrase is required');
-    }
-
-    if (!this.config.contracts) {
+    if (!config.contracts) {
       throw new InvalidParametersError('Contracts configuration is required');
     }
 
-    const requiredContracts = [
+    const requiredContracts: Array<keyof RWASDKConfig['contracts']> = [
       'assetFactory',
       'complianceRegistry',
       'dividendDistributor',
@@ -556,7 +606,7 @@ export class StellarRWASDK {
     ];
 
     for (const contract of requiredContracts) {
-      if (!this.config.contracts[contract]) {
+      if (!config.contracts[contract]) {
         throw new InvalidParametersError(`${contract} contract address is required`);
       }
     }
@@ -758,7 +808,7 @@ export class StellarRWASDK {
     }
 
     try {
-      const server = new (await import('stellar-sdk')).Server(this.config.stellar.serverUrl);
+      const server = new (await import('stellar-sdk') as any).Server(this.config.stellar.serverUrl);
       const simulation = await server.simulateTransaction(tx);
 
       // Extract events from simulation
@@ -860,8 +910,16 @@ export class StellarRWASDK {
 // ─── Factory Function ─────────────────────────────────────────────────────────
 
 // Factory function to create SDK instance with common configurations
+/**
+ * Create an SDK instance pre-configured for a supported Stellar network.
+ *
+ * The network name and derived network settings are type-validated before any
+ * client is constructed (issue #389). An unsupported network or an invalid URL
+ * override throws {@link InvalidParametersError} rather than a `TypeError` from
+ * reading a missing network default.
+ */
 export function createStellarRWASDK(
-  network: 'testnet' | 'mainnet' | 'futurenet' | 'standalone',
+  network: StellarNetwork,
   contracts: {
     assetFactory: Address;
     complianceRegistry: Address;
@@ -876,15 +934,22 @@ export function createStellarRWASDK(
     defaultTimeout?: number;
   }
 ): StellarRWASDK {
+  assertSupportedStellarNetwork(network);
   const config = STELLAR_NETWORKS[network];
+
+  const stellar = {
+    network,
+    serverUrl: options?.serverUrl || config.serverUrl,
+    horizonUrl: options?.horizonUrl || config.horizonUrl,
+    passphrase: config.passphrase
+  };
+
+  // The factory derives the passphrase from the network table, so a mismatch
+  // here can only mean a misconfigured factory call. Fail before client setup.
+  validateTypedNetworkConfig(stellar, { requireMatchingPassphrase: true });
   
   const sdkConfig: RWASDKConfig = {
-    stellar: {
-      network,
-      serverUrl: options?.serverUrl || config.serverUrl,
-      horizonUrl: options?.horizonUrl || config.horizonUrl,
-      passphrase: config.passphrase
-    },
+    stellar,
     contracts,
     defaultFeeRate: options?.defaultFeeRate || DEFAULT_FEE_RATE,
     defaultTimeout: options?.defaultTimeout || DEFAULT_TIMEOUT_SECONDS
@@ -941,6 +1006,20 @@ export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS)
   
   return (wholeBigInt * divisor + fractionalBigInt).toString();
 }
+
+// ─── Typed network configuration validation (#389) ────────────────────────────
+export {
+  validateTypedNetworkConfig,
+  isSupportedStellarNetwork,
+  assertSupportedStellarNetwork,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MIN_REQUEST_TIMEOUT_MS,
+  MAX_REQUEST_TIMEOUT_MS,
+  type TypedNetworkConfigInput,
+  type TypedNetworkConfigValidationOptions,
+  type TypedNetworkConfigValidationResult,
+} from './core';
+export { SUPPORTED_STELLAR_NETWORKS } from './constants';
 
 // ─── Default export ───────────────────────────────────────────────────────────
 export default StellarRWASDK;
