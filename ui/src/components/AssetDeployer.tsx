@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Loader2, Building2, Package, FileText, DollarSign, Home, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
+import { Loader2, Building2, Package, FileText, DollarSign, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
 import { AssetType, DeploymentOptions } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
 
@@ -57,6 +57,10 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
   const [deployError, setDeployError] = useState<string | null>(null);
   const [isNetworkError, setIsNetworkError] = useState(false);
   const [lastDeploymentOptions, setLastDeploymentOptions] = useState<DeploymentOptions | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  /** Returns a stable ID for a field's error element used in aria-describedby. */
+  const errorId = (field: string) => `asset-deployer-error-${field}`;
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
@@ -106,6 +110,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     // Clear previous error state
     setDeployError(null);
     setIsNetworkError(false);
+    setStatusMessage(null);
 
     if (!validateForm()) {
       toast.warning('Form Validation', 'Please fix the highlighted fields before submitting.');
@@ -134,6 +139,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
         'Token Deployed Successfully',
         `Token ${formData.symbol} deployed at ${result.tokenAddress.slice(0, 8)}...`
       );
+      setStatusMessage(`Token ${formData.symbol} deployed successfully at ${result.tokenAddress}.`);
 
       // Reset form on success
       setFormData({
@@ -157,6 +163,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
       }
 
       setDeployError(message);
+      setStatusMessage(`Deployment failed: ${message}`);
       toast.error(title, message, () => executeDeploy());
     } finally {
       setIsSubmitting(false);
