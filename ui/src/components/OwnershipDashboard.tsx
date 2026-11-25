@@ -93,6 +93,7 @@ export default function OwnershipDashboard({
   const totalVotingPower = parseFloat(portfolio.votingPower);
 
   const handleLockTokens = async () => {
+    if (isLocking) return;
     if (!selectedAsset || !lockAmount || !lockPeriod) return;
 
     // Inline validation
@@ -142,6 +143,7 @@ export default function OwnershipDashboard({
   };
 
   const handleUnlockTokens = async (assetAddress: string, amount: string) => {
+    if (isUnlocking === assetAddress) return;
     setIsUnlocking(assetAddress);
     setUnlockError((prev) => ({ ...prev, [assetAddress]: '' }));
     setIsNetworkError(false);
@@ -173,6 +175,7 @@ export default function OwnershipDashboard({
   };
 
   const handleClaimDividends = async (assetAddress: string, distributionId: number) => {
+    if (isClaiming === assetAddress) return;
     setIsClaiming(assetAddress);
     setClaimError((prev) => ({ ...prev, [assetAddress]: '' }));
     setIsNetworkError(false);

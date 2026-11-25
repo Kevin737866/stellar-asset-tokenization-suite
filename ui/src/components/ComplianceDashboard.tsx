@@ -102,6 +102,7 @@ export default function ComplianceDashboard({ sdk, userAddress }: ComplianceDash
   }, [fetchData]);
 
   const handleAdminAction = async (action: string, reason?: string) => {
+    if (adminActionLoading) return;
     const target = adminTargetAddress || userAddress;
     if (!target) {
       toast.warning('Missing Address', 'Please enter a target address.');

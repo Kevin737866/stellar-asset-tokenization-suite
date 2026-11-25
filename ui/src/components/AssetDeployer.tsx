@@ -57,6 +57,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
   const [deployError, setDeployError] = useState<string | null>(null);
   const [isNetworkError, setIsNetworkError] = useState(false);
   const [lastDeploymentOptions, setLastDeploymentOptions] = useState<DeploymentOptions | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
@@ -103,6 +104,8 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
   }, [formData]);
 
   const executeDeploy = useCallback(async () => {
+    if (isSubmitting || isLoading) return;
+
     // Clear previous error state
     setDeployError(null);
     setIsNetworkError(false);
@@ -161,7 +164,7 @@ export default function AssetDeployer({ onDeploy, isLoading = false }: AssetDepl
     } finally {
       setIsSubmitting(false);
     }
-  }, [formData, validateForm, onDeploy, toast, translateError]);
+  }, [formData, validateForm, onDeploy, toast, translateError, isSubmitting, isLoading]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

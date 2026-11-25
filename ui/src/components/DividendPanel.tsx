@@ -118,6 +118,7 @@ export default function DividendPanel({
   };
 
   const handleClaim = async (distributionId: number) => {
+    if (claimLoading[distributionId]) return;
     setClaimLoading(prev => ({ ...prev, [distributionId]: true }));
     setClaimError(null);
     setClaimSuccess(null);
@@ -135,7 +136,10 @@ export default function DividendPanel({
     }
   };
 
+  const [isClaimingAll, setIsClaimingAll] = useState(false);
+
   const handleClaimAll = async () => {
+    if (isClaimingAll || isLoading) return;
     setClaimError(null);
     setClaimSuccess(null);
 
@@ -144,6 +148,7 @@ export default function DividendPanel({
       return;
     }
 
+    setIsClaimingAll(true);
     try {
       const result = await onClaimAll();
       setClaimSuccess(`Successfully claimed ${result.amounts.length} distributions!`);
@@ -151,12 +156,17 @@ export default function DividendPanel({
     } catch (err: any) {
       setClaimError(err.message || 'Failed to claim dividends');
       setTimeout(() => setClaimError(null), 5000);
+    } finally {
+      setIsClaimingAll(false);
     }
   };
 
-  const handleCreateDistribution = async () => {
-    if (!onCreateDistribution) return;
+  const [isCreating, setIsCreating] = useState(false);
 
+  const handleCreateDistribution = async () => {
+    if (isCreating || !onCreateDistribution) return;
+
+    setIsCreating(true);
     try {
       const deadline = new Date(Date.now() + parseInt(createForm.deadlineDays) * 86400000);
       await onCreateDistribution({
@@ -175,6 +185,8 @@ export default function DividendPanel({
       setShowCreateForm(false);
     } catch (err: any) {
       setClaimError(err.message || 'Failed to create distribution');
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -300,14 +312,15 @@ export default function DividendPanel({
         <div className="flex items-center gap-4">
           <Button
             onClick={handleClaimAll}
-            disabled={isLoading || activeDistributions.length === 0}
+            disabled={isLoading || isClaimingAll || activeDistributions.length === 0}
             aria-label={
               activeDistributions.length === 0
                 ? 'No active distributions to claim'
                 : `Claim all ${activeDistributions.length} active distributions`
             }
+            aria-busy={isClaimingAll}
           >
-            {isLoading ? (
+            {isLoading || isClaimingAll ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
                 Processing...
@@ -415,10 +428,18 @@ export default function DividendPanel({
             <div className="flex justify-end mt-4">
               <Button
                 onClick={handleCreateDistribution}
-                disabled={!createForm.tokenAddress || !createForm.amount}
+                disabled={isCreating || !createForm.tokenAddress || !createForm.amount}
                 aria-label="Submit new distribution"
+                aria-busy={isCreating}
               >
-                Create Distribution
+                {isCreating ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                    Creating...
+                  </>
+                ) : (
+                  'Create Distribution'
+                )}
               </Button>
             </div>
           </CardContent>
