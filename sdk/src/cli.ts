@@ -7,9 +7,116 @@ import {
   Horizon
 } from 'stellar-sdk';
 import * as readline from 'readline';
+import * as fs from 'fs';
+import * as path from 'path';
 import { STELLAR_NETWORKS } from './constants';
 import { CustodyClient } from './custody';
 import { runTypeGenerator } from './typeGenerator';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Network profile loading  (issue #410)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The subset of a JSON network-profile file that the CLI reads.
+ *
+ * A profile file may contain any additional fields (contracts, deployment,
+ * accounts, …); only the keys below are consumed by the CLI. All fields are
+ * optional — missing keys are silently ignored and built-in defaults apply.
+ *
+ * Example (`config/testnet.json`):
+ * ```json
+ * {
+ *   "stellar": {
+ *     "network": "testnet",
+ *     "horizonUrl": "https://horizon-testnet.stellar.org"
+ *   },
+ *   "fee": { "baseFee": 100 }
+ * }
+ * ```
+ */
+export interface NetworkProfile {
+  stellar?: {
+    /** One of the four named networks recognised by STELLAR_NETWORKS. */
+    network?: string;
+    /** Horizon base URL — overrides the network default. */
+    horizonUrl?: string;
+  };
+  fee?: {
+    /** Base transaction fee in stroops (default 100). */
+    baseFee?: number;
+  };
+}
+
+/**
+ * Load and parse a JSON network-profile file.
+ *
+ * The path is resolved relative to the current working directory when it is
+ * not absolute.  Only the keys defined in {@link NetworkProfile} are used;
+ * extra fields are ignored.
+ *
+ * @param profilePath - File-system path to the JSON profile.
+ * @returns The parsed profile object.
+ * @throws {Error} with a descriptive message when the file cannot be read or
+ *   is not valid JSON.
+ */
+export function loadNetworkProfile(profilePath: string): NetworkProfile {
+  const resolved = path.isAbsolute(profilePath)
+    ? profilePath
+    : path.resolve(process.cwd(), profilePath);
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(resolved, 'utf8');
+  } catch (err: any) {
+    throw new Error(
+      `Cannot read network profile "${resolved}": ${err.message ?? err}`
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    throw new Error(
+      `Network profile "${resolved}" is not valid JSON: ${err.message ?? err}`
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `Network profile "${resolved}" must be a JSON object, got ${Array.isArray(parsed) ? 'array' : typeof parsed}`
+    );
+  }
+
+  return parsed as NetworkProfile;
+}
+
+/**
+ * Merge a loaded {@link NetworkProfile} into a flat options map.
+ *
+ * Profile values fill in keys that are **absent** from `options`; they never
+ * overwrite a value the caller supplied explicitly.  This matches the
+ * principle of least surprise: `--network mainnet` always wins over whatever
+ * the profile says.
+ *
+ * @param options - Parsed CLI flags (mutated in place).
+ * @param profile - Profile loaded via {@link loadNetworkProfile}.
+ */
+export function applyNetworkProfile(
+  options: Record<string, string>,
+  profile: NetworkProfile
+): void {
+  if (profile.stellar?.network && !options['network']) {
+    options['network'] = profile.stellar.network;
+  }
+  if (profile.stellar?.horizonUrl && !options['horizon-url']) {
+    options['horizon-url'] = profile.stellar.horizonUrl;
+  }
+  if (profile.fee?.baseFee != null && !options['fee-base']) {
+    options['fee-base'] = String(profile.fee.baseFee);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Asset utilities
@@ -59,6 +166,8 @@ Commands:
 
 Global Options:
   --interactive, -i   Launch guided interactive prompt mode
+  --profile <path>    JSON network-profile file (see config/testnet.json for the schema).
+                      Sets --network and --horizon-url when not supplied explicitly.
   --help,       -h    Show this help message
 
 Run "node dist/cli.js <command> --help" for command-specific options.
@@ -183,6 +292,7 @@ Options:
   --secret <secret>      Secret key of the depositor [required]
   --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
   --horizon-url <url>    Horizon server URL (optional, overrides default for network)
+  --profile <path>       JSON network-profile file (sets --network / --horizon-url when not given)
   --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
   --help, -h             Show this help message
 `);
@@ -208,6 +318,7 @@ Options:
   --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
   --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
   --horizon-url <url>           Horizon server URL (optional, overrides default for network)
+  --profile <path>              JSON network-profile file (sets --network / --horizon-url when not given)
   --force                       Skip collateralization check and liquidate unconditionally
   --help, -h                    Show this help message
 `);
@@ -269,7 +380,9 @@ export async function prompt(
       rl.question(displayQuestion, (answer) => {
         const value = answer.trim() === '' ? (defaultValue ?? '') : answer.trim();
 
-        if (value === '') {
+        // When defaultValue is explicitly '' the field is optional — allow empty.
+        const isOptional = defaultValue === '';
+        if (value === '' && !isOptional) {
           console.log('  ⚠  This field is required.');
           ask();
           return;
@@ -353,6 +466,21 @@ export const validators = {
     return /^[0-9a-fA-F]{64}$/.test(value)
       ? null
       : 'Must be a 64-character hexadecimal string (32 bytes)';
+  },
+
+  /**
+   * Validate a network-profile file path: the file must exist and be readable.
+   * An empty string is accepted (means "no profile").
+   */
+  profilePath: (value: string): string | null => {
+    if (value === '') return null;
+    const resolved = path.isAbsolute(value)
+      ? value
+      : path.resolve(process.cwd(), value);
+    if (!fs.existsSync(resolved)) {
+      return `Profile file not found: "${resolved}"`;
+    }
+    return null;
   },
 };
 
@@ -485,6 +613,29 @@ export async function promptLiquidate(
 // Command selection prompt
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Optionally prompt for a network-profile file path in interactive mode.
+ *
+ * The user may press Enter to skip; in that case an empty string is returned
+ * and no profile is loaded.  When a path is provided it is validated with
+ * {@link validators.profilePath} before being accepted.
+ */
+export async function promptNetworkProfile(
+  rl: readline.Interface
+): Promise<string> {
+  return prompt(rl, 'Network-profile file (press Enter to skip)', {
+    description:
+      'Optional path to a JSON network-profile file (e.g. config/testnet.json). ' +
+      'Sets --network and --horizon-url when you do not want to type them manually.',
+    defaultValue: '',
+    validate: (value) => {
+      // Empty means "skip" — always valid.
+      if (value === '') return null;
+      return validators.profilePath(value);
+    },
+  });
+}
+
 export async function promptCommandSelection(
   rl: readline.Interface
 ): Promise<string> {
@@ -584,6 +735,13 @@ async function runCreatePool(args: string[]): Promise<void> {
   }
 
   const options = parseArgs(args);
+
+  // Apply network profile before validation so explicit flags still win.
+  if (options['profile']) {
+    const profile = loadNetworkProfile(options['profile']);
+    applyNetworkProfile(options, profile);
+  }
+
   const required = ['asset-a', 'asset-b', 'amount-a', 'amount-b', 'secret'];
   for (const req of required) {
     if (!options[req]) {
@@ -739,6 +897,13 @@ async function runLiquidate(args: string[]): Promise<void> {
   }
 
   const options = parseArgs(args);
+
+  // Apply network profile before validation so explicit flags still win.
+  if (options['profile']) {
+    const profile = loadNetworkProfile(options['profile']);
+    applyNetworkProfile(options, profile);
+  }
+
   const required = ['asset-id', 'custody-validator', 'secret', 'evidence-hash'];
   for (const req of required) {
     if (!options[req]) {
