@@ -9,6 +9,7 @@ import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
 import {
   InvalidParametersError,
+  UnauthorizedError,
   RWASDKError,
   NetworkError,
   ContractError,
@@ -854,6 +855,258 @@ export class StellarRWASDK {
     const { SorobanRpc } = await import('stellar-sdk');
     const server = options.server ?? new SorobanRpc.Server(this.config.stellar.serverUrl);
     return estimateGas(operation, { ...params, ...options, server });
+  }
+
+  /**
+   * Opt-in fee-bump transaction submission helper.
+   *
+   * When `options.enabled` is `true`, wraps `innerTransaction` in a Stellar
+   * fee-bump transaction paid by `options.feeSource`, validates authorization,
+   * signs the outer envelope with `options.signer`, and submits it.
+   *
+   * When `options` is omitted or `options.enabled` is not `true`, submits
+   * `innerTransaction` directly without wrapping.
+   *
+   * @param innerTransaction - Prepared/signed inner Stellar transaction.
+   * @param options          - Optional opt-in fee-bump configuration.
+   * @returns Submission result including hash and whether fee-bump was applied.
+   * @throws {InvalidParametersError} if inputs or fee bounds are invalid.
+   * @throws {UnauthorizedError} if the fee-bump signer or fee source is unauthorized.
+   * @throws {TransactionError} if submission fails or is rejected by the network.
+   */
+  async submitTransactionWithFeeBump(
+    innerTransaction: any,
+    options?: FeeBumpSubmissionOptions,
+  ): Promise<FeeBumpSubmissionResult> {
+    return submitFeeBumpTransaction(innerTransaction, options, {
+      serverUrl: this.config.stellar.serverUrl,
+      networkPassphrase: this.config.stellar.passphrase,
+    });
+  }
+}
+
+// ─── Opt-In Fee-Bump Transaction Submission Helper ────────────────────────────
+
+/**
+ * Signer accepted by {@link submitFeeBumpTransaction}.
+ * Either a callback invoked with the built fee-bump transaction, or a
+ * Stellar Keypair-like object passed to `feeBumpTx.sign(signer)`.
+ */
+export type FeeBumpSigner =
+  | ((feeBumpTx: any) => void | Promise<void>)
+  | {
+      publicKey?: () => string;
+      sign?: (...args: any[]) => any;
+    };
+
+/**
+ * Configuration for opt-in fee-bump transaction submission.
+ */
+export interface FeeBumpSubmissionOptions {
+  /**
+   * Explicit opt-in flag. Must be `true` to wrap and submit as a fee-bump
+   * transaction. When `false` or omitted, the inner transaction is submitted
+   * directly without wrapping.
+   */
+  enabled?: boolean;
+  /** Stellar account address (`G...`) paying the bumped transaction fee. */
+  feeSource?: Address | string;
+  /** Maximum fee in stroops (positive integer or numeric string). */
+  maxFee?: number | string;
+  /** Signer authorizing the fee-bump envelope on behalf of `feeSource`. */
+  signer?: FeeBumpSigner;
+  /**
+   * Optional allowlist of authorized fee-source addresses. When provided,
+   * `feeSource` must match one of the entries or {@link UnauthorizedError} is thrown.
+   */
+  authorizedFeeSources?: Array<Address | string>;
+  /** Optional RPC/Horizon server override. */
+  server?: {
+    sendTransaction?: (tx: any) => Promise<any>;
+    submitTransaction?: (tx: any) => Promise<any>;
+  };
+  /** Optional network passphrase override. */
+  networkPassphrase?: string;
+}
+
+/**
+ * Result returned by {@link submitFeeBumpTransaction}.
+ */
+export interface FeeBumpSubmissionResult {
+  transactionHash: string;
+  success: boolean;
+  feeBumped: boolean;
+  feeSource?: string;
+  maxFee?: string;
+  rawResponse?: any;
+}
+
+function parsePositiveFeeStroops(value: unknown, fieldName: string): bigint {
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new InvalidParametersError(`${fieldName} must be a positive integer in stroops`);
+    }
+    return BigInt(value);
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const parsed = BigInt(value.trim());
+    if (parsed <= 0n) {
+      throw new InvalidParametersError(`${fieldName} must be a positive integer in stroops`);
+    }
+    return parsed;
+  }
+  throw new InvalidParametersError(`${fieldName} must be a positive integer in stroops`);
+}
+
+/**
+ * Submit a Stellar transaction with opt-in fee-bump wrapping.
+ *
+ * - **Opt-in by default**: unless `options?.enabled === true`, submits
+ *   `innerTransaction` directly without modifying or wrapping it.
+ * - **Input validation**: validates `innerTransaction`, `feeSource`, `maxFee`
+ *   (including ensuring `maxFee >= innerTransaction.fee` when present), and
+ *   network passphrase before any network call.
+ * - **Authorization**: requires an explicit `signer` when fee-bump is enabled,
+ *   enforces `authorizedFeeSources` if configured, and verifies
+ *   `signer.publicKey() === feeSource` when `publicKey()` is available.
+ * - **Failure semantics**: never mutates `innerTransaction` or caller state;
+ *   throws {@link InvalidParametersError}, {@link UnauthorizedError}, or
+ *   {@link TransactionError}.
+ */
+export async function submitFeeBumpTransaction(
+  innerTransaction: any,
+  options: FeeBumpSubmissionOptions = {},
+  context: { serverUrl?: string; networkPassphrase?: string } = {},
+): Promise<FeeBumpSubmissionResult> {
+  if (!innerTransaction || typeof innerTransaction !== 'object') {
+    throw new InvalidParametersError('innerTransaction is required and must be a transaction object');
+  }
+
+  const optIn = options?.enabled === true;
+
+  let feeSourceStr: string | undefined;
+  let maxFeeStr: string | undefined;
+  let passphrase: string | undefined;
+
+  if (optIn) {
+    validateAddress(options.feeSource, 'feeBump.feeSource');
+    feeSourceStr = options.feeSource!.toString();
+
+    const maxFeeBigInt = parsePositiveFeeStroops(options.maxFee, 'feeBump.maxFee');
+    if (innerTransaction.fee != null) {
+      const innerFeeRaw = String(innerTransaction.fee).trim();
+      if (/^\d+$/.test(innerFeeRaw) && maxFeeBigInt < BigInt(innerFeeRaw)) {
+        throw new InvalidParametersError(
+          `feeBump.maxFee (${maxFeeBigInt.toString()}) must be greater than or equal to inner transaction fee (${innerFeeRaw})`
+        );
+      }
+    }
+    maxFeeStr = maxFeeBigInt.toString();
+
+    passphrase = options.networkPassphrase ?? context.networkPassphrase;
+    validateNonEmptyString(passphrase, 'networkPassphrase');
+
+    if (options.authorizedFeeSources != null) {
+      const allowed = new Set(options.authorizedFeeSources.map((addr) => addr.toString()));
+      if (!allowed.has(feeSourceStr)) {
+        throw new UnauthorizedError(
+          `Fee source ${feeSourceStr} is not in the authorizedFeeSources allowlist`
+        );
+      }
+    }
+
+    const signer = options.signer;
+    const isFnSigner = typeof signer === 'function';
+    const isObjSigner =
+      signer != null && typeof signer === 'object' && typeof signer.sign === 'function';
+    if (!isFnSigner && !isObjSigner) {
+      throw new UnauthorizedError('Fee-bump submission requires an explicit signer for feeSource');
+    }
+
+    if (isObjSigner && typeof signer.publicKey === 'function') {
+      const signerPubKey = signer.publicKey();
+      if (signerPubKey !== feeSourceStr) {
+        throw new UnauthorizedError(
+          `Fee-bump signer public key (${signerPubKey}) does not match feeSource (${feeSourceStr})`
+        );
+      }
+    }
+  }
+
+  if (!options.server && !context.serverUrl) {
+    throw new InvalidParametersError('Either options.server or serverUrl is required');
+  }
+
+  try {
+    const stellarSdk = await import('stellar-sdk');
+    let txToSubmit = innerTransaction;
+
+    if (optIn) {
+      const buildFeeBump = (stellarSdk.TransactionBuilder as any)?.buildFeeBumpTransaction;
+      if (typeof buildFeeBump !== 'function') {
+        throw new TransactionError('TransactionBuilder.buildFeeBumpTransaction is unavailable');
+      }
+
+      const feeBumpTx = buildFeeBump(
+        feeSourceStr!,
+        maxFeeStr!,
+        innerTransaction,
+        passphrase!,
+      );
+
+      if (typeof options.signer === 'function') {
+        await options.signer(feeBumpTx);
+      } else if (typeof feeBumpTx?.sign === 'function') {
+        feeBumpTx.sign(options.signer);
+      } else {
+        throw new TransactionError('Built fee-bump transaction does not support signing');
+      }
+
+      txToSubmit = feeBumpTx;
+    }
+
+    const server =
+      options.server ?? new (stellarSdk as any).SorobanRpc.Server(context.serverUrl!);
+    const submitFn =
+      typeof server.sendTransaction === 'function'
+        ? (tx: any) => server.sendTransaction!(tx)
+        : typeof server.submitTransaction === 'function'
+          ? (tx: any) => server.submitTransaction!(tx)
+          : null;
+
+    if (!submitFn) {
+      throw new TransactionError('Server does not implement sendTransaction or submitTransaction');
+    }
+
+    const response = await submitFn(txToSubmit);
+    if (response?.status === 'ERROR') {
+      throw new TransactionError(
+        `Transaction rejected by network: ${JSON.stringify(response.errorResult ?? '')}`,
+        response,
+      );
+    }
+
+    const hash: string = response?.hash ?? response?.transactionHash ?? '';
+    return {
+      transactionHash: hash,
+      success: true,
+      feeBumped: optIn,
+      ...(optIn ? { feeSource: feeSourceStr, maxFee: maxFeeStr } : {}),
+      rawResponse: response,
+    };
+  } catch (error: unknown) {
+    if (
+      error instanceof InvalidParametersError ||
+      error instanceof UnauthorizedError ||
+      error instanceof TransactionError
+    ) {
+      throw error;
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new TransactionError(
+      optIn ? `Fee-bump transaction submission failed: ${msg}` : `Transaction submission failed: ${msg}`,
+      error,
+    );
   }
 }
 
