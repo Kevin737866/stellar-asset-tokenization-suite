@@ -945,3 +945,14 @@ export function parseAmount(amount: string, decimals: number = DEFAULT_DECIMALS)
 // ─── Default export ───────────────────────────────────────────────────────────
 export default StellarRWASDK;
 export { MetricsCollector, ConsoleExporter, PrometheusExporter, NoopExporter, createMetricsCollector } from './telemetry';
+export {
+  Logger,
+  createLogger,
+  redactSecrets,
+  redactStringValue,
+  isSecretKey,
+  REDACTED_VALUE,
+  type LogLevel,
+  type LogEntry,
+  type RedactOptions,
+} from './logger';
