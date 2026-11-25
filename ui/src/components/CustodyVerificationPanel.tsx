@@ -211,6 +211,7 @@ export default function CustodyVerificationPanel({
   };
 
   const handleSubmitProof = async () => {
+    if (submitting) return;
     if (!onSubmitProof) return;
     if (!proofForm.proofHash.trim()) {
       setSubmitError('Proof hash is required');
