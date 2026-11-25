@@ -833,6 +833,250 @@ export class StellarRWASDK {
     return simulation;
   }
 
+  // ─── signAndSubmit ──────────────────────────────────────────────────────────
+
+  /**
+   * Sign and submit a pre-built Stellar transaction through the full safe
+   * lifecycle: **validate inputs → simulate → sign → submit → confirm**.
+   *
+   * ## Lifecycle
+   *
+   * 1. **Input validation** — `tx` and `signerSecret` are validated before any
+   *    network call. An {@link InvalidParametersError} is thrown immediately
+   *    when either value is missing or malformed, leaving no partial state.
+   *
+   * 2. **Pre-flight simulation** (skippable via `options.skipSimulation`) —
+   *    the transaction is simulated against the Soroban RPC node. If simulation
+   *    reports a failure the method throws a {@link TransactionError} and the
+   *    transaction is **never submitted**. This prevents fee loss on
+   *    transactions that would be rejected on-chain.
+   *
+   * 3. **Signing** — the transaction envelope is signed with the provided
+   *    Stellar secret key. The key must belong to the account named as the
+   *    transaction source, or be a valid co-signer for multi-sig setups.
+   *    Passing an incorrect key does not throw here; the network rejects the
+   *    transaction at submission with {@link ErrorCode.TX_BAD_AUTH}.
+   *
+   * 4. **Submission** — the signed envelope is forwarded to the configured
+   *    Soroban RPC `sendTransaction` endpoint. Network-level rejections
+   *    (malformed XDR, sequence mismatch, insufficient fee, etc.) surface as a
+   *    {@link TransactionError} whose `details` carry the raw Horizon error
+   *    body. **No partial state is committed** because Stellar transactions are
+   *    atomic — either all operations succeed or none do.
+   *
+   * 5. **Confirmation polling** (skippable via `options.skipConfirmation`) —
+   *    the method polls `getTransaction` until the status transitions to
+   *    `SUCCESS` or `FAILED`, or until `confirmationPolls` attempts are
+   *    exhausted. A `FAILED` on-chain status throws a {@link TransactionError}.
+   *    When polling is skipped, `result.confirmed` is `false`.
+   *
+   * ## Authorization
+   *
+   * The caller is solely responsible for supplying the correct signing key.
+   * The SDK never stores secret keys; `signerSecret` is used once to call
+   * `Keypair.fromSecret(signerSecret).sign(tx)` and is not retained after
+   * the call returns.
+   *
+   * For multi-signature accounts, sign the transaction externally and submit
+   * the already-signed envelope via {@link BatchTransactionBuilder.submit} or
+   * the lower-level Soroban RPC directly.
+   *
+   * ## Error semantics
+   *
+   * | Condition | Error thrown | Side effects |
+   * |---|---|---|
+   * | `tx` is null/undefined | `InvalidParametersError` | none |
+   * | `signerSecret` is missing or not a valid Stellar secret | `InvalidParametersError` | none |
+   * | Simulation fails | `TransactionError` | none — tx not submitted |
+   * | Network rejects submission | `TransactionError` | none — tx not on-chain |
+   * | On-chain status is `FAILED` | `TransactionError` | none — Stellar atomically reverts |
+   *
+   * @param tx           - A pre-built, **unsigned** Stellar transaction object
+   *                       (returned by `TransactionBuilder.build()`). The
+   *                       object must expose `.sign(keypair)` and be acceptable
+   *                       to `SorobanRpc.Server.sendTransaction`.
+   * @param signerSecret - Stellar secret key (starts with `S`, 56 characters)
+   *                       for the account that authorises this transaction.
+   * @param options      - Optional signing and submission settings.
+   *
+   * @returns {@link SignAndSubmitResult} with the hash, fee, confirmation
+   *          status, and simulation result.
+   *
+   * @throws {InvalidParametersError} when `tx` is null/undefined or
+   *         `signerSecret` fails Stellar key validation.
+   * @throws {TransactionError} when simulation reports a failure, the network
+   *         rejects the submission, or the on-chain status is `FAILED`.
+   *
+   * @example
+   * ```ts
+   * // Build the transaction with TransactionBuilder, then sign and submit:
+   * const result = await sdk.signAndSubmit(tx, process.env.SIGNER_SECRET!, {
+   *   skipSimulation: false,
+   *   confirmationPolls: 10,
+   * });
+   * console.log('confirmed tx:', result.transactionHash, result.status);
+   * ```
+   */
+  async signAndSubmit(
+    tx: any,
+    signerSecret: string,
+    options: SigningOptions = {},
+  ): Promise<SignAndSubmitResult> {
+    // ── 1. Input validation ──────────────────────────────────────────────────
+    if (tx == null) {
+      throw new InvalidParametersError('tx is required and must be a pre-built transaction object');
+    }
+    if (typeof tx.sign !== 'function') {
+      throw new InvalidParametersError(
+        'tx must be a Stellar transaction with a .sign(keypair) method',
+      );
+    }
+    if (!signerSecret || typeof signerSecret !== 'string') {
+      throw new InvalidParametersError('signerSecret is required');
+    }
+
+    // Validate and derive keypair early so a bad key fails before any network IO.
+    let keypair: any;
+    try {
+      const { Keypair } = await import('stellar-sdk');
+      keypair = Keypair.fromSecret(signerSecret);
+    } catch {
+      throw new InvalidParametersError(
+        'signerSecret is not a valid Stellar secret key (must start with S, 56 characters)',
+      );
+    }
+
+    if (options.fee != null && (typeof options.fee !== 'number' || options.fee <= 0)) {
+      throw new InvalidParametersError('options.fee must be a positive number');
+    }
+    if (options.timeout != null && (typeof options.timeout !== 'number' || options.timeout <= 0)) {
+      throw new InvalidParametersError('options.timeout must be a positive number');
+    }
+    const confirmationPolls =
+      options.confirmationPolls != null ? options.confirmationPolls : 10;
+    if (typeof confirmationPolls !== 'number' || confirmationPolls < 0) {
+      throw new InvalidParametersError('options.confirmationPolls must be a non-negative integer');
+    }
+
+    this.logger.info('signAndSubmit: starting lifecycle', {
+      skipSimulation: options.skipSimulation ?? false,
+      skipConfirmation: options.skipConfirmation ?? false,
+      confirmationPolls,
+    });
+
+    // ── 2. Pre-flight simulation ─────────────────────────────────────────────
+    let simulation: SimulationResult | null = null;
+    if (!options.skipSimulation) {
+      simulation = await this.simulateTransaction(tx, { feeEstimation: true });
+      if (!simulation.success) {
+        throw new TransactionError(
+          `signAndSubmit: simulation failed — transaction not submitted. ` +
+            `Reason: ${simulation.errorMessage ?? 'unknown'}`,
+          { simulation },
+        );
+      }
+      this.logger.info('signAndSubmit: simulation passed', { gasUsed: simulation.gasUsed });
+    }
+
+    // ── 3. Sign ──────────────────────────────────────────────────────────────
+    try {
+      tx.sign(keypair);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new TransactionError(`signAndSubmit: signing failed — ${msg}`, err);
+    }
+
+    this.logger.info('signAndSubmit: transaction signed', { publicKey: keypair.publicKey() });
+
+    // ── 4. Submit ────────────────────────────────────────────────────────────
+    const { SorobanRpc } = await import('stellar-sdk');
+    const server = new SorobanRpc.Server(this.config.stellar.serverUrl);
+
+    let sendResponse: any;
+    try {
+      sendResponse = await server.sendTransaction(tx);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error('signAndSubmit: submission network error', { error: msg });
+      throw new TransactionError(`signAndSubmit: network error during submission — ${msg}`, err);
+    }
+
+    if (sendResponse.status === 'ERROR') {
+      const errBody = sendResponse.errorResult ?? sendResponse;
+      this.logger.error('signAndSubmit: submission rejected', { errorResult: errBody });
+      throw new TransactionError(
+        `signAndSubmit: transaction rejected by network — ${JSON.stringify(errBody)}`,
+        { errorResult: errBody },
+      );
+    }
+
+    const hash: string = sendResponse.hash;
+    const feePaid: string =
+      options.fee != null
+        ? options.fee.toString()
+        : (simulation?.gasUsed ?? '0');
+
+    this.logger.info('signAndSubmit: submitted successfully', { hash });
+
+    // ── 5. Confirmation polling ──────────────────────────────────────────────
+    if (options.skipConfirmation || confirmationPolls === 0) {
+      return {
+        transactionHash: hash,
+        confirmed: false,
+        simulation,
+        fee: feePaid,
+        status: sendResponse.status ?? 'PENDING',
+      };
+    }
+
+    let confirmed = false;
+    let finalStatus = sendResponse.status ?? 'PENDING';
+
+    for (let poll = 0; poll < confirmationPolls; poll++) {
+      // Wait one approximate ledger close (~2 s) before each poll.
+      await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+      try {
+        const txRecord = await server.getTransaction(hash);
+        finalStatus = (txRecord as any).status ?? finalStatus;
+
+        if (finalStatus === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+          confirmed = true;
+          break;
+        }
+        if (finalStatus === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+          this.logger.error('signAndSubmit: on-chain status FAILED', { hash, poll });
+          throw new TransactionError(
+            `signAndSubmit: transaction ${hash} failed on-chain (status: FAILED) — ` +
+              `all operations were atomically reverted`,
+            { hash, status: finalStatus },
+          );
+        }
+        // Status is still NOT_FOUND or PENDING — keep polling.
+        this.logger.info('signAndSubmit: polling confirmation', { hash, poll, status: finalStatus });
+      } catch (err: unknown) {
+        // Re-throw TransactionError so the FAILED branch above propagates.
+        if (err instanceof TransactionError) throw err;
+        // Any other polling error is non-fatal; keep polling.
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn('signAndSubmit: poll error (non-fatal)', { poll, error: msg });
+      }
+    }
+
+    if (!confirmed) {
+      this.logger.warn('signAndSubmit: confirmation timed out', { hash, confirmationPolls });
+    } else {
+      this.logger.info('signAndSubmit: confirmed on-chain', { hash });
+    }
+
+    return {
+      transactionHash: hash,
+      confirmed,
+      simulation,
+      fee: feePaid,
+      status: finalStatus,
+    };
+  }
+
   /**
    * Estimate the gas cost of an operation before submission (Issue #194).
    *
