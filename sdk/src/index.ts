@@ -35,6 +35,18 @@ import {
   type OperationType,
   type EstimateParams
 } from './gasEstimator';
+import {
+  pollTransactionConfirmation,
+  TransactionConfirmationError,
+  DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
+  DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  MAX_CONFIRMATION_TIMEOUT_MS,
+  type TransactionConfirmationErrorCode,
+  type TransactionConfirmationStatus,
+  type TransactionConfirmationServer,
+  type TransactionConfirmationOptions,
+  type TransactionConfirmationResult,
+} from './transactionConfirmation';
 
 // ─── All public types re-exported from the types module ───────────────────────
 // This is the SINGLE re-export of every shared type. No other module should
@@ -855,7 +867,47 @@ export class StellarRWASDK {
     const server = options.server ?? new SorobanRpc.Server(this.config.stellar.serverUrl);
     return estimateGas(operation, { ...params, ...options, server });
   }
+
+  /**
+   * Poll Soroban RPC for transaction confirmation until the transaction
+   * succeeds, fails on-chain, or the bounded timeout is reached.
+   *
+   * @param txHash  - Transaction hash returned by `sendTransaction`.
+   * @param options - Polling interval, bounded timeout, optional server override,
+   *                  maxAttempts, abort signal, or progress callback.
+   * @returns {@link TransactionConfirmationResult} once confirmed with status `SUCCESS`.
+   * @throws {InvalidParametersError} if `txHash` or polling bounds are invalid.
+   * @throws {TransactionError} if the transaction reaches terminal `FAILED` status.
+   * @throws {TimeoutError} if confirmation is not reached within `timeoutMs` or `maxAttempts`, or if aborted.
+   * @throws {NetworkError} if the RPC lookup fails with a transport/network error.
+   */
+  async waitForTransactionConfirmation(
+    txHash: string,
+    options: TransactionConfirmationOptions = {},
+  ): Promise<TransactionConfirmationResult> {
+    const defaultTimeoutMs =
+      (this.config.defaultTimeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000;
+    return pollTransactionConfirmation(txHash, {
+      serverUrl: this.config.stellar.serverUrl,
+      timeoutMs: Math.min(defaultTimeoutMs, MAX_CONFIRMATION_TIMEOUT_MS),
+      ...options,
+    });
+  }
 }
+
+// ─── Transaction Confirmation Polling ─────────────────────────────────────────
+export {
+  pollTransactionConfirmation,
+  TransactionConfirmationError,
+  DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
+  DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  MAX_CONFIRMATION_TIMEOUT_MS,
+  type TransactionConfirmationErrorCode,
+  type TransactionConfirmationStatus,
+  type TransactionConfirmationServer,
+  type TransactionConfirmationOptions,
+  type TransactionConfirmationResult,
+};
 
 // ─── Factory Function ─────────────────────────────────────────────────────────
 
