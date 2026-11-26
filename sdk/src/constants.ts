@@ -1,3 +1,5 @@
+import type { StellarNetwork } from './types';
+
 export const DEFAULT_DECIMALS = 18;
 
 export const DEFAULT_FEE_RATE = 100;
@@ -43,6 +45,14 @@ export const VALID_CREDIT_RATINGS = ['AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC'] 
 export const VALID_REGULATION_FRAMEWORKS = ['REG_D', 'REG_S', 'RULE_144', 'REG_A+'] as const;
 export const VALID_CARBON_STANDARDS = ['VCS', 'GS', 'CDM', 'ACR'] as const;
 export const VINTAGE_YEAR_MIN = 1990;
+
+/** Canonical network names accepted by typed network configuration validation (#389). */
+export const SUPPORTED_STELLAR_NETWORKS: readonly StellarNetwork[] = [
+  'testnet',
+  'mainnet',
+  'futurenet',
+  'standalone'
+];
 
 export const STELLAR_NETWORKS: Record<string, { serverUrl: string; horizonUrl: string; passphrase: string }> = {
   testnet: {

@@ -219,11 +219,17 @@ export interface ValidationConfig {
 }
 
 // Configuration Types
+
+/** Stellar networks the SDK can be configured against (issue #389). */
+export type StellarNetwork = 'testnet' | 'mainnet' | 'futurenet' | 'standalone';
+
 export interface StellarConfig {
-  network: 'testnet' | 'mainnet' | 'futurenet' | 'standalone';
+  network: StellarNetwork;
   serverUrl: string;
   passphrase: string;
   horizonUrl?: string;
+  /** Effective request timeout in milliseconds; validated before client setup. */
+  requestTimeoutMs?: number;
 }
 
 export interface RWASDKConfig {

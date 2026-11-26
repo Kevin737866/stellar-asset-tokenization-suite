@@ -12,6 +12,7 @@ This directory contains contract and SDK API reference documentation for the Ste
 - [Suite Wrapper](./soroban-suite.md)
 
 ## SDK (TypeScript)
+- [SDK: Typed network configuration validation](./sdk-network-configuration.md)
 - [SDK: AssetFactory client](./sdk-asset-factory-client.md)
 - [SDK: TokenClient](./sdk-token-client.md)
 - [SDK: ComplianceClient](./sdk-compliance-client.md)
