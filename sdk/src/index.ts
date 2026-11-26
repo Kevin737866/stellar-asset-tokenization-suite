@@ -24,6 +24,7 @@ import {
   STELLAR_NETWORKS,
 } from './constants';
 import { createLogger, Logger } from './logger';
+import { validateNetworkConfig, validateNetworkName } from './networkConfig';
 import { validateAddress, validateAmount, validateNonEmptyString, validatePositiveInteger, validateServerUrl, validateContractId, validateBoolean, validateEnum, validateRange } from './validation';
 import {
   GasEstimator,
@@ -40,6 +41,18 @@ import {
 // This is the SINGLE re-export of every shared type. No other module should
 // re-export from types.ts to prevent accidental circular paths.
 export * from './types';
+
+// ─── Network configuration validation (Issue #389) ───────────────────────────
+// Exposed so integrators can validate untrusted JSON network settings with the
+// same rules the SDK applies before constructing its clients.
+export {
+  SUPPORTED_NETWORKS,
+  isSupportedNetwork,
+  validateNetworkConfig,
+  validateNetworkName,
+  type StellarNetwork,
+  type ValidatedNetworkConfig,
+} from './networkConfig';
 
 // ─── Custody module exports ───────────────────────────────────────────────────
 export {
@@ -364,8 +377,9 @@ export class StellarRWASDK {
   private _retryListener?: RetryEventListener;
 
   constructor(config: RWASDKConfig & { retry?: Partial<RetryConfig> }) {
-    validateServerUrl(config.stellar.serverUrl, 'config.stellar.serverUrl');
-    validateNonEmptyString(config.stellar.passphrase, 'config.stellar.passphrase');
+    // Issue #389: validate the whole network config before assigning state or
+    // constructing any client. A failure therefore leaves no partial SDK.
+    validateNetworkConfig(config?.stellar);
     this.config = config;
     this.retryConfig = { ...defaultRetryConfig, ...(config.retry ?? {}) };
     this.logger = createLogger('StellarRWASDK');
@@ -456,12 +470,10 @@ export class StellarRWASDK {
    * Update configuration
    */
   updateConfig(newConfig: Partial<RWASDKConfig>): void {
-    if (newConfig.stellar?.serverUrl) {
-      validateServerUrl(newConfig.stellar.serverUrl, 'config.stellar.serverUrl');
-    }
-    if (newConfig.stellar?.passphrase) {
-      validateNonEmptyString(newConfig.stellar.passphrase, 'config.stellar.passphrase');
-    }
+    // Validate the *merged* result first: a partial stellar update must not be
+    // able to leave the SDK with an invalid network configuration.
+    const merged: RWASDKConfig = { ...this.config, ...newConfig };
+    validateNetworkConfig(merged.stellar);
     if (newConfig.contracts?.assetFactory) {
       validateAddress(newConfig.contracts.assetFactory, 'config.contracts.assetFactory');
     }
@@ -478,7 +490,7 @@ export class StellarRWASDK {
       validateAddress(newConfig.contracts.custodyValidator, 'config.contracts.custodyValidator');
     }
     this.logger.info('Updating SDK configuration', { newConfig: Object.keys(newConfig) });
-    this.config = { ...this.config, ...newConfig };
+    this.config = merged;
     
     // Reinitialize clients with new config
     this.assetFactory = new AssetFactory(
@@ -876,8 +888,11 @@ export function createStellarRWASDK(
     defaultTimeout?: number;
   }
 ): StellarRWASDK {
+  // Issue #389: reject an unknown network with a typed error before looking up
+  // presets, so no client is constructed from an undefined network preset.
+  validateNetworkName(network, 'network');
   const config = STELLAR_NETWORKS[network];
-  
+
   const sdkConfig: RWASDKConfig = {
     stellar: {
       network,
