@@ -35,7 +35,35 @@ import {
 } from 'lucide-react';
 import { AssetInfo, Balance, AssetHolding, Portfolio } from '@/lib/types';
 import { useToast, useErrorTranslator } from '@/components/Toast';
+import {
+  DashboardState,
+  getDashboardState,
+  toSafeNumber,
+  validateDashboardPortfolio,
+} from './dashboardData';
 
+/**
+ * Ownership dashboard: portfolio overview, holdings, dividends and voting.
+ *
+ * Data requirements (see `dashboardData.ts` and `docs/ui-dashboard.md`):
+ * - `userAddress` is the connected Stellar wallet address (`G...`).
+ *   Display-only: this component never signs, sends, or moves funds.
+ * - `portfolio` is the connected wallet's portfolio: an `assets` array
+ *   plus `totalValue`, `totalDividends` and `votingPower` as non-negative
+ *   decimal strings. A valid portfolio with zero holdings renders the
+ *   empty state; a portfolio that fails validation renders the invalid
+ *   state with its problems listed.
+ *
+ * Authorization: the parent MUST pass the connected wallet's own portfolio
+ * and MUST verify in its callbacks that the signer matches `userAddress`
+ * before submitting anything on-chain. The callbacks are optional — when
+ * one is absent, that action is unavailable (no fallback transaction).
+ *
+ * Failure semantics: invalid numeric strings render as 0 (never `NaN`);
+ * a failed lock / unlock / claim leaves the displayed portfolio unchanged
+ * (form inputs are only cleared on success); network errors surface via
+ * the banner and a retryable toast.
+ */
 interface OwnershipDashboardProps {
   userAddress: string;
   portfolio: Portfolio;
@@ -74,30 +102,41 @@ export default function OwnershipDashboard({
   const [claimError, setClaimError] = useState<Record<string, string>>({});
   const [isNetworkError, setIsNetworkError] = useState(false);
 
-  // Prepare data for charts
-  const pieChartData = portfolio.assets.map((holding) => ({
+  // Display state: loading skeletons are returned early below; the empty
+  // and invalid states render in place of the tabbed sections so the
+  // dashboard never shows blank charts for a wallet with no holdings.
+  const dashboardState: DashboardState = getDashboardState(portfolio, isLoading);
+  const validationProblems =
+    dashboardState === 'invalid' ? validateDashboardPortfolio(portfolio).problems : [];
+
+  // Defensive read: a malformed portfolio never crashes the dashboard.
+  // Validation problems are surfaced by the invalid state above.
+  const holdings: AssetHolding[] = Array.isArray(portfolio?.assets) ? portfolio.assets : [];
+
+  // Prepare data for charts (invalid numbers render as 0, never NaN).
+  const pieChartData = holdings.map((holding) => ({
     name: holding.asset.name,
-    value: parseFloat(holding.value),
+    value: toSafeNumber(holding.value),
     percentage: holding.percentage,
   }));
 
-  const barChartData = portfolio.assets.map((holding) => ({
+  const barChartData = holdings.map((holding) => ({
     name: holding.asset.symbol,
-    balance: parseFloat(holding.balance.amount),
-    value: parseFloat(holding.value),
-    dividends: parseFloat(holding.dividends),
+    balance: toSafeNumber(holding.balance.amount),
+    value: toSafeNumber(holding.value),
+    dividends: toSafeNumber(holding.dividends),
   }));
 
-  const totalValue = parseFloat(portfolio.totalValue);
-  const totalDividends = parseFloat(portfolio.totalDividends);
-  const totalVotingPower = parseFloat(portfolio.votingPower);
+  const totalValue = toSafeNumber(portfolio?.totalValue);
+  const totalDividends = toSafeNumber(portfolio?.totalDividends);
+  const totalVotingPower = toSafeNumber(portfolio?.votingPower);
 
   const handleLockTokens = async () => {
     if (!selectedAsset || !lockAmount || !lockPeriod) return;
 
     // Inline validation
-    const amount = parseFloat(lockAmount);
-    const maxAmount = parseFloat(selectedAsset.balance.amount);
+    const amount = toSafeNumber(lockAmount);
+    const maxAmount = toSafeNumber(selectedAsset.balance.amount);
     if (isNaN(amount) || amount <= 0) {
       setLockError('Amount must be a positive number');
       return;
@@ -112,7 +151,7 @@ export default function OwnershipDashboard({
       return;
     }
 
-    const assetAddress = selectedAsset.asset.tokenAddress;
+    const assetAddress = String(selectedAsset.asset.tokenAddress);
     setLockError(null);
     setIsLocking(true);
     setIsNetworkError(false);
@@ -122,7 +161,7 @@ export default function OwnershipDashboard({
 
       toast.success(
         'Tokens Locked',
-        `Successfully locked ${parseFloat(lockAmount).toLocaleString()} tokens for ${period} days.`
+        `Successfully locked ${toSafeNumber(lockAmount).toLocaleString()} tokens for ${period} days.`
       );
       setLockAmount('');
       setLockPeriod('');
@@ -151,7 +190,7 @@ export default function OwnershipDashboard({
 
       toast.success(
         'Tokens Unlocked',
-        `Successfully unlocked ${parseFloat(amount).toLocaleString()} tokens.`
+        `Successfully unlocked ${toSafeNumber(amount).toLocaleString()} tokens.`
       );
       setUnlockError((prev) => {
         const next = { ...prev };
@@ -302,7 +341,7 @@ export default function OwnershipDashboard({
                   className="text-2xl font-bold"
                   aria-labelledby="assets-held-label"
                 >
-                  {portfolio.assets.length}
+                  {holdings.length}
                 </p>
               </div>
               <Wallet className="h-8 w-8 text-orange-600" aria-hidden="true" />
@@ -311,6 +350,47 @@ export default function OwnershipDashboard({
         </Card>
       </div>
 
+      {/* Empty / invalid states replace the tabbed sections: the overview
+          cards above stay visible because $0 totals are accurate for an
+          empty wallet, but blank charts and empty lists are never shown. */}
+      {dashboardState !== 'ready' ? (
+        <Card>
+          <CardContent className="p-8 text-center">
+            {dashboardState === 'invalid' ? (
+              <>
+                <AlertCircle className="h-12 w-12 mx-auto text-red-400 mb-4" aria-hidden="true" />
+                <p className="text-lg font-medium">Dashboard data couldn&apos;t be read</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  The portfolio data for this wallet failed validation, so totals are shown as $0 and
+                  no actions are offered. Ask the data provider to fix the fields below.
+                </p>
+                <ul className="text-sm text-left text-red-500 dark:text-red-400 mt-4 space-y-1 max-w-lg mx-auto">
+                  {validationProblems.map((problem) => (
+                    <li key={problem} className="flex items-start gap-1">
+                      <AlertCircle className="h-3 w-3 mt-1 shrink-0" aria-hidden="true" />
+                      <span>{problem}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <>
+                <Wallet className="h-12 w-12 mx-auto text-gray-300 dark:text-gray-600 mb-4" aria-hidden="true" />
+                <p className="text-lg font-medium">No assets yet</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  This wallet holds no tokenized assets, so there is nothing to chart yet.
+                </p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  The dashboard needs the connected wallet&apos;s portfolio: its holdings (asset name,
+                  symbol and token address, balance, value, dividends) plus total value, total
+                  dividends and voting power. Once the wallet holds an asset, the overview charts,
+                  holdings, dividends and voting sections appear here automatically.
+                </p>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
       <Tabs defaultValue="overview" className="space-y-6">
         <TabsList className="grid w-full grid-cols-4" role="tablist" aria-label="Dashboard sections">
           <TabsTrigger value="overview" role="tab" aria-selected="true">Overview</TabsTrigger>
@@ -390,7 +470,7 @@ export default function OwnershipDashboard({
         {/* Assets Tab */}
         <TabsContent value="assets" className="space-y-6" role="tabpanel" aria-label="Assets tab">
           <div className="grid grid-cols-1 gap-4" role="list" aria-label="Asset holdings">
-            {portfolio.assets.map((holding, index) => (
+            {holdings.map((holding, index) => (
               <Card
                 key={index}
                 className="cursor-pointer hover:shadow-lg transition-shadow"
@@ -417,19 +497,19 @@ export default function OwnershipDashboard({
                         <div>
                           <p className="text-sm text-gray-600 dark:text-gray-400">Balance</p>
                           <p className="font-medium">
-                            {parseFloat(holding.balance.amount).toLocaleString()}
+                            {toSafeNumber(holding.balance.amount).toLocaleString()}
                           </p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 dark:text-gray-400">Value</p>
                           <p className="font-medium">
-                            ${parseFloat(holding.value).toLocaleString()}
+                            ${toSafeNumber(holding.value).toLocaleString()}
                           </p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 dark:text-gray-400">Dividends</p>
                           <p className="font-medium">
-                            ${parseFloat(holding.dividends).toLocaleString()}
+                            ${toSafeNumber(holding.dividends).toLocaleString()}
                           </p>
                         </div>
                         <div>
@@ -444,7 +524,7 @@ export default function OwnershipDashboard({
                         >
                           {holding.balance.lockedAmount === '0'
                             ? 'Unlocked'
-                            : `${parseFloat(holding.balance.lockedAmount).toLocaleString()} Locked`}
+                            : `${toSafeNumber(holding.balance.lockedAmount).toLocaleString()} Locked`}
                         </Badge>
                         <Badge variant="outline">
                           {holding.asset.isPaused ? 'Paused' : 'Active'}
@@ -477,8 +557,8 @@ export default function OwnershipDashboard({
                 </div>
 
                 <div className="space-y-2">
-                  {portfolio.assets.map((holding, index) => {
-                    const addr = holding.asset.tokenAddress;
+                  {holdings.map((holding, index) => {
+                    const addr = String(holding.asset.tokenAddress);
                     const isClaimInProgress = isClaiming === addr;
                     const errorMsg = claimError[addr];
                     return (
@@ -490,7 +570,7 @@ export default function OwnershipDashboard({
                           </div>
                           <div className="text-right">
                             <p className="font-medium">
-                              ${parseFloat(holding.dividends).toLocaleString()}
+                              ${toSafeNumber(holding.dividends).toLocaleString()}
                             </p>
                             <Button
                               size="sm"
@@ -616,8 +696,8 @@ export default function OwnershipDashboard({
                 )}
 
                 <div className="space-y-2">
-                  {portfolio.assets.map((holding, index) => {
-                    const addr = holding.asset.tokenAddress;
+                  {holdings.map((holding, index) => {
+                    const addr = String(holding.asset.tokenAddress);
                     const isUnlockInProgress = isUnlocking === addr;
                     const errorMsg = unlockError[addr];
                     return (
@@ -630,7 +710,7 @@ export default function OwnershipDashboard({
                             </p>
                           </div>
                           <div className="flex gap-2">
-                            {parseFloat(holding.balance.lockedAmount) > 0 && (
+                            {toSafeNumber(holding.balance.lockedAmount) > 0 && (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -666,6 +746,7 @@ export default function OwnershipDashboard({
           </Card>
         </TabsContent>
       </Tabs>
+      )}
     </div>
   );
 }
