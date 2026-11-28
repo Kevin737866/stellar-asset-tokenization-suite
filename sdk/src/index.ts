@@ -37,6 +37,18 @@ import {
   type OperationType,
   type EstimateParams
 } from './gasEstimator';
+import {
+  pollTransactionConfirmation,
+  TransactionConfirmationError,
+  DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
+  DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  MAX_CONFIRMATION_TIMEOUT_MS,
+  type TransactionConfirmationErrorCode,
+  type TransactionConfirmationStatus,
+  type TransactionConfirmationServer,
+  type TransactionConfirmationOptions,
+  type TransactionConfirmationResult,
+} from './transactionConfirmation';
 
 // ─── All public types re-exported from the types module ───────────────────────
 // This is the SINGLE re-export of every shared type. No other module should
@@ -1477,6 +1489,20 @@ export async function submitFeeBumpTransaction(
     );
   }
 }
+
+// ─── Transaction Confirmation Polling ─────────────────────────────────────────
+export {
+  pollTransactionConfirmation,
+  TransactionConfirmationError,
+  DEFAULT_CONFIRMATION_POLL_INTERVAL_MS,
+  DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  MAX_CONFIRMATION_TIMEOUT_MS,
+  type TransactionConfirmationErrorCode,
+  type TransactionConfirmationStatus,
+  type TransactionConfirmationServer,
+  type TransactionConfirmationOptions,
+  type TransactionConfirmationResult,
+};
 
 // ─── Factory Function ─────────────────────────────────────────────────────────
 
