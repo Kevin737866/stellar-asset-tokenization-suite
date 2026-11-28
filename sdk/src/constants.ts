@@ -40,7 +40,9 @@ export const RENTAL_YIELD_MAX_BASIS_POINTS = 10000;
 
 export const VALID_PURITY_GRADES = ['999', '995', '990', '750'] as const;
 export const VALID_CREDIT_RATINGS = ['AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC'] as const;
-export const VALID_REGULATION_FRAMEWORKS = ['REG_D', 'REG_S', 'RULE_144', 'REG_A+'] as const;
+// Soroban symbols only allow [A-Za-z0-9_], so the "REG_A+" framework is
+// represented on-chain as "REG_A_PLUS".
+export const VALID_REGULATION_FRAMEWORKS = ['REG_D', 'REG_S', 'RULE_144', 'REG_A_PLUS'] as const;
 export const VALID_CARBON_STANDARDS = ['VCS', 'GS', 'CDM', 'ACR'] as const;
 export const VINTAGE_YEAR_MIN = 1990;
 
