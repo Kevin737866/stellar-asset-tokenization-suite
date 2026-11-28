@@ -10,6 +10,51 @@ interface SecondaryMarketProps {
   userAddress: string;
 }
 
+interface OrderFillStatus {
+  remaining: string;
+  filled: string;
+  total: string;
+  filledPercent: number;
+  isPartiallyFilled: boolean;
+  statusLabel: 'Partially Filled' | 'Open';
+}
+
+/** Computes remaining quantity and partial-fill status for an open order. */
+function getOrderFillStatus(order: Order): OrderFillStatus {
+  const totalNum = parseFloat(order.amount || '0');
+  const filledNum = parseFloat(order.filledAmount || '0');
+  const rawRemaining = order.remainingAmount !== undefined && order.remainingAmount !== ''
+    ? parseFloat(order.remainingAmount)
+    : totalNum - (Number.isFinite(filledNum) ? filledNum : 0);
+
+  const safeTotal = Number.isFinite(totalNum) && totalNum > 0 ? totalNum : 0;
+  const safeFilled = Number.isFinite(filledNum) && filledNum > 0 ? filledNum : 0;
+  const safeRemaining = Number.isFinite(rawRemaining) && rawRemaining >= 0
+    ? rawRemaining
+    : Math.max(0, safeTotal - safeFilled);
+
+  const effectiveFilled = safeFilled > 0
+    ? safeFilled
+    : Math.max(0, safeTotal - safeRemaining);
+
+  const isPartiallyFilled = safeRemaining > 0 && (safeFilled > 0 || (safeTotal > 0 && safeRemaining < safeTotal));
+  const filledPercent = safeTotal > 0
+    ? Math.min(100, Math.max(0, Math.round((effectiveFilled / safeTotal) * 100)))
+    : 0;
+
+  return {
+    remaining: order.remainingAmount !== undefined && order.remainingAmount !== ''
+      ? order.remainingAmount
+      : String(safeRemaining),
+    filled: order.filledAmount !== undefined && order.filledAmount !== ''
+      ? order.filledAmount
+      : String(effectiveFilled),
+    total: order.amount || '0',
+    filledPercent,
+    isPartiallyFilled,
+    statusLabel: isPartiallyFilled ? 'Partially Filled' : 'Open',
+  };
+}
 const QUOTE_CURRENCY = 'USDC';
 const QUOTE_CURRENCY_DECIMALS = 6;
 
@@ -81,11 +126,20 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       const tr = await sdk.marketClient.getRecentTrades(asset.token_address);
       const v = await sdk.marketClient.getVWAP(asset.token_address);
       const kyc = await sdk.complianceClient.getKYCStatus(userAddress);
+      const orders = userAddress
+        ? await sdk.marketClient.getUserOrders(userAddress).catch(() => [] as Order[])
+        : [];
+      const openOrders = orders.filter(
+        (order) =>
+          order.isActive &&
+          (!order.tokenAddress || order.tokenAddress === asset.token_address)
+      );
 
       setOrderBook(ob);
       setTrades(tr);
       setVwap(v);
       setKycStatus(kyc.is_verified);
+      setUserOrders(openOrders);
       setFetchError(null);
       setIsNetworkError(false);
 
@@ -536,6 +590,70 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
             </div>
           ) : (
             <p className="text-sm text-gray-400 text-center py-8">No recent trades</p>
+          )}
+        </section>
+
+        <section className="lg:col-span-3 border border-gray-200 dark:border-gray-700 rounded-lg p-4" aria-label="Open orders">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Open Orders</h2>
+            <span className="text-xs text-gray-500 dark:text-gray-400">{userOrders.length} active</span>
+          </div>
+          {userOrders.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+                    <th className="pb-2 font-medium">Order</th>
+                    <th className="pb-2 font-medium">Side</th>
+                    <th className="pb-2 font-medium">Price</th>
+                    <th className="pb-2 font-medium">Remaining / Total</th>
+                    <th className="pb-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {userOrders.map((order) => {
+                    const fillStatus = getOrderFillStatus(order);
+                    const isBuy = order.orderType === OrderType.BUY || order.orderType === 'buy';
+                    return (
+                      <tr key={order.orderId} className="border-b border-gray-100 dark:border-gray-800 last:border-b-0">
+                        <td className="py-2 font-medium text-gray-700 dark:text-gray-300">#{order.orderId}</td>
+                        <td className={`py-2 font-semibold uppercase ${isBuy ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                          {order.orderType}
+                        </td>
+                        <td className="py-2">{order.price}</td>
+                        <td className="py-2" aria-label={`Remaining quantity: ${fillStatus.remaining} of ${fillStatus.total}`}>
+                          <span className="font-medium">{fillStatus.remaining}</span>
+                          <span className="text-gray-400"> / {fillStatus.total}</span>
+                          {fillStatus.isPartiallyFilled && (
+                            <div className="w-24 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full mt-1 overflow-hidden">
+                              <div
+                                className="h-full bg-amber-500 rounded-full"
+                                style={{ width: `${fillStatus.filledPercent}%` }}
+                              />
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${
+                              fillStatus.isPartiallyFilled
+                                ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+                                : 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300'
+                            }`}
+                            aria-label={`Order status: ${fillStatus.statusLabel}${fillStatus.isPartiallyFilled ? ` (${fillStatus.filledPercent}% filled)` : ''}`}
+                          >
+                            {fillStatus.statusLabel}
+                            {fillStatus.isPartiallyFilled && ` (${fillStatus.filledPercent}%)`}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400 text-center py-6">No open orders</p>
           )}
         </section>
 
