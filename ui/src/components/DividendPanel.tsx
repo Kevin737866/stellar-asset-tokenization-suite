@@ -10,6 +10,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, TrendingUp, Clock, DollarSign, History, Settings, Zap } from 'lucide-react';
+import { formatTimestamp } from './timestampFormat';
 
 interface DividendDistribution {
   distributionId: number;
@@ -495,7 +496,7 @@ export default function DividendPanel({
                           <div>
                             <p className="text-sm text-gray-600 dark:text-gray-400">Deadline</p>
                             <p className="font-medium">
-                              {new Date(dist.claimDeadline).toLocaleDateString()}
+                              {formatTimestamp(dist.claimDeadline)}
                             </p>
                           </div>
                         </div>
@@ -565,7 +566,7 @@ export default function DividendPanel({
                           className="border-b dark:border-gray-700 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
                         >
                           <td className="py-3">
-                            {new Date(claim.date).toLocaleDateString()}
+                            {formatTimestamp(claim.date)}
                           </td>
                           <td className="py-3">
                             <Badge variant="outline">#{claim.distributionId}</Badge>
@@ -629,7 +630,7 @@ export default function DividendPanel({
                         <div>
                           <p className="text-sm text-gray-600">Closed</p>
                           <p className="font-medium">
-                            {new Date(dist.claimDeadline).toLocaleDateString()}
+                            {formatTimestamp(dist.claimDeadline)}
                           </p>
                         </div>
                       </div>
