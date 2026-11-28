@@ -1,3 +1,6 @@
+// tsconfig lib is ES2020 without DOM, so the browser global needs a declaration.
+declare const window: any;
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface LogEntry {
