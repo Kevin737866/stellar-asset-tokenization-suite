@@ -1,6 +1,10 @@
-use soroban_sdk::{contracterror, contracttype, Env, Symbol, Vec, panic_with_error, String};
+use crate::asset_class_handlers::{
+    set_legal_document_hash, validate_legal_document_hash, validate_metadata_size, AssetClassError,
+};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_metadata_size};
+use soroban_sdk::{
+    contracterror, contracttype, panic_with_error, BytesN, Env, String, Symbol, Vec,
+};
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -27,6 +31,8 @@ pub struct SecurityConfig {
     pub regulatory_reporting: bool,
     pub isin: Symbol,
     pub dividend_rights: DividendRights,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
 pub fn create_security_config(
@@ -35,14 +41,20 @@ pub fn create_security_config(
     security_config: SecurityConfig,
 ) -> AssetConfig {
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_legal_document_hash(&env, &security_config.legal_document_hash);
 
-    let valid_frameworks = Vec::from_array(&env, [
-        Symbol::new(&env, "REG_D"),
-        Symbol::new(&env, "REG_S"),
-        Symbol::new(&env, "RULE_144"),
-        Symbol::new(&env, "REG_A+"),
-    ]);
-    
+    let valid_frameworks = Vec::from_array(
+        &env,
+        [
+            Symbol::new(&env, "REG_D"),
+            Symbol::new(&env, "REG_S"),
+            Symbol::new(&env, "RULE_144"),
+            // Soroban symbols only allow [A-Za-z0-9_], so "REG_A+" cannot be
+            // represented; the plus is spelled out.
+            Symbol::new(&env, "REG_A_PLUS"),
+        ],
+    );
+
     if !valid_frameworks.contains(&security_config.regulation_framework) {
         panic_with_error!(&env, AssetClassError::InvalidRegulationFramework);
     }
@@ -52,10 +64,22 @@ pub fn create_security_config(
     compliance_rules.holding_period_days = security_config.holding_period_days;
 
     let mut metadata = base_config.metadata;
-    metadata.set(Symbol::new(&env, "equity_type"), String::from_str(&env, &security_config.equity_type.to_string()));
-    metadata.set(Symbol::new(&env, "regulation_framework"), String::from_str(&env, &security_config.regulation_framework.to_string()));
-    metadata.set(Symbol::new(&env, "isin"), String::from_str(&env, &security_config.isin.to_string()));
-    metadata.set(Symbol::new(&env, "regulatory_reporting"), String::from_str(&env, &security_config.regulatory_reporting.to_string()));
+    metadata.set(
+        Symbol::new(&env, "equity_type"),
+        String::from_str(&env, &security_config.equity_type.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "regulation_framework"),
+        String::from_str(&env, &security_config.regulation_framework.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "isin"),
+        String::from_str(&env, &security_config.isin.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "regulatory_reporting"),
+        String::from_str(&env, &security_config.regulatory_reporting.to_string()),
+    );
 
     let rights_str = match security_config.dividend_rights {
         DividendRights::Cumulative => "Cumulative",
@@ -63,7 +87,11 @@ pub fn create_security_config(
         DividendRights::Participating => "Participating",
         DividendRights::NonParticipating => "NonParticipating",
     };
-    metadata.set(Symbol::new(&env, "dividend_rights"), String::from_str(&env, rights_str));
+    metadata.set(
+        Symbol::new(&env, "dividend_rights"),
+        String::from_str(&env, rights_str),
+    );
+    set_legal_document_hash(&env, &mut metadata, &security_config.legal_document_hash);
 
     AssetConfig {
         compliance_rules,

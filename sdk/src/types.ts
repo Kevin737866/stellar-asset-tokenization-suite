@@ -428,6 +428,76 @@ export interface AuditLogEntry {
   txHash: string;
 }
 
+// Compliance report generation (issue #202). Reports are built from the
+// audit trail returned by ComplianceClient.getAuditTrail, so a report only
+// ever contains the events the audit trail holds for the requested window.
+export enum ComplianceReportType {
+  KYC_VERIFICATIONS = 'KYC_VERIFICATIONS',
+  TRANSFER_ACTIVITY = 'TRANSFER_ACTIVITY',
+  BLACKLIST_CHANGES = 'BLACKLIST_CHANGES',
+  SUSPICIOUS_ACTIVITY = 'SUSPICIOUS_ACTIVITY',
+}
+
+export interface KYCVerificationRecord {
+  user: string;
+  status: string;
+  verifiedBy: string;
+  timestamp: Date;
+  txHash: string;
+}
+
+export interface TransferActivityRecord {
+  from: string;
+  to: string;
+  amount: string;
+  compliant: boolean;
+  timestamp: Date;
+  txHash: string;
+}
+
+export interface BlacklistChangeRecord {
+  address: string;
+  action: 'added' | 'removed';
+  reason: string;
+  changedBy: string;
+  timestamp: Date;
+  txHash: string;
+}
+
+export interface SuspiciousActivityRecord {
+  address: string;
+  reason: string;
+  riskLevel: string;
+  flaggedBy: string;
+  timestamp: Date;
+  txHash: string;
+}
+
+export type ComplianceReportRecord =
+  | KYCVerificationRecord
+  | TransferActivityRecord
+  | BlacklistChangeRecord
+  | SuspiciousActivityRecord;
+
+export interface ComplianceReport<T = ComplianceReportRecord> {
+  type: ComplianceReportType;
+  startDate: Date;
+  endDate: Date;
+  generatedAt: Date;
+  totalRecords: number;
+  records: T[];
+  hasMore: boolean;
+  nextCursor?: string;
+  limit: number;
+}
+
+export interface ComplianceReportOptions {
+  limit?: number;
+  cursor?: string;
+  address?: string;
+  jurisdiction?: string;
+}
+
 export interface CustodyEvent {
   type: 'proof_submitted' | 'oracle_registered' | 'asset_registered';
   proofId?: number;

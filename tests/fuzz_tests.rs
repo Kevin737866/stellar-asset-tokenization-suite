@@ -1,19 +1,27 @@
-use soroban_sdk::{Env, Address, Symbol, Map, BytesN, Vec};
-use soroban_sdk::testutils::Address as _;
+use proptest::prelude::*;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::{Address, BytesN, Env, Map, Symbol, Vec};
+use stellar_asset_tokenization_suite::art::ArtConfig;
+use stellar_asset_tokenization_suite::asset_factory::{
+    AssetClass, AssetConfig, ComplianceRules, DividendSchedule,
+};
+use stellar_asset_tokenization_suite::carbon_credit::CarbonCreditConfig;
+use stellar_asset_tokenization_suite::commodity::CommodityConfig;
+use stellar_asset_tokenization_suite::compliance_registry::{
+    ComplianceRegistry, ComplianceRegistryClient, KYCStatus,
+};
+use stellar_asset_tokenization_suite::invoice::InvoiceConfig;
+use stellar_asset_tokenization_suite::real_estate::RealEstateConfig;
 use stellar_asset_tokenization_suite::rwa_token::{RWAToken, RWATokenClient};
 use stellar_asset_tokenization_suite::secondary_market::{SecondaryMarket, SecondaryMarketClient};
-use stellar_asset_tokenization_suite::compliance_registry::{ComplianceRegistry, ComplianceRegistryClient, KYCStatus};
-use stellar_asset_tokenization_suite::asset_factory::{AssetConfig, AssetClass, ComplianceRules, DividendSchedule};
-use stellar_asset_tokenization_suite::real_estate::RealEstateConfig;
-use stellar_asset_tokenization_suite::commodity::CommodityConfig;
-use stellar_asset_tokenization_suite::invoice::InvoiceConfig;
 use stellar_asset_tokenization_suite::security::SecurityConfig;
-use stellar_asset_tokenization_suite::art::ArtConfig;
-use stellar_asset_tokenization_suite::carbon_credit::CarbonCreditConfig;
-use proptest::prelude::*;
 
 fn get_proptest_config() -> ProptestConfig {
     ProptestConfig::default()
+}
+
+fn legal_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[9u8; 32])
 }
 
 // ── Helper: Create base AssetConfig for fuzzing ─────────────────────────────
@@ -262,6 +270,7 @@ proptest! {
             property_management_voting: voting,
             insurance_status: insurance,
             appraisal_value,
+            legal_document_hash: legal_hash(&env),
         };
 
         // Valid config should not panic
@@ -309,6 +318,7 @@ proptest! {
             purity_grade,
             physical_redemption_window: redemption_window,
             quality_attestation: Address::generate(&env),
+            legal_document_hash: legal_hash(&env),
         };
 
         let result = std::panic::catch_unwind(|| {
@@ -353,12 +363,14 @@ proptest! {
         let credit_rating = Symbol::new(&env, ratings[rating_idx % ratings.len()]);
 
         let invoice_config = InvoiceConfig {
-            invoice_number: Symbol::new(&env, "INV-001"),
+            invoice_number: Symbol::new(&env, "INV001"),
             debtor_address: Address::generate(&env),
             due_date,
             credit_rating,
             automatic_settlement: false,
             invoice_amount,
+            outstanding_balance: invoice_amount,
+            legal_document_hash: legal_hash(&env),
         };
 
         let result = std::panic::catch_unwind(|| {
@@ -394,7 +406,7 @@ proptest! {
         let env = Env::default();
         let base_config = create_base_asset_config(&env);
 
-        let frameworks = vec!["REG_D", "REG_S", "RULE_144", "REG_A+", "SEC", "CFTC", "UNKNOWN", ""];
+        let frameworks = vec!["REG_D", "REG_S", "RULE_144", "REG_A_PLUS", "SEC", "CFTC", "UNKNOWN", ""];
         let regulation_framework = Symbol::new(&env, frameworks[framework_idx % frameworks.len()]);
 
         let security_config = SecurityConfig {
@@ -405,6 +417,7 @@ proptest! {
             regulatory_reporting: reporting,
             isin: Symbol::new(&env, "US1234567890"),
             dividend_rights: stellar_asset_tokenization_suite::security::DividendRights::Cumulative,
+            legal_document_hash: legal_hash(&env),
         };
 
         let result = std::panic::catch_unwind(|| {
@@ -415,7 +428,7 @@ proptest! {
             )
         });
 
-        let valid_frameworks = ["REG_D", "REG_S", "RULE_144", "REG_A+"];
+        let valid_frameworks = ["REG_D", "REG_S", "RULE_144", "REG_A_PLUS"];
         if valid_frameworks.contains(&frameworks[framework_idx % frameworks.len()]) {
             assert!(result.is_ok());
             let config = result.unwrap();
@@ -438,6 +451,7 @@ proptest! {
         voting in proptest::bool::ANY,
     ) {
         let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
         let base_config = create_base_asset_config(&env);
 
         let hash_array = if use_zero_hash {
@@ -455,7 +469,9 @@ proptest! {
             insurance_status: insurance,
             exhibition_voting: voting,
             appraisal_value,
+            valuation_timestamp: env.ledger().timestamp(),
             authenticity_certificate: Address::generate(&env),
+            legal_document_hash: legal_hash(&env),
         };
 
         let result = std::panic::catch_unwind(|| {
@@ -496,12 +512,13 @@ proptest! {
         let verification_standard = Symbol::new(&env, standards[standard_idx % standards.len()]);
 
         let carbon_config = CarbonCreditConfig {
-            project_id: Symbol::new(&env, "PROJ-001"),
+            project_id: Symbol::new(&env, "PROJ001"),
             vintage_year,
             retirement_functionality: retirement,
             project_metadata: Map::new(&env),
             verification_standard,
             carbon_offset_amount: offset_amount,
+            legal_document_hash: legal_hash(&env),
         };
 
         let result = std::panic::catch_unwind(|| {
@@ -549,6 +566,7 @@ proptest! {
             property_management_voting: false,
             insurance_status: false,
             appraisal_value: amount,
+            legal_document_hash: legal_hash(&env),
         };
 
         let re_result = std::panic::catch_unwind(|| {
@@ -571,6 +589,7 @@ proptest! {
             purity_grade: Symbol::new(&env, "999"), // valid purity
             physical_redemption_window: u64::MAX,    // boundary max
             quality_attestation: Address::generate(&env),
+            legal_document_hash: legal_hash(&env),
         };
 
         let com_result = std::panic::catch_unwind(|| {
@@ -592,7 +611,9 @@ proptest! {
             due_date: u64::MAX, // boundary max
             credit_rating: Symbol::new(&env, "AAA"),
             automatic_settlement: false,
-            invoice_amount: amount,
+            invoice_amount: amount.max(1),
+            outstanding_balance: amount.max(1),
+            legal_document_hash: legal_hash(&env),
         };
 
         let inv_result = std::panic::catch_unwind(|| {

@@ -9,7 +9,7 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>/sdk/src'],
+  roots: ['<rootDir>/sdk/src', '<rootDir>/ui/src'],
   testMatch: ['**/__tests__/**/*.test.ts'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'json', 'node'],
   transform: {

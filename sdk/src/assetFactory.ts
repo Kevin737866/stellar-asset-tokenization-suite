@@ -331,7 +331,7 @@ export class AssetFactory {
    * Deploy a Security (equity) RWA token with regulatory compliance metadata.
    *
    * Validates `regulationFramework` against accepted values (`REG_D`, `REG_S`,
-   * `RULE_144`, `REG_A+`) and enforces accredited-investor-only compliance rules.
+   * `RULE_144`, `REG_A_PLUS`) and enforces accredited-investor-only compliance rules.
    * Holding period is set to 365 days for `RULE_144`, 90 days otherwise.
    *
    * @param signer - Keypair that authorises and signs the transaction.
