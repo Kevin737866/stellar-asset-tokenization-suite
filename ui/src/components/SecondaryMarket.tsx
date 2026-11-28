@@ -567,12 +567,12 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
           <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">Recent Trades</h2>
           {trades.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-xs">
+              <table className="w-full text-xs" aria-label="Recent trades">
                 <thead>
                   <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-                    <th className="pb-1 font-medium">Time</th>
-                    <th className="pb-1 font-medium">Price</th>
-                    <th className="pb-1 font-medium">Amount</th>
+                    <th scope="col" className="pb-1 font-medium">Time</th>
+                    <th scope="col" className="pb-1 font-medium">Price</th>
+                    <th scope="col" className="pb-1 font-medium">Amount</th>
                   </tr>
                 </thead>
                 <tbody>

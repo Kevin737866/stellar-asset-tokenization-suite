@@ -179,6 +179,11 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
     setCurrentPage(1);
   };
 
+  const getAriaSort = (field: typeof sortField): 'ascending' | 'descending' | 'none' => {
+    if (sortField !== field) return 'none';
+    return sortDirection === 'asc' ? 'ascending' : 'descending';
+  };
+
   const formatDate = (date: Date) => {
     const d = new Date(date);
     return d.toLocaleDateString('en-US', {
@@ -325,44 +330,64 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
       {sortedTransactions.length > 0 && (
         <>
           <div className="hidden md:block overflow-x-auto rounded-lg border">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm" aria-label="Transaction history">
               <thead className="bg-gray-50 dark:bg-gray-800 border-b dark:border-gray-700">
                 <tr>
                   <th
-                    className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
-                    onClick={() => handleSort('type')}
+                    scope="col"
+                    aria-sort={getAriaSort('type')}
+                    className="px-4 py-3 text-left font-semibold text-gray-600"
                   >
-                    <div className="flex items-center gap-1">
-                      Type <ArrowUpDown className="h-3 w-3" />
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSort('type')}
+                      className="flex items-center gap-1 hover:text-gray-900 dark:hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+                    >
+                      Type <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold text-gray-600">Token</th>
+                  <th scope="col" className="px-4 py-3 text-left font-semibold text-gray-600">Token</th>
                   <th
-                    className="px-4 py-3 text-right font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
-                    onClick={() => handleSort('amount')}
+                    scope="col"
+                    aria-sort={getAriaSort('amount')}
+                    className="px-4 py-3 text-right font-semibold text-gray-600"
                   >
-                    <div className="flex items-center justify-end gap-1">
-                      Amount <ArrowUpDown className="h-3 w-3" />
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSort('amount')}
+                      className="inline-flex items-center justify-end gap-1 w-full hover:text-gray-900 dark:hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+                    >
+                      Amount <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold text-gray-600">Counterparty</th>
+                  <th scope="col" className="px-4 py-3 text-left font-semibold text-gray-600">Counterparty</th>
                   <th
-                    className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
-                    onClick={() => handleSort('date')}
+                    scope="col"
+                    aria-sort={getAriaSort('date')}
+                    className="px-4 py-3 text-left font-semibold text-gray-600"
                   >
-                    <div className="flex items-center gap-1">
-                      Date <ArrowUpDown className="h-3 w-3" />
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSort('date')}
+                      className="flex items-center gap-1 hover:text-gray-900 dark:hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+                    >
+                      Date <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
                   </th>
                   <th
-                    className="px-4 py-3 text-center font-semibold text-gray-600 cursor-pointer hover:text-gray-900"
-                    onClick={() => handleSort('status')}
+                    scope="col"
+                    aria-sort={getAriaSort('status')}
+                    className="px-4 py-3 text-center font-semibold text-gray-600"
                   >
-                    <div className="flex items-center justify-center gap-1">
-                      Status <ArrowUpDown className="h-3 w-3" />
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSort('status')}
+                      className="inline-flex items-center justify-center gap-1 w-full hover:text-gray-900 dark:hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+                    >
+                      Status <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
                   </th>
-                  <th className="px-4 py-3 text-right font-semibold text-gray-600">Tx Hash</th>
+                  <th scope="col" className="px-4 py-3 text-right font-semibold text-gray-600">Tx Hash</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -389,12 +414,14 @@ export default function TransactionHistory({ transactions, onOpenExplorer, isLoa
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
+                          type="button"
                           onClick={() => onOpenExplorer?.(tx.txHash)}
-                          className="text-blue-600 hover:text-blue-800 font-mono text-xs flex items-center justify-end gap-1 hover:underline"
+                          className="text-blue-600 hover:text-blue-800 font-mono text-xs flex items-center justify-end gap-1 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
                           title="View on Stellar Explorer"
+                          aria-label={`View transaction ${tx.txHash} on Stellar Explorer`}
                         >
                           {tx.txHash.slice(0, 8)}...{tx.txHash.slice(-6)}
-                          <ExternalLink className="h-3 w-3" />
+                          <ExternalLink className="h-3 w-3" aria-hidden="true" />
                         </button>
                       </td>
                     </tr>
