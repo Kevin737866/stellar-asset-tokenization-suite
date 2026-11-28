@@ -10,6 +10,9 @@ interface SecondaryMarketProps {
   userAddress: string;
 }
 
+const QUOTE_CURRENCY = 'USDC';
+const QUOTE_CURRENCY_DECIMALS = 6;
+
 const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress }) => {
   const toast = useToast();
   const translateError = useErrorTranslator();
@@ -431,22 +434,42 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
               </button>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-              <input
-                type="number"
-                step="any"
-                placeholder="Price"
-                value={price}
-                onChange={e => setPrice(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <input
-                type="number"
-                step="any"
-                placeholder="Amount"
-                value={amount}
-                onChange={e => setAmount(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
+              <div>
+                <label htmlFor="market-order-price" className="mb-1 block text-xs text-gray-500 dark:text-gray-400">
+                  Price ({QUOTE_CURRENCY})
+                </label>
+                <input
+                  id="market-order-price"
+                  type="number"
+                  step="any"
+                  placeholder="Price"
+                  value={price}
+                  onChange={e => setPrice(e.target.value)}
+                  aria-describedby="market-order-price-precision"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <p id="market-order-price-precision" className="mt-1 text-xs text-gray-400">
+                  Quote currency precision: {QUOTE_CURRENCY_DECIMALS} decimal places.
+                </p>
+              </div>
+              <div>
+                <label htmlFor="market-order-amount" className="mb-1 block text-xs text-gray-500 dark:text-gray-400">
+                  Amount ({asset.symbol})
+                </label>
+                <input
+                  id="market-order-amount"
+                  type="number"
+                  step="any"
+                  placeholder="Amount"
+                  value={amount}
+                  onChange={e => setAmount(e.target.value)}
+                  aria-describedby="market-order-amount-precision"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <p id="market-order-amount-precision" className="mt-1 text-xs text-gray-400">
+                  Token precision: {asset.decimals} decimal {asset.decimals === 1 ? 'place' : 'places'}.
+                </p>
+              </div>
             </div>
 
             {feePreview && (
