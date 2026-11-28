@@ -84,11 +84,39 @@ function compareAssets(a: Asset, b: Asset): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Help text
+// Help text & examples
 // ─────────────────────────────────────────────────────────────────────────────
 
-function printHelp() {
-  console.log(`
+export const SUPPORTED_COMMANDS = [
+  'create-pool',
+  'liquidate',
+  'generate-types',
+] as const;
+
+export type CliCommand = (typeof SUPPORTED_COMMANDS)[number];
+
+export const COMMAND_HELP_EXAMPLES: Record<CliCommand, readonly string[]> = {
+  'create-pool': [
+    'node dist/cli.js create-pool --asset-a XLM --asset-b USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN --amount-a 1000 --amount-b 500 --secret S... --network testnet',
+    'node dist/cli.js create-pool --asset-a RWA:G... --asset-b USDC:G... --amount-a 250 --amount-b 250 --fee 30 --slippage 0.02 --secret S... --network mainnet --horizon-url https://horizon.stellar.org',
+  ],
+  liquidate: [
+    'node dist/cli.js liquidate --asset-id C... --custody-validator C... --secret S... --evidence-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --network testnet',
+    'node dist/cli.js liquidate --asset-id C... --custody-validator C... --secret S... --evidence-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --reason "attestation_expired" --force --network mainnet',
+  ],
+  'generate-types': [
+    'node dist/cli.js generate-types --schema ./schemas/rwa-token.json --out ./src/generated/rwaToken.ts',
+    'node dist/cli.js generate-types --contracts C...,C... --rpc-url https://soroban-testnet.stellar.org --network testnet --dry-run',
+  ],
+};
+
+function formatExamples(examples: readonly string[]): string {
+  return examples.map((example) => `  ${example}`).join('\n');
+}
+
+export function getHelpText(command?: string): string {
+  if (command === undefined) {
+    return `
 Stellar RWA Suite CLI
 
 Usage:
@@ -115,8 +143,56 @@ Exit Codes:
 `);
 }
 
-function printGenerateTypesHelp() {
-  console.log(`
+Usage:
+  node dist/cli.js create-pool [options]
+
+Options:
+  --asset-a <asset>      First asset (e.g. "XLM" or "CODE:ISSUER") [required]
+  --asset-b <asset>      Second asset (e.g. "CODE:ISSUER") [required]
+  --amount-a <amount>    Maximum amount of Asset A to deposit [required]
+  --amount-b <amount>    Maximum amount of Asset B to deposit [required]
+  --fee <fee>            Liquidity pool fee in basis points (default: 30)
+  --secret <secret>      Secret key of the depositor [required]
+  --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
+  --horizon-url <url>    Horizon server URL (optional, overrides default for network)
+  --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
+  --help, -h             Show this help message
+
+Examples:
+${formatExamples(COMMAND_HELP_EXAMPLES['create-pool'])}
+`;
+  }
+
+  if (command === 'liquidate') {
+    return `
+Stellar RWA Suite CLI - Liquidate Command
+
+Liquidates an undercollateralized RWA position by triggering an insurance claim
+on the Custody Validator contract. The command first checks whether the position
+is actually undercollateralized (collateral value < total token supply). Use
+--force to skip the collateralization check and proceed unconditionally.
+
+Usage:
+  node dist/cli.js liquidate [options]
+
+Options:
+  --asset-id <address>          On-chain contract address of the RWA token [required]
+  --custody-validator <address> Custody Validator contract address [required]
+  --secret <secret>             Secret key of the authorized admin account [required]
+  --reason <reason>             Short reason code for the claim (default: "undercollateralized")
+  --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
+  --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
+  --horizon-url <url>           Horizon server URL (optional, overrides default for network)
+  --force                       Skip collateralization check and liquidate unconditionally
+  --help, -h                    Show this help message
+
+Examples:
+${formatExamples(COMMAND_HELP_EXAMPLES['liquidate'])}
+`;
+  }
+
+  if (command === 'generate-types') {
+    return `
 Stellar RWA Suite CLI - Type Generator
 
 Generates a TypeScript module from Soroban contract SCHEMA (spec) entries:
@@ -143,7 +219,23 @@ Options:
   --no-client             Do not emit the <Name>Client interface
   --dry-run               Print the result and warnings without writing --out
   --help, -h              Show this help message
-`);
+
+Examples:
+${formatExamples(COMMAND_HELP_EXAMPLES['generate-types'])}
+`;
+  }
+
+  throw new Error(
+    `Unknown command: "${command}". Supported commands: ${SUPPORTED_COMMANDS.join(', ')}`
+  );
+}
+
+export function printHelp() {
+  console.log(getHelpText());
+}
+
+export function printGenerateTypesHelp() {
+  console.log(getHelpText('generate-types'));
 }
 
 function collectRepeated(args: string[], flag: string): string[] {
@@ -225,50 +317,12 @@ async function runGenerateTypes(args: string[]): Promise<void> {
   }
 }
 
-function printCreatePoolHelp() {
-  console.log(`
-Stellar RWA Suite CLI - Pool Creation Command
-
-Usage:
-  node dist/cli.js create-pool [options]
-
-Options:
-  --asset-a <asset>      First asset (e.g. "XLM" or "CODE:ISSUER") [required]
-  --asset-b <asset>      Second asset (e.g. "CODE:ISSUER") [required]
-  --amount-a <amount>    Maximum amount of Asset A to deposit [required]
-  --amount-b <amount>    Maximum amount of Asset B to deposit [required]
-  --fee <fee>            Liquidity pool fee in basis points (default: 30)
-  --secret <secret>      Secret key of the depositor [required]
-  --network <network>    Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
-  --horizon-url <url>    Horizon server URL (optional, overrides default for network)
-  --slippage <slippage>  Slippage tolerance as a decimal (default: 0.01 for 1%)
-  --help, -h             Show this help message
-`);
+export function printCreatePoolHelp() {
+  console.log(getHelpText('create-pool'));
 }
 
-function printLiquidateHelp() {
-  console.log(`
-Stellar RWA Suite CLI - Liquidate Command
-
-Liquidates an undercollateralized RWA position by triggering an insurance claim
-on the Custody Validator contract. The command first checks whether the position
-is actually undercollateralized (collateral value < total token supply). Use
---force to skip the collateralization check and proceed unconditionally.
-
-Usage:
-  node dist/cli.js liquidate [options]
-
-Options:
-  --asset-id <address>          On-chain contract address of the RWA token [required]
-  --custody-validator <address> Custody Validator contract address [required]
-  --secret <secret>             Secret key of the authorized admin account [required]
-  --reason <reason>             Short reason code for the claim (default: "undercollateralized")
-  --evidence-hash <hash>        64-character hex evidence hash (32 bytes) [required]
-  --network <network>           Stellar network: testnet, mainnet, futurenet, standalone (default: testnet)
-  --horizon-url <url>           Horizon server URL (optional, overrides default for network)
-  --force                       Skip collateralization check and liquidate unconditionally
-  --help, -h                    Show this help message
-`);
+export function printLiquidateHelp() {
+  console.log(getHelpText('liquidate'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -970,7 +1024,7 @@ export async function runCli(
     }
   }
 
-  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
     return 0;
   }
