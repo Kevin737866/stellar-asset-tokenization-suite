@@ -1,6 +1,11 @@
-use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, Vec, panic_with_error, String};
+use crate::asset_class_handlers::{
+    set_legal_document_hash, validate_address_not_zero, validate_legal_document_hash,
+    validate_metadata_size, AssetClassError,
+};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
+use soroban_sdk::{
+    contracterror, contracttype, panic_with_error, Address, BytesN, Env, String, Symbol, Vec,
+};
 
 const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -27,6 +32,8 @@ pub struct AgriculturalConfig {
     pub planting_date: u64,
     pub harvest_date: u64,
     pub expected_yield: i128,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
 /// Issue #172: price discount (in basis points) applied while a crop is still
@@ -57,6 +64,8 @@ pub struct CommodityConfig {
     pub purity_grade: Symbol,
     pub physical_redemption_window: u64,
     pub quality_attestation: Address,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
 pub fn create_commodity_config(
@@ -66,23 +75,43 @@ pub fn create_commodity_config(
 ) -> AssetConfig {
     validate_address_not_zero(&env, &commodity_config.custody_vault);
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_legal_document_hash(&env, &commodity_config.legal_document_hash);
 
-    let valid_grades = Vec::from_array(&env, [
-        Symbol::new(&env, "999"),
-        Symbol::new(&env, "995"),
-        Symbol::new(&env, "990"),
-        Symbol::new(&env, "750"),
-    ]);
-    
+    let valid_grades = Vec::from_array(
+        &env,
+        [
+            Symbol::new(&env, "999"),
+            Symbol::new(&env, "995"),
+            Symbol::new(&env, "990"),
+            Symbol::new(&env, "750"),
+        ],
+    );
+
     if !valid_grades.contains(&commodity_config.purity_grade) {
         panic_with_error!(&env, AssetClassError::InvalidPurityGrade);
     }
 
     let mut metadata = base_config.metadata;
-    metadata.set(Symbol::new(&env, "commodity_type"), String::from_str(&env, &commodity_config.commodity_type.to_string()));
-    metadata.set(Symbol::new(&env, "vault_location"), String::from_str(&env, &commodity_config.vault_location.to_string()));
-    metadata.set(Symbol::new(&env, "purity_grade"), String::from_str(&env, &commodity_config.purity_grade.to_string()));
-    metadata.set(Symbol::new(&env, "redemption_window"), String::from_str(&env, &commodity_config.physical_redemption_window.to_string()));
+    metadata.set(
+        Symbol::new(&env, "commodity_type"),
+        String::from_str(&env, &commodity_config.commodity_type.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "vault_location"),
+        String::from_str(&env, &commodity_config.vault_location.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "purity_grade"),
+        String::from_str(&env, &commodity_config.purity_grade.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "redemption_window"),
+        String::from_str(
+            &env,
+            &commodity_config.physical_redemption_window.to_string(),
+        ),
+    );
+    set_legal_document_hash(&env, &mut metadata, &commodity_config.legal_document_hash);
 
     AssetConfig {
         metadata,
@@ -106,10 +135,10 @@ pub fn create_agricultural_config(
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_legal_document_hash(&env, &agricultural_config.legal_document_hash);
 
     let now = env.ledger().timestamp();
-    let price_adjustment_bps =
-        harvest_price_adjustment_bps(now, agricultural_config.harvest_date);
+    let price_adjustment_bps = harvest_price_adjustment_bps(now, agricultural_config.harvest_date);
 
     let mut metadata = base_config.metadata;
     metadata.set(
@@ -135,6 +164,11 @@ pub fn create_agricultural_config(
     metadata.set(
         Symbol::new(&env, "price_adjustment_bps"),
         String::from_str(&env, &price_adjustment_bps.to_string()),
+    );
+    set_legal_document_hash(
+        &env,
+        &mut metadata,
+        &agricultural_config.legal_document_hash,
     );
 
     AssetConfig {

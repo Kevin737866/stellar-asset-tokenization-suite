@@ -12,6 +12,50 @@ import { CustodyClient } from './custody';
 import { runTypeGenerator } from './typeGenerator';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CLI errors and exit codes
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Base error for CLI failures that carry a process exit code.
+ * Exit codes: 0 success, 1 unexpected, 2 validation, 4 network.
+ */
+export class CliError extends Error {
+  readonly exitCode: number;
+
+  constructor(message: string, exitCode = 1) {
+    super(message);
+    this.name = new.target.name;
+    this.exitCode = exitCode;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** Invalid or missing CLI input. Exits with code 2. */
+export class CliValidationError extends CliError {
+  constructor(message: string) {
+    super(message, 2);
+  }
+}
+
+/** Horizon/RPC/network request failure. Exits with code 4. */
+export class CliNetworkError extends CliError {
+  constructor(message: string) {
+    super(message, 4);
+  }
+}
+
+function cliErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Optional network seams for tests; production uses real Horizon servers. */
+export interface CliDeps {
+  createHorizonServer?: (
+    horizonUrl: string
+  ) => Pick<Horizon.Server, 'loadAccount' | 'submitTransaction'>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Asset utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -22,7 +66,7 @@ function parseAsset(assetStr: string): Asset {
   }
   const parts = assetStr.split(':');
   if (parts.length !== 2) {
-    throw new Error(`Invalid asset format: "${assetStr}". Expected "XLM" or "CODE:ISSUER"`);
+    throw new CliValidationError(`Invalid asset format: "${assetStr}". Expected "XLM" or "CODE:ISSUER"`);
   }
   return new Asset(parts[0], parts[1]);
 }
@@ -89,26 +133,15 @@ Global Options:
   --interactive, -i   Launch guided interactive prompt mode
   --help,       -h    Show this help message
 
-Examples:
-  # Guided interactive mode
-  node dist/cli.js --interactive
+Run "node dist/cli.js <command> --help" for command-specific options.
 
-  # Create a liquidity pool
-  ${COMMAND_HELP_EXAMPLES['create-pool'][0]}
-
-  # Liquidate an undercollateralized RWA position
-  ${COMMAND_HELP_EXAMPLES['liquidate'][0]}
-
-  # Generate TypeScript types from a Soroban schema
-  ${COMMAND_HELP_EXAMPLES['generate-types'][0]}
-
-Run "node dist/cli.js <command> --help" for command-specific options and examples.
-`;
-  }
-
-  if (command === 'create-pool') {
-    return `
-Stellar RWA Suite CLI - Pool Creation Command
+Exit Codes:
+  0  Success
+  1  Unexpected error
+  2  Validation or invalid input
+  4  Network failure
+`);
+}
 
 Usage:
   node dist/cli.js create-pool [options]
@@ -219,7 +252,7 @@ function collectRepeated(args: string[], flag: string): string[] {
 async function runGenerateTypes(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     printGenerateTypesHelp();
-    process.exit(0);
+    return;
   }
 
   const options = parseArgs(args);
@@ -233,15 +266,14 @@ async function runGenerateTypes(args: string[]): Promise<void> {
   }
 
   if (contracts.length === 0 && schemaFiles.length === 0) {
-    console.error('Error: provide --contracts <ids> or at least one --schema <file.json>');
     printGenerateTypesHelp();
-    process.exit(1);
+    throw new CliValidationError('Provide --contracts <ids> or at least one --schema <file.json>');
   }
 
   const networkName = options['network'] || 'testnet';
   const networkConfig = STELLAR_NETWORKS[networkName];
   if (contracts.length > 0 && !networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
+    throw new CliValidationError(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
   }
 
   let manualTypesFile = options['manual-types'];
@@ -250,16 +282,25 @@ async function runGenerateTypes(args: string[]): Promise<void> {
     if (require('fs').existsSync(candidate)) manualTypesFile = candidate;
   }
 
-  const result = await runTypeGenerator({
-    schemaFiles,
-    contracts,
-    rpcUrl: options['rpc-url'],
-    networkPassphrase: networkConfig?.passphrase,
-    outFile: options['out'],
-    emitClient: options['no-client'] !== 'true',
-    manualTypesFile,
-    dryRun: options['dry-run'] === 'true',
-  });
+  let result;
+  try {
+    result = await runTypeGenerator({
+      schemaFiles,
+      contracts,
+      rpcUrl: options['rpc-url'],
+      networkPassphrase: networkConfig?.passphrase,
+      outFile: options['out'],
+      emitClient: options['no-client'] !== 'true',
+      manualTypesFile,
+      dryRun: options['dry-run'] === 'true',
+    });
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    if (contracts.length > 0) {
+      throw new CliNetworkError(`Failed to fetch contract schemas: ${cliErrorMessage(error)}`);
+    }
+    throw error;
+  }
 
   console.log(`Loaded ${result.schemasLoaded} schema(s); declared ${result.declaredTypes.length} type(s).`);
   for (const warning of result.warnings) {
@@ -648,19 +689,18 @@ export async function runInteractive(
 // create-pool command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runCreatePool(args: string[]): Promise<void> {
+async function runCreatePool(args: string[], deps: CliDeps = {}): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     printCreatePoolHelp();
-    process.exit(0);
+    return;
   }
 
   const options = parseArgs(args);
   const required = ['asset-a', 'asset-b', 'amount-a', 'amount-b', 'secret'];
   for (const req of required) {
     if (!options[req]) {
-      console.error(`Error: Missing required option --${req}`);
       printCreatePoolHelp();
-      process.exit(1);
+      throw new CliValidationError(`Missing required option --${req}`);
     }
   }
 
@@ -673,19 +713,41 @@ async function runCreatePool(args: string[]): Promise<void> {
   const networkName = options['network'] || 'testnet';
   const slippageStr = options['slippage'] || '0.01';
 
+  if (validators.positiveNumber(amountA) || validators.positiveNumber(amountB)) {
+    throw new CliValidationError('Amounts must be positive numbers');
+  }
+  if (validators.feeBasicPoints(feeStr)) {
+    throw new CliValidationError('Fee must be a whole number between 1 and 10000 basis points');
+  }
+  if (validators.slippage(slippageStr)) {
+    throw new CliValidationError('Slippage must be between 0 and 1');
+  }
+
   const fee = parseInt(feeStr, 10);
   const slippage = parseFloat(slippageStr);
 
   const networkConfig = STELLAR_NETWORKS[networkName];
   if (!networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
+    throw new CliValidationError(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
   }
 
   const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
   console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
-  const server = new Horizon.Server(horizonUrl);
+  let server: Pick<Horizon.Server, 'loadAccount' | 'submitTransaction'>;
+  try {
+    server = deps.createHorizonServer
+      ? deps.createHorizonServer(horizonUrl)
+      : new Horizon.Server(horizonUrl);
+  } catch (error) {
+    throw new CliValidationError(`Invalid --horizon-url "${horizonUrl}": ${cliErrorMessage(error)}`);
+  }
 
-  const depositorKeypair = Keypair.fromSecret(secret);
+  let depositorKeypair: Keypair;
+  try {
+    depositorKeypair = Keypair.fromSecret(secret);
+  } catch (error) {
+    throw new CliValidationError(`Invalid --secret key: ${cliErrorMessage(error)}`);
+  }
   const depositorAddress = depositorKeypair.publicKey();
   console.log(`Depositor Account: ${depositorAddress}`);
 
@@ -723,7 +785,12 @@ async function runCreatePool(args: string[]): Promise<void> {
 
   // Load account to check balance and trustlines
   console.log('Fetching account details...');
-  const account = await server.loadAccount(depositorAddress);
+  let account;
+  try {
+    account = await server.loadAccount(depositorAddress);
+  } catch (error) {
+    throw new CliNetworkError(`Failed to load account ${depositorAddress}: ${cliErrorMessage(error)}`);
+  }
 
   // Check trustlines
   const hasTrustline = (asset: Asset) => {
@@ -793,7 +860,12 @@ async function runCreatePool(args: string[]): Promise<void> {
   tx.sign(depositorKeypair);
 
   console.log(`Submitting transaction with ${operationsAdded} operations to network...`);
-  const response = await server.submitTransaction(tx);
+  let response;
+  try {
+    response = await server.submitTransaction(tx);
+  } catch (error) {
+    throw new CliNetworkError(`Failed to submit transaction: ${cliErrorMessage(error)}`);
+  }
   console.log('Transaction submitted successfully!');
   console.log(`Hash: ${response.hash}`);
   console.log(`Ledger: ${(response as any).ledger}`);
@@ -806,16 +878,15 @@ async function runCreatePool(args: string[]): Promise<void> {
 async function runLiquidate(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     printLiquidateHelp();
-    process.exit(0);
+    return;
   }
 
   const options = parseArgs(args);
   const required = ['asset-id', 'custody-validator', 'secret', 'evidence-hash'];
   for (const req of required) {
     if (!options[req]) {
-      console.error(`Error: Missing required option --${req}`);
       printLiquidateHelp();
-      process.exit(1);
+      throw new CliValidationError(`Missing required option --${req}`);
     }
   }
 
@@ -827,21 +898,32 @@ async function runLiquidate(args: string[]): Promise<void> {
   const networkName = options['network'] || 'testnet';
   const force = options['force'] === 'true';
 
+  if (validators.contractAddress(assetId)) {
+    throw new CliValidationError(`Invalid --asset-id: ${validators.contractAddress(assetId)}`);
+  }
+  if (validators.contractAddress(custodyValidatorId)) {
+    throw new CliValidationError(`Invalid --custody-validator: ${validators.contractAddress(custodyValidatorId)}`);
+  }
+
   // Validate evidence hash format
   if (!/^[0-9a-fA-F]{64}$/.test(evidenceHash)) {
-    console.error('Error: --evidence-hash must be a 64-character hex string (32 bytes).');
-    process.exit(1);
+    throw new CliValidationError('--evidence-hash must be a 64-character hex string (32 bytes).');
   }
 
   const networkConfig = STELLAR_NETWORKS[networkName];
   if (!networkConfig) {
-    throw new Error(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
+    throw new CliValidationError(`Unsupported network: "${networkName}". Supported: testnet, mainnet, futurenet, standalone`);
   }
 
   const horizonUrl = options['horizon-url'] || networkConfig.horizonUrl;
   console.log(`Connecting to Stellar network: ${networkName} via ${horizonUrl}...`);
 
-  const adminKeypair = Keypair.fromSecret(secret);
+  let adminKeypair: Keypair;
+  try {
+    adminKeypair = Keypair.fromSecret(secret);
+  } catch (error) {
+    throw new CliValidationError(`Invalid --secret key: ${cliErrorMessage(error)}`);
+  }
   console.log(`Admin Account: ${adminKeypair.publicKey()}`);
   console.log(`Asset ID: ${assetId}`);
   console.log(`Custody Validator: ${custodyValidatorId}`);
@@ -862,7 +944,7 @@ async function runLiquidate(args: string[]): Promise<void> {
       if (backingStatus.isValid) {
         console.log('✅ Asset is currently fully backed by valid custody attestation.');
         console.log('   Use --force to liquidate anyway.');
-        process.exit(0);
+        return;
       }
 
       // Describe why the position is undercollateralized
@@ -882,8 +964,8 @@ async function runLiquidate(args: string[]): Promise<void> {
       }
 
       console.log('\n🔴 Position is undercollateralized. Proceeding with liquidation...');
-    } catch (err: any) {
-      console.warn(`Warning: Could not verify collateral on-chain (${err.message}). Proceeding with liquidation as requested...`);
+    } catch (err: unknown) {
+      console.warn(`Warning: Could not verify collateral on-chain (${cliErrorMessage(err)}). Proceeding with liquidation as requested...`);
     }
   } else {
     console.log('⚡ --force flag set. Skipping collateralization check...');
@@ -894,12 +976,17 @@ async function runLiquidate(args: string[]): Promise<void> {
   console.log(`  Reason: ${reason}`);
   console.log(`  Evidence Hash: ${evidenceHash}`);
 
-  const result = await custodyClient.triggerInsuranceClaim(
-    adminKeypair,
-    assetId,
-    reason,
-    evidenceHash
-  );
+  let result;
+  try {
+    result = await custodyClient.triggerInsuranceClaim(
+      adminKeypair,
+      assetId,
+      reason,
+      evidenceHash
+    );
+  } catch (error) {
+    throw new CliNetworkError(`Failed to trigger insurance claim: ${cliErrorMessage(error)}`);
+  }
 
   console.log('\n✅ Liquidation triggered successfully!');
   console.log(`   Transaction Hash: ${result.hash}`);
@@ -912,23 +999,34 @@ async function runLiquidate(args: string[]): Promise<void> {
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function runCli() {
-  const args = process.argv.slice(2);
+/**
+ * Runs the CLI and resolves to the exit code the process should use.
+ *
+ * Exit codes: 0 success, 1 unexpected, 2 validation, 4 network failure.
+ * Kept as a return value (instead of calling process.exit internally) so the
+ * behavior can be tested without terminating the test runner.
+ */
+export async function runCli(
+  argv: string[] = process.argv.slice(2),
+  deps: CliDeps = {}
+): Promise<number> {
+  const args = argv;
 
   // Interactive mode
   if (args.includes('--interactive') || args.includes('-i')) {
     try {
       await runInteractive();
-    } catch (error: any) {
-      console.error(`\n❌ Error: ${error.message || error}`);
-      process.exit(1);
+      return 0;
+    } catch (error) {
+      const exitCode = error instanceof CliError ? error.exitCode : 1;
+      console.error(`\n❌ Error [${exitCode}]: ${cliErrorMessage(error)}`);
+      return exitCode;
     }
-    return;
   }
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
-    process.exit(0);
+    return 0;
   }
 
   const command = args[0];
@@ -936,22 +1034,25 @@ export async function runCli() {
 
   try {
     if (command === 'create-pool') {
-      await runCreatePool(commandArgs);
+      await runCreatePool(commandArgs, deps);
     } else if (command === 'liquidate') {
       await runLiquidate(commandArgs);
     } else if (command === 'generate-types') {
       await runGenerateTypes(commandArgs);
     } else {
-      console.error(`Unknown command: "${command}".`);
       printHelp();
-      process.exit(1);
+      throw new CliValidationError(`Unknown command: "${command}".`);
     }
-  } catch (error: any) {
-    console.error(`\n❌ Error: ${error.message || error}`);
-    process.exit(1);
+    return 0;
+  } catch (error) {
+    const exitCode = error instanceof CliError ? error.exitCode : 1;
+    console.error(`\n❌ Error [${exitCode}]: ${cliErrorMessage(error)}`);
+    return exitCode;
   }
 }
 
 if (require.main === module) {
-  runCli();
+  runCli().then((code) => {
+    process.exit(code);
+  });
 }
