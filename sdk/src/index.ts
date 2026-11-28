@@ -1,5 +1,6 @@
 // Main SDK exports
 import { Address } from 'stellar-sdk';
+import type { TransactionOptions } from './types';
 import { AssetFactory } from './assetFactory';
 import { TokenClient } from './tokenClient';
 import { DividendClient } from './dividendClient';
@@ -9,6 +10,7 @@ import { CustodyClient } from './custody';
 import { CustodyMonitoring } from './custodyMonitoring';
 import {
   InvalidParametersError,
+  UnauthorizedError,
   RWASDKError,
   NetworkError,
   ContractError,
@@ -39,6 +41,14 @@ import {
 // ─── All public types re-exported from the types module ───────────────────────
 // This is the SINGLE re-export of every shared type. No other module should
 // re-export from types.ts to prevent accidental circular paths.
+import type {
+  SimulationResult,
+  SimulationEvent,
+  StorageChange,
+  SimulationOptions,
+  BatchTransactionOperation,
+  BatchTransactionResult,
+} from './types';
 export * from './types';
 
 // ─── Custody module exports ───────────────────────────────────────────────────
@@ -98,33 +108,220 @@ export {
   type ErrorInfo,
 } from './errors';
 
-// ─── Configurable Fee Strategy & Safe Protocol Bounds ────────────────────────
-import {
-  DEFAULT_FEE_STRATEGY,
-  DEFAULT_MAX_FEE_STROOPS,
-  STELLAR_MAX_PROTOCOL_FEE_STROOPS,
-  STELLAR_MIN_BASE_FEE_STROOPS,
-  resolveTransactionFee,
-  validateFeeStrategy,
-  type FeeStrategyConfig,
-  type FeeStrategyContext,
-  type FeeStrategyMode,
-  type ResolvedFeeResult,
-} from './feeStrategy';
+// ─── IdempotencyGuard (Duplicate-Submission Protection) ──────────────────────
 
-export {
-  DEFAULT_FEE_STRATEGY,
-  DEFAULT_MAX_FEE_STROOPS,
-  FeeStrategyError,
-  STELLAR_MAX_PROTOCOL_FEE_STROOPS,
-  STELLAR_MIN_BASE_FEE_STROOPS,
-  resolveTransactionFee,
-  validateFeeStrategy,
-  type FeeStrategyConfig,
-  type FeeStrategyContext,
-  type FeeStrategyMode,
-  type ResolvedFeeResult,
-} from './feeStrategy';
+/** Default TTL (5 minutes) for retaining completed idempotency records. */
+const DEFAULT_IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
+
+/** Maximum allowed length for a caller-supplied idempotency key. */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+
+/**
+ * Extended transaction options supporting caller-supplied idempotency keys
+ * to prevent duplicate transaction submissions.
+ */
+export interface IdempotentTransactionOptions extends TransactionOptions {
+  /**
+   * Caller-supplied idempotency key (1–128 non-whitespace characters).
+   * Re-submitting the same operation from the same caller with the same key
+   * returns the original result instead of submitting a duplicate transaction.
+   */
+  idempotencyKey?: string;
+  /**
+   * Optional TTL in milliseconds for retaining the idempotency record
+   * (defaults to 5 minutes).
+   */
+  idempotencyTtlMs?: number;
+}
+
+/**
+ * Stored record for an in-flight or completed idempotent submission.
+ */
+export interface IdempotencyRecord<T = unknown> {
+  key: string;
+  caller: string;
+  fingerprint: string;
+  status: 'in_flight' | 'completed';
+  result?: T;
+  promise?: Promise<T>;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/**
+ * Validates a caller-supplied idempotency key.
+ *
+ * @throws {InvalidParametersError} if the key is empty, non-string, exceeds
+ *   {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters, or contains control characters.
+ */
+function validateIdempotencyKey(key: string): string {
+  if (typeof key !== 'string') {
+    throw new InvalidParametersError('idempotencyKey must be a non-empty string');
+  }
+  const trimmed = key.trim();
+  if (trimmed.length === 0) {
+    throw new InvalidParametersError('idempotencyKey must be a non-empty string');
+  }
+  if (trimmed.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    throw new InvalidParametersError(
+      `idempotencyKey must not exceed ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`
+    );
+  }
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) {
+    throw new InvalidParametersError('idempotencyKey must not contain control characters');
+  }
+  return trimmed;
+}
+
+/**
+ * Validates an optional idempotency TTL in milliseconds.
+ *
+ * @throws {InvalidParametersError} if provided and not a positive finite number.
+ */
+function validateIdempotencyTtl(ttlMs?: number): number {
+  if (ttlMs === undefined) {
+    return DEFAULT_IDEMPOTENCY_TTL_MS;
+  }
+  if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+    throw new InvalidParametersError('idempotencyTtlMs must be a positive finite number');
+  }
+  return ttlMs;
+}
+
+/**
+ * In-memory guard that protects transaction submissions against duplicates
+ * using a caller-supplied idempotency key.
+ *
+ * Semantics:
+ * - **Caller binding**: Each key is bound to the submitting caller address.
+ *   Another caller attempting to reuse an active key is rejected with
+ *   {@link UnauthorizedError}.
+ * - **Payload binding**: Each key is bound to an operation fingerprint.
+ *   Reusing an active key with a different payload is rejected with
+ *   {@link InvalidParametersError}.
+ * - **In-flight deduplication**: Concurrent submissions with the same key,
+ *   caller, and fingerprint share the single in-flight promise.
+ * - **Failure rollback**: If the underlying submission throws, the in-flight
+ *   record is removed so failed operations leave no partial state and can be
+ *   safely retried.
+ */
+export class IdempotencyGuard {
+  private readonly records: Map<string, IdempotencyRecord<any>> = new Map();
+  private readonly defaultTtlMs: number;
+
+  constructor(defaultTtlMs: number = DEFAULT_IDEMPOTENCY_TTL_MS) {
+    this.defaultTtlMs = validateIdempotencyTtl(defaultTtlMs);
+  }
+
+  /**
+   * Execute `executor` with duplicate-submission protection for `(key, caller, fingerprint)`.
+   */
+  async execute<T>(
+    key: string,
+    caller: string,
+    fingerprint: string,
+    executor: () => Promise<T>,
+    ttlMs?: number,
+  ): Promise<T> {
+    const normalizedKey = validateIdempotencyKey(key);
+    validateNonEmptyString(caller, 'caller');
+    validateNonEmptyString(fingerprint, 'fingerprint');
+    const resolvedTtlMs = ttlMs !== undefined ? validateIdempotencyTtl(ttlMs) : this.defaultTtlMs;
+
+    const now = Date.now();
+    const existing = this.records.get(normalizedKey);
+
+    if (existing) {
+      if (existing.status === 'completed' && existing.expiresAt <= now) {
+        this.records.delete(normalizedKey);
+      } else {
+        if (existing.caller !== caller) {
+          throw new UnauthorizedError(
+            `Idempotency key "${normalizedKey}" belongs to a different caller`
+          );
+        }
+        if (existing.fingerprint !== fingerprint) {
+          throw new InvalidParametersError(
+            `Idempotency key "${normalizedKey}" was already used with a different payload`
+          );
+        }
+        if (existing.status === 'in_flight' && existing.promise) {
+          return existing.promise as Promise<T>;
+        }
+        return existing.result as T;
+      }
+    }
+
+    const record: IdempotencyRecord<T> = {
+      key: normalizedKey,
+      caller,
+      fingerprint,
+      status: 'in_flight',
+      createdAt: now,
+      expiresAt: now + resolvedTtlMs,
+    };
+
+    const promise = (async () => {
+      try {
+        const result = await executor();
+        record.status = 'completed';
+        record.result = result;
+        record.promise = undefined;
+        record.expiresAt = Date.now() + resolvedTtlMs;
+        return result;
+      } catch (err) {
+        // Ensure failed operations do not leave partial state in the guard
+        if (this.records.get(normalizedKey) === record) {
+          this.records.delete(normalizedKey);
+        }
+        throw err;
+      }
+    })();
+
+    record.promise = promise;
+    this.records.set(normalizedKey, record);
+    return promise;
+  }
+
+  /** Return whether a non-expired record currently exists for `key`. */
+  has(key: string): boolean {
+    const normalizedKey = validateIdempotencyKey(key);
+    const existing = this.records.get(normalizedKey);
+    if (!existing) return false;
+    if (existing.status === 'completed' && existing.expiresAt <= Date.now()) {
+      this.records.delete(normalizedKey);
+      return false;
+    }
+    return true;
+  }
+
+  /** Return the current non-expired record for `key`, if any. */
+  get<T = unknown>(key: string): IdempotencyRecord<T> | undefined {
+    const normalizedKey = validateIdempotencyKey(key);
+    const existing = this.records.get(normalizedKey);
+    if (!existing) return undefined;
+    if (existing.status === 'completed' && existing.expiresAt <= Date.now()) {
+      this.records.delete(normalizedKey);
+      return undefined;
+    }
+    return existing as IdempotencyRecord<T>;
+  }
+
+  /** Remove a specific key (or all keys when omitted) from the guard. */
+  clear(key?: string): void {
+    if (key === undefined) {
+      this.records.clear();
+      return;
+    }
+    const normalizedKey = validateIdempotencyKey(key);
+    this.records.delete(normalizedKey);
+  }
+
+  /** Number of records currently tracked. */
+  get size(): number {
+    return this.records.size;
+  }
+}
 
 // ─── BatchTransactionBuilder ──────────────────────────────────────────────────
 
@@ -140,6 +337,50 @@ const BATCH_BASE_OP_FEE = 100;
 
 /** Fixed overhead added on top of summed per-operation fees to cover envelope costs. */
 const BATCH_OVERHEAD_FEE = 1000;
+
+/**
+ * Normalize a raw Soroban RPC simulation response into the public
+ * {@link SimulationResult} shape.
+ */
+function normalizeSimulationResult(simulation: any): SimulationResult {
+  if (!simulation || typeof simulation !== 'object') {
+    return {
+      success: false,
+      events: [],
+      returnValue: null,
+      gasUsed: '0',
+      storageChanges: [],
+      errorMessage: 'Simulation returned no result',
+    };
+  }
+
+  const events: SimulationEvent[] = (simulation.events || []).map((evt: any) => ({
+    contractId: evt.contractId || '',
+    topics: evt.topic || evt.topics || [],
+    data: evt.data ?? null,
+  }));
+
+  const storageChanges: StorageChange[] = (simulation.stateChanges || [])
+    .filter((change: any) => change.type === 'contract_data')
+    .map((change: any) => ({
+      contractId: change.contractId || '',
+      key: change.key || '',
+      oldValue: change.oldValue,
+      newValue: change.newValue,
+    }));
+
+  const isSuccess = simulation.result !== undefined && !simulation.error;
+  const errorMessage = simulation.error || (isSuccess ? undefined : 'Simulation returned no result');
+
+  return {
+    success: isSuccess,
+    events,
+    returnValue: simulation.result ?? null,
+    gasUsed: String(simulation.cost?.cpuInsns || 0),
+    storageChanges,
+    errorMessage,
+  };
+}
 
 /**
  * Builder for creating and submitting multi-operation Stellar transactions.
@@ -170,13 +411,18 @@ export class BatchTransactionBuilder {
   private readonly serverUrl: string;
   private readonly networkPassphrase: string;
   private readonly logger: Logger;
-  private feeStrategy?: FeeStrategyConfig;
+  private readonly idempotencyGuard: IdempotencyGuard;
 
-  constructor(serverUrl: string, networkPassphrase: string, feeStrategy?: FeeStrategyConfig) {
+  constructor(
+    serverUrl: string,
+    networkPassphrase: string,
+    idempotencyGuard: IdempotencyGuard = new IdempotencyGuard(),
+  ) {
     validateServerUrl(serverUrl, 'serverUrl');
     validateNonEmptyString(networkPassphrase, 'networkPassphrase');
     this.serverUrl = serverUrl;
     this.networkPassphrase = networkPassphrase;
+    this.idempotencyGuard = idempotencyGuard;
     this.logger = createLogger('BatchTransactionBuilder');
     if (feeStrategy !== undefined) {
       this.feeStrategy = validateFeeStrategy(feeStrategy);
@@ -303,7 +549,7 @@ export class BatchTransactionBuilder {
    */
   async submit(
     source: Address,
-    txOptions: TransactionOptions = {},
+    txOptions: IdempotentTransactionOptions & SimulationOptions = {},
   ): Promise<BatchTransactionResult> {
     validateAddress(source, 'source');
     if (this.operations.length === 0) {
@@ -317,90 +563,132 @@ export class BatchTransactionBuilder {
     if (txOptions.timeout != null && (typeof txOptions.timeout !== 'number' || txOptions.timeout <= 0)) {
       throw new InvalidParametersError('txOptions.timeout must be a positive number');
     }
+    if (txOptions.skipSimulation != null && typeof txOptions.skipSimulation !== 'boolean') {
+      throw new InvalidParametersError('txOptions.skipSimulation must be a boolean');
+    }
 
     const estimatedFee = parseInt(this.estimateGas(), 10);
     const fee = this.feeStrategy
       ? this.resolveFee(txOptions.fee).feeStroops
       : (txOptions.fee ?? estimatedFee);
 
-    this.logger.info('Submitting batch transaction', {
-      source: source.toString(),
-      operationCount: this.operations.length,
-      estimatedFee,
-    });
+    const executeSubmit = async (): Promise<BatchTransactionResult> => {
+      this.logger.info('Submitting batch transaction', {
+        source: source.toString(),
+        operationCount: this.operations.length,
+        estimatedFee,
+      });
 
-    try {
-      const { SorobanRpc, TransactionBuilder, Operation } = await import('stellar-sdk');
-      const server = new SorobanRpc.Server(this.serverUrl);
-      if (typeof (server as any).getNetwork === 'function') {
-        const networkInfo = await (server as any).getNetwork();
-        if (networkInfo && typeof networkInfo.passphrase === 'string') {
-          verifyNetworkPassphrase(this.networkPassphrase, networkInfo.passphrase);
+      try {
+        const { SorobanRpc, TransactionBuilder, Operation } = await import('stellar-sdk');
+        const server = new SorobanRpc.Server(this.serverUrl);
+        const account = await server.getAccount(source.toString());
+
+        const builder = new TransactionBuilder(account, {
+          fee: fee.toString(),
+          networkPassphrase: this.networkPassphrase,
+        });
+
+        for (const op of this.operations) {
+          builder.addOperation(
+            Operation.invokeContractFunction({
+              contract: op.contractId,
+              function: op.functionName,
+              args: op.args as any[],
+            }),
+          );
         }
-      }
-      const account = await server.getAccount(source.toString());
 
-      const builder = new TransactionBuilder(account, {
-        fee: fee.toString(),
-        networkPassphrase: this.networkPassphrase,
-      });
+        const tx = builder
+          .setTimeout(txOptions.timeout ?? DEFAULT_TIMEOUT_SECONDS)
+          .build();
 
-      for (const op of this.operations) {
-        builder.addOperation(
-          Operation.invokeContractFunction({
-            contract: op.contractId,
-            function: op.functionName,
-            args: op.args as any[],
-          }),
-        );
-      }
+        let simulation: SimulationResult | undefined;
+        if (txOptions.skipSimulation) {
+          simulation = {
+            success: true,
+            events: [],
+            gasUsed: '0',
+            storageChanges: [],
+          };
+        } else if (typeof (server as any).simulateTransaction === 'function') {
+          const rawSimulation = await (server as any).simulateTransaction(tx);
+          simulation = normalizeSimulationResult(rawSimulation);
+          if (!simulation.success) {
+            const simMsg = simulation.errorMessage || 'Transaction simulation failed';
+            throw new TransactionError(
+              `Batch simulation failed: ${simMsg}`,
+              { simulation },
+            );
+          }
+        }
 
-      const tx = builder
-        .setTimeout(txOptions.timeout ?? DEFAULT_TIMEOUT_SECONDS)
-        .build();
+        const response = await server.sendTransaction(tx);
+        if ((response as any).status === 'ERROR') {
+          throw new TransactionError(
+            `Batch rejected by network: ${JSON.stringify((response as any).errorResult ?? '')}`,
+            simulation ? { simulation } : undefined,
+          );
+        }
 
-      if (tx && typeof (tx as any).networkPassphrase === 'string') {
-        verifyNetworkPassphrase(tx as { networkPassphrase?: string }, this.networkPassphrase);
-      }
+        const hash: string = (response as any).hash;
+        const operationResults: BatchTransactionResult['operationResults'] =
+          this.operations.map(op => ({ label: op.label, success: true }));
 
-      const response = await server.sendTransaction(tx);
-      if ((response as any).status === 'ERROR') {
+        this.logger.info('Batch transaction submitted successfully', {
+          hash,
+          operationCount: this.operations.length,
+        });
+
+        return {
+          transactionHash: hash,
+          success: true,
+          operationResults,
+          totalFee: fee.toString(),
+          estimatedGas: estimatedFee.toString(),
+          ...(simulation ? { simulation } : {}),
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const simulation: SimulationResult | undefined = (err as any)?.details?.simulation;
+        this.logger.error('Batch transaction failed — all operations reverted', {
+          error: msg,
+          operationCount: this.operations.length,
+        });
+
+        const operationResults: BatchTransactionResult['operationResults'] =
+          this.operations.map(op => ({ label: op.label, success: false, errorMessage: msg }));
+
         throw new TransactionError(
-          `Batch rejected by network: ${JSON.stringify((response as any).errorResult ?? '')}`
+          `Batch failed — all ${this.operations.length} operations reverted: ${msg}`,
+          simulation ? { operationResults, simulation } : { operationResults },
         );
       }
+    };
 
-      const hash: string = (response as any).hash;
-      const operationResults: BatchTransactionResult['operationResults'] =
-        this.operations.map(op => ({ label: op.label, success: true }));
-
-      this.logger.info('Batch transaction submitted successfully', {
-        hash,
-        operationCount: this.operations.length,
+    if (txOptions.idempotencyKey !== undefined) {
+      const fingerprint = JSON.stringify({
+        type: 'batch_submit',
+        fee,
+        timeout: txOptions.timeout ?? DEFAULT_TIMEOUT_SECONDS,
+        operations: this.operations.map(op => ({
+          label: op.label,
+          contractId: op.contractId,
+          functionName: op.functionName,
+          args: op.args,
+          fee: op.fee ?? null,
+        })),
       });
-
-      return {
-        transactionHash: hash,
-        success: true,
-        operationResults,
-        totalFee: fee.toString(),
-        estimatedGas: estimatedFee.toString(),
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error('Batch transaction failed — all operations reverted', {
-        error: msg,
-        operationCount: this.operations.length,
-      });
-
-      const operationResults: BatchTransactionResult['operationResults'] =
-        this.operations.map(op => ({ label: op.label, success: false, errorMessage: msg }));
-
-      throw new TransactionError(
-        `Batch failed — all ${this.operations.length} operations reverted: ${msg}`,
-        { operationResults },
+      return this.idempotencyGuard.execute(
+        txOptions.idempotencyKey,
+        source.toString(),
+        fingerprint,
+        executeSubmit,
+        txOptions.idempotencyTtlMs,
       );
     }
+
+    return executeSubmit();
   }
 
   // ─── Utility ───────────────────────────────────────────────────────────────
@@ -430,6 +718,7 @@ export class StellarRWASDK {
   public custodyClient: CustodyClient;
 
   private _portfolioCache: Map<string, { data: Portfolio; expiry: number }> = new Map();
+  private readonly _idempotencyGuard: IdempotencyGuard = new IdempotencyGuard();
 
   /** Active retry policy for transient network failures (Issue #191). */
   public retryConfig: RetryConfig;
@@ -541,8 +830,44 @@ export class StellarRWASDK {
     return new BatchTransactionBuilder(
       this.config.stellar.serverUrl,
       this.config.stellar.passphrase,
-      feeStrategy ?? this._feeStrategy,
+      this._idempotencyGuard,
     );
+  }
+
+  /**
+   * Execute an arbitrary transaction submission with duplicate-submission
+   * protection keyed by a caller-supplied idempotency key.
+   *
+   * @param caller               - The Stellar address authorizing the submission.
+   * @param idempotencyKey       - Caller-supplied idempotency key (1–128 chars).
+   * @param operationFingerprint - Deterministic string identifying the operation payload.
+   * @param executor             - Async function performing the underlying submission.
+   * @param options              - Optional `{ ttlMs }` override for record retention.
+   * @throws {InvalidParametersError} if inputs are invalid or the key is reused with a different payload.
+   * @throws {UnauthorizedError} if the key is already owned by a different caller.
+   */
+  async executeIdempotent<T>(
+    caller: Address,
+    idempotencyKey: string,
+    operationFingerprint: string,
+    executor: () => Promise<T>,
+    options?: { ttlMs?: number },
+  ): Promise<T> {
+    validateAddress(caller, 'caller');
+    return this._idempotencyGuard.execute(
+      idempotencyKey,
+      caller.toString(),
+      operationFingerprint,
+      executor,
+      options?.ttlMs,
+    );
+  }
+
+  /**
+   * Clear a specific idempotency key (or all keys when omitted) from this SDK instance.
+   */
+  clearIdempotencyKey(idempotencyKey?: string): void {
+    this._idempotencyGuard.clear(idempotencyKey);
   }
 
   /**
@@ -668,7 +993,7 @@ export class StellarRWASDK {
   async deployCompleteRWAToken(
     deployer: Address,
     options: DeploymentOptions,
-    txOptions: TransactionOptions = {}
+    txOptions: IdempotentTransactionOptions = {}
   ): Promise<{
     tokenAddress: Address;
     assetFactoryHash: string;
@@ -687,50 +1012,74 @@ export class StellarRWASDK {
         throw new InvalidParametersError('txOptions.timeout must be a positive number');
       }
     }
-    try {
-      // Step 1: Deploy the RWA token
-      const tokenResult = await this.assetFactory.deployRWAToken(
-        deployer,
-        options,
-        txOptions
-      );
 
-      // Step 2: Initialize compliance for the token (if needed)
-      let complianceHash = '';
-      if (options.initializeCompliance) {
-        complianceHash = await this.complianceClient.initialize(
+    const executeDeploy = async () => {
+      try {
+        // Step 1: Deploy the RWA token
+        const tokenResult = await this.assetFactory.deployRWAToken(
           deployer,
-          deployer, // Use deployer as admin
-          options.kycRequired || true,
-          options.transferRestrictions || true,
+          options,
           txOptions
         );
-      }
 
-      // Step 3: Add token to secondary market
-      const marketHash = await this.marketClient.addSupportedToken(
-        deployer,
-        tokenResult.tokenAddress,
-        txOptions
+        // Step 2: Initialize compliance for the token (if needed)
+        let complianceHash = '';
+        if (options.initializeCompliance) {
+          complianceHash = await this.complianceClient.initialize(
+            deployer,
+            deployer, // Use deployer as admin
+            options.kycRequired || true,
+            options.transferRestrictions || true,
+            txOptions
+          );
+        }
+
+        // Step 3: Add token to secondary market
+        const marketHash = await this.marketClient.addSupportedToken(
+          deployer,
+          tokenResult.tokenAddress,
+          txOptions
+        );
+
+        // Step 4: Initialize dividend distributor (if needed)
+        let dividendHash = '';
+        if (options.initializeDividends) {
+          // This would be handled by the asset factory during token deployment
+          dividendHash = tokenResult.assetFactoryHash;
+        }
+
+        return {
+          tokenAddress: tokenResult.tokenAddress,
+          assetFactoryHash: tokenResult.transactionHash,
+          complianceHash,
+          dividendHash,
+          marketHash
+        };
+      } catch (error) {
+        throw new ContractError(`Complete deployment failed: ${error.message}`);
+      }
+    };
+
+    if (txOptions.idempotencyKey !== undefined) {
+      const fingerprint = JSON.stringify({
+        type: 'deploy_complete_rwa_token',
+        tokenContract: options.tokenContract?.toString?.() ?? String(options.tokenContract),
+        name: options.name,
+        symbol: options.symbol,
+        totalSupply: options.totalSupply,
+        decimals: options.decimals,
+        assetType: options.assetType,
+      });
+      return this._idempotencyGuard.execute(
+        txOptions.idempotencyKey,
+        deployer.toString(),
+        fingerprint,
+        executeDeploy,
+        txOptions.idempotencyTtlMs,
       );
-
-      // Step 4: Initialize dividend distributor (if needed)
-      let dividendHash = '';
-      if (options.initializeDividends) {
-        // This would be handled by the asset factory during token deployment
-        dividendHash = tokenResult.assetFactoryHash;
-      }
-
-      return {
-        tokenAddress: tokenResult.tokenAddress,
-        assetFactoryHash: tokenResult.transactionHash,
-        complianceHash,
-        dividendHash,
-        marketHash
-      };
-    } catch (error) {
-      throw new ContractError(`Complete deployment failed: ${error.message}`);
     }
+
+    return executeDeploy();
   }
 
   /**
@@ -857,48 +1206,28 @@ export class StellarRWASDK {
       };
     }
 
+    if (tx == null) {
+      throw new InvalidParametersError('tx is required for transaction simulation');
+    }
+
     try {
-      const server = new (await import('stellar-sdk')).Server(this.config.stellar.serverUrl);
+      const sdkModule = await import('stellar-sdk');
+      const ServerCtor = (sdkModule as any).SorobanRpc?.Server ?? (sdkModule as any).Server;
+      const server = new ServerCtor(this.config.stellar.serverUrl);
       const simulation = await server.simulateTransaction(tx);
+      const result = normalizeSimulationResult(simulation);
 
-      // Extract events from simulation
-      const events: SimulationEvent[] = (simulation.events || []).map((evt: any) => ({
-        contractId: evt.contractId || '',
-        topics: evt.topic || [],
-        data: evt.data || null,
-      }));
-
-      // Extract storage changes
-      const storageChanges: StorageChange[] = (simulation.stateChanges || [])
-        .filter((change: any) => change.type === 'contract_data')
-        .map((change: any) => ({
-          contractId: change.contractId || '',
-          key: change.key || '',
-          oldValue: change.oldValue,
-          newValue: change.newValue,
-        }));
-
-      // Determine success from simulation result
-      const isSuccess = simulation.result !== undefined && !simulation.error;
-      const errorMessage = simulation.error || (isSuccess ? undefined : 'Simulation returned no result');
-
-      const result: SimulationResult = {
-        success: isSuccess,
-        events,
-        returnValue: simulation.result || null,
-        gasUsed: String(simulation.cost?.cpuInsns || 0),
-        storageChanges,
-        errorMessage,
-      };
-
-      if (!isSuccess) {
-        this.logger.warn('Transaction simulation failed', { errorMessage, gasUsed: result.gasUsed });
+      if (!result.success) {
+        this.logger.warn('Transaction simulation failed', {
+          errorMessage: result.errorMessage,
+          gasUsed: result.gasUsed,
+        });
       } else {
         this.logger.info('Transaction simulation succeeded', { gasUsed: result.gasUsed });
       }
 
       return result;
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error('Transaction simulation error', { error: error.message });
       throw new TransactionError(`Transaction simulation failed: ${error.message}`, error);
     }
@@ -957,178 +1286,256 @@ export class StellarRWASDK {
   }
 
   /**
-   * Verify that a transaction's network passphrase (or an explicit passphrase string)
-   * matches this SDK's configured network passphrase before signing.
+   * Opt-in fee-bump transaction submission helper.
    *
-   * Prevents accidental cross-network signing (e.g. signing a mainnet transaction
-   * with a testnet configuration).
+   * When `options.enabled` is `true`, wraps `innerTransaction` in a Stellar
+   * fee-bump transaction paid by `options.feeSource`, validates authorization,
+   * signs the outer envelope with `options.signer`, and submits it.
    *
-   * @param transactionOrPassphrase - A Stellar transaction object with `networkPassphrase`, or a raw passphrase string.
-   * @param options - Optional overrides for `expectedPassphrase` and `expectedNetwork`.
-   * @returns Verification result confirming the matched passphrase.
-   * @throws {InvalidParametersError} if inputs or expected network configuration are invalid.
-   * @throws {TransactionError} if the network passphrase does not match.
+   * When `options` is omitted or `options.enabled` is not `true`, submits
+   * `innerTransaction` directly without wrapping.
+   *
+   * @param innerTransaction - Prepared/signed inner Stellar transaction.
+   * @param options          - Optional opt-in fee-bump configuration.
+   * @returns Submission result including hash and whether fee-bump was applied.
+   * @throws {InvalidParametersError} if inputs or fee bounds are invalid.
+   * @throws {UnauthorizedError} if the fee-bump signer or fee source is unauthorized.
+   * @throws {TransactionError} if submission fails or is rejected by the network.
    */
-  verifyNetworkPassphrase(
-    transactionOrPassphrase: string | { networkPassphrase?: string },
-    options: NetworkPassphraseVerificationOptions = {},
-  ): NetworkPassphraseVerificationResult {
-    const expectedPassphrase = options.expectedPassphrase ?? this.config.stellar.passphrase;
-    return verifyNetworkPassphrase(transactionOrPassphrase, expectedPassphrase, {
-      expectedNetwork: options.expectedNetwork,
-    });
-  }
-
-  /**
-   * Verify a transaction's network passphrase and then sign it with the provided signer(s).
-   *
-   * If passphrase verification fails, `transaction.sign()` is never invoked so the
-   * transaction remains unmodified (no partial state changes).
-   *
-   * @param transaction - Stellar transaction supporting `networkPassphrase` and `sign(...)`.
-   * @param signers - A single signer (e.g. `Keypair`) or non-empty array of signers.
-   * @param options - Optional overrides for `expectedPassphrase` and `expectedNetwork`.
-   * @returns The signed transaction.
-   * @throws {InvalidParametersError} if transaction, signers, or passphrase inputs are invalid.
-   * @throws {TransactionError} if the transaction's network passphrase does not match.
-   */
-  signTransaction<T extends { networkPassphrase?: string; sign: (...signers: any[]) => void }>(
-    transaction: T,
-    signers: any | any[],
-    options: NetworkPassphraseVerificationOptions = {},
-  ): T {
-    const expectedPassphrase = options.expectedPassphrase ?? this.config.stellar.passphrase;
-    return signTransactionWithPassphraseVerification(transaction, signers, expectedPassphrase, {
-      expectedNetwork: options.expectedNetwork,
+  async submitTransactionWithFeeBump(
+    innerTransaction: any,
+    options?: FeeBumpSubmissionOptions,
+  ): Promise<FeeBumpSubmissionResult> {
+    return submitFeeBumpTransaction(innerTransaction, options, {
+      serverUrl: this.config.stellar.serverUrl,
+      networkPassphrase: this.config.stellar.passphrase,
     });
   }
 }
 
-// ─── Network Passphrase Verification ──────────────────────────────────────────
-
-export interface NetworkPassphraseVerificationOptions {
-  /**
-   * Expected Stellar network passphrase.
-   * When omitted on `StellarRWASDK` methods, defaults to `config.stellar.passphrase`.
-   */
-  expectedPassphrase?: string;
-  /**
-   * Optional known Stellar network name (`testnet`, `mainnet`, `futurenet`, `standalone`).
-   * When provided, also asserts that `expectedPassphrase` matches `STELLAR_NETWORKS[expectedNetwork].passphrase`.
-   */
-  expectedNetwork?: keyof typeof STELLAR_NETWORKS;
-}
-
-export interface NetworkPassphraseVerificationResult {
-  verified: true;
-  networkPassphrase: string;
-  matchedNetwork?: string;
-}
+// ─── Opt-In Fee-Bump Transaction Submission Helper ────────────────────────────
 
 /**
- * Verify that a transaction's network passphrase (or a raw passphrase string)
- * exactly matches the expected Stellar network passphrase before signing.
- *
- * Uses strict byte-for-byte equality because Stellar hashes the network
- * passphrase directly into the transaction signature payload.
- *
- * @param transactionOrPassphrase - Transaction object containing `networkPassphrase`, or a passphrase string.
- * @param expectedPassphrase - The expected Stellar network passphrase.
- * @param options - Optional `expectedNetwork` to cross-check against `STELLAR_NETWORKS`.
- * @returns {@link NetworkPassphraseVerificationResult} when verification succeeds.
- * @throws {InvalidParametersError} if any required input is missing, empty, or references an unknown network.
- * @throws {TransactionError} if the actual passphrase does not match `expectedPassphrase`.
+ * Signer accepted by {@link submitFeeBumpTransaction}.
+ * Either a callback invoked with the built fee-bump transaction, or a
+ * Stellar Keypair-like object passed to `feeBumpTx.sign(signer)`.
  */
-export function verifyNetworkPassphrase(
-  transactionOrPassphrase: string | { networkPassphrase?: string },
-  expectedPassphrase: string,
-  options: { expectedNetwork?: keyof typeof STELLAR_NETWORKS } = {},
-): NetworkPassphraseVerificationResult {
-  validateNonEmptyString(expectedPassphrase, 'expectedPassphrase');
+export type FeeBumpSigner =
+  | ((feeBumpTx: any) => void | Promise<void>)
+  | {
+      publicKey?: () => string;
+      sign?: (...args: any[]) => any;
+    };
 
-  if (options.expectedNetwork !== undefined) {
-    const knownNetwork = STELLAR_NETWORKS[options.expectedNetwork];
-    if (!knownNetwork) {
-      throw new InvalidParametersError(
-        `Unknown Stellar network: ${String(options.expectedNetwork)}`
-      );
-    }
-    if (expectedPassphrase !== knownNetwork.passphrase) {
-      throw new InvalidParametersError(
-        `Expected passphrase does not match network "${String(options.expectedNetwork)}" ` +
-        `(expected "${knownNetwork.passphrase}", got "${expectedPassphrase}")`
-      );
-    }
-  }
-
-  let actualPassphrase: unknown;
-  if (typeof transactionOrPassphrase === 'string') {
-    actualPassphrase = transactionOrPassphrase;
-  } else if (transactionOrPassphrase != null && typeof transactionOrPassphrase === 'object') {
-    actualPassphrase = transactionOrPassphrase.networkPassphrase;
-  } else {
-    throw new InvalidParametersError(
-      'Transaction or network passphrase is required for verification'
-    );
-  }
-
-  validateNonEmptyString(actualPassphrase as string, 'transaction.networkPassphrase');
-
-  if (actualPassphrase !== expectedPassphrase) {
-    throw new TransactionError(
-      `Network passphrase mismatch before signing: expected "${expectedPassphrase}", got "${actualPassphrase}"`,
-      {
-        expectedPassphrase,
-        actualPassphrase,
-      }
-    );
-  }
-
-  const matchedNetwork = Object.entries(STELLAR_NETWORKS).find(
-    ([, cfg]) => cfg.passphrase === actualPassphrase
-  )?.[0];
-
-  return {
-    verified: true,
-    networkPassphrase: actualPassphrase as string,
-    matchedNetwork,
+/**
+ * Configuration for opt-in fee-bump transaction submission.
+ */
+export interface FeeBumpSubmissionOptions {
+  /**
+   * Explicit opt-in flag. Must be `true` to wrap and submit as a fee-bump
+   * transaction. When `false` or omitted, the inner transaction is submitted
+   * directly without wrapping.
+   */
+  enabled?: boolean;
+  /** Stellar account address (`G...`) paying the bumped transaction fee. */
+  feeSource?: Address | string;
+  /** Maximum fee in stroops (positive integer or numeric string). */
+  maxFee?: number | string;
+  /** Signer authorizing the fee-bump envelope on behalf of `feeSource`. */
+  signer?: FeeBumpSigner;
+  /**
+   * Optional allowlist of authorized fee-source addresses. When provided,
+   * `feeSource` must match one of the entries or {@link UnauthorizedError} is thrown.
+   */
+  authorizedFeeSources?: Array<Address | string>;
+  /** Optional RPC/Horizon server override. */
+  server?: {
+    sendTransaction?: (tx: any) => Promise<any>;
+    submitTransaction?: (tx: any) => Promise<any>;
   };
+  /** Optional network passphrase override. */
+  networkPassphrase?: string;
 }
 
 /**
- * Verify a transaction's network passphrase before invoking `transaction.sign(...)`.
- *
- * Guarantees that `transaction.sign` is never called if verification fails,
- * preventing cross-network replay and leaving no partial signature state.
- *
- * @param transaction - Stellar transaction with `networkPassphrase` and `sign(...)`.
- * @param signers - A single signer or non-empty array of signers.
- * @param expectedPassphrase - The expected Stellar network passphrase.
- * @param options - Optional `expectedNetwork` to cross-check against `STELLAR_NETWORKS`.
- * @returns The signed transaction.
- * @throws {InvalidParametersError} if `transaction`, `signers`, or passphrase arguments are invalid.
- * @throws {TransactionError} if the transaction's network passphrase does not match `expectedPassphrase`.
+ * Result returned by {@link submitFeeBumpTransaction}.
  */
-export function signTransactionWithPassphraseVerification<
-  T extends { networkPassphrase?: string; sign: (...signers: any[]) => void }
->(
-  transaction: T,
-  signers: any | any[],
-  expectedPassphrase: string,
-  options: { expectedNetwork?: keyof typeof STELLAR_NETWORKS } = {},
-): T {
-  if (transaction == null || typeof transaction !== 'object' || typeof transaction.sign !== 'function') {
-    throw new InvalidParametersError('A signable transaction object with a sign() method is required');
+export interface FeeBumpSubmissionResult {
+  transactionHash: string;
+  success: boolean;
+  feeBumped: boolean;
+  feeSource?: string;
+  maxFee?: string;
+  rawResponse?: any;
+}
+
+function parsePositiveFeeStroops(value: unknown, fieldName: string): bigint {
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new InvalidParametersError(`${fieldName} must be a positive integer in stroops`);
+    }
+    return BigInt(value);
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const parsed = BigInt(value.trim());
+    if (parsed <= 0n) {
+      throw new InvalidParametersError(`${fieldName} must be a positive integer in stroops`);
+    }
+    return parsed;
+  }
+  throw new InvalidParametersError(`${fieldName} must be a positive integer in stroops`);
+}
+
+/**
+ * Submit a Stellar transaction with opt-in fee-bump wrapping.
+ *
+ * - **Opt-in by default**: unless `options?.enabled === true`, submits
+ *   `innerTransaction` directly without modifying or wrapping it.
+ * - **Input validation**: validates `innerTransaction`, `feeSource`, `maxFee`
+ *   (including ensuring `maxFee >= innerTransaction.fee` when present), and
+ *   network passphrase before any network call.
+ * - **Authorization**: requires an explicit `signer` when fee-bump is enabled,
+ *   enforces `authorizedFeeSources` if configured, and verifies
+ *   `signer.publicKey() === feeSource` when `publicKey()` is available.
+ * - **Failure semantics**: never mutates `innerTransaction` or caller state;
+ *   throws {@link InvalidParametersError}, {@link UnauthorizedError}, or
+ *   {@link TransactionError}.
+ */
+export async function submitFeeBumpTransaction(
+  innerTransaction: any,
+  options: FeeBumpSubmissionOptions = {},
+  context: { serverUrl?: string; networkPassphrase?: string } = {},
+): Promise<FeeBumpSubmissionResult> {
+  if (!innerTransaction || typeof innerTransaction !== 'object') {
+    throw new InvalidParametersError('innerTransaction is required and must be a transaction object');
   }
 
-  const signerList = Array.isArray(signers) ? signers : [signers];
-  if (signerList.length === 0 || signerList.some((s) => s == null)) {
-    throw new InvalidParametersError('At least one valid signer is required');
+  const optIn = options?.enabled === true;
+
+  let feeSourceStr: string | undefined;
+  let maxFeeStr: string | undefined;
+  let passphrase: string | undefined;
+
+  if (optIn) {
+    validateAddress(options.feeSource, 'feeBump.feeSource');
+    feeSourceStr = options.feeSource!.toString();
+
+    const maxFeeBigInt = parsePositiveFeeStroops(options.maxFee, 'feeBump.maxFee');
+    if (innerTransaction.fee != null) {
+      const innerFeeRaw = String(innerTransaction.fee).trim();
+      if (/^\d+$/.test(innerFeeRaw) && maxFeeBigInt < BigInt(innerFeeRaw)) {
+        throw new InvalidParametersError(
+          `feeBump.maxFee (${maxFeeBigInt.toString()}) must be greater than or equal to inner transaction fee (${innerFeeRaw})`
+        );
+      }
+    }
+    maxFeeStr = maxFeeBigInt.toString();
+
+    passphrase = options.networkPassphrase ?? context.networkPassphrase;
+    validateNonEmptyString(passphrase, 'networkPassphrase');
+
+    if (options.authorizedFeeSources != null) {
+      const allowed = new Set(options.authorizedFeeSources.map((addr) => addr.toString()));
+      if (!allowed.has(feeSourceStr)) {
+        throw new UnauthorizedError(
+          `Fee source ${feeSourceStr} is not in the authorizedFeeSources allowlist`
+        );
+      }
+    }
+
+    const signer = options.signer;
+    const isFnSigner = typeof signer === 'function';
+    const isObjSigner =
+      signer != null && typeof signer === 'object' && typeof signer.sign === 'function';
+    if (!isFnSigner && !isObjSigner) {
+      throw new UnauthorizedError('Fee-bump submission requires an explicit signer for feeSource');
+    }
+
+    if (isObjSigner && typeof signer.publicKey === 'function') {
+      const signerPubKey = signer.publicKey();
+      if (signerPubKey !== feeSourceStr) {
+        throw new UnauthorizedError(
+          `Fee-bump signer public key (${signerPubKey}) does not match feeSource (${feeSourceStr})`
+        );
+      }
+    }
   }
 
-  verifyNetworkPassphrase(transaction, expectedPassphrase, options);
-  transaction.sign(...signerList);
-  return transaction;
+  if (!options.server && !context.serverUrl) {
+    throw new InvalidParametersError('Either options.server or serverUrl is required');
+  }
+
+  try {
+    const stellarSdk = await import('stellar-sdk');
+    let txToSubmit = innerTransaction;
+
+    if (optIn) {
+      const buildFeeBump = (stellarSdk.TransactionBuilder as any)?.buildFeeBumpTransaction;
+      if (typeof buildFeeBump !== 'function') {
+        throw new TransactionError('TransactionBuilder.buildFeeBumpTransaction is unavailable');
+      }
+
+      const feeBumpTx = buildFeeBump(
+        feeSourceStr!,
+        maxFeeStr!,
+        innerTransaction,
+        passphrase!,
+      );
+
+      if (typeof options.signer === 'function') {
+        await options.signer(feeBumpTx);
+      } else if (typeof feeBumpTx?.sign === 'function') {
+        feeBumpTx.sign(options.signer);
+      } else {
+        throw new TransactionError('Built fee-bump transaction does not support signing');
+      }
+
+      txToSubmit = feeBumpTx;
+    }
+
+    const server =
+      options.server ?? new (stellarSdk as any).SorobanRpc.Server(context.serverUrl!);
+    const submitFn =
+      typeof server.sendTransaction === 'function'
+        ? (tx: any) => server.sendTransaction!(tx)
+        : typeof server.submitTransaction === 'function'
+          ? (tx: any) => server.submitTransaction!(tx)
+          : null;
+
+    if (!submitFn) {
+      throw new TransactionError('Server does not implement sendTransaction or submitTransaction');
+    }
+
+    const response = await submitFn(txToSubmit);
+    if (response?.status === 'ERROR') {
+      throw new TransactionError(
+        `Transaction rejected by network: ${JSON.stringify(response.errorResult ?? '')}`,
+        response,
+      );
+    }
+
+    const hash: string = response?.hash ?? response?.transactionHash ?? '';
+    return {
+      transactionHash: hash,
+      success: true,
+      feeBumped: optIn,
+      ...(optIn ? { feeSource: feeSourceStr, maxFee: maxFeeStr } : {}),
+      rawResponse: response,
+    };
+  } catch (error: unknown) {
+    if (
+      error instanceof InvalidParametersError ||
+      error instanceof UnauthorizedError ||
+      error instanceof TransactionError
+    ) {
+      throw error;
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new TransactionError(
+      optIn ? `Fee-bump transaction submission failed: ${msg}` : `Transaction submission failed: ${msg}`,
+      error,
+    );
+  }
 }
 
 // ─── Factory Function ─────────────────────────────────────────────────────────

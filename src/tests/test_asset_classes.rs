@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    Address, Env, Map, Symbol, Vec,
+    Address, BytesN, Env, Map, Symbol, Vec,
 };
 
 use crate::asset_class_handlers::AssetClassHandlers;
@@ -32,6 +32,10 @@ fn base_config(env: &Env) -> AssetConfig {
     }
 }
 
+fn legal_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[7u8; 32])
+}
+
 fn real_estate_config(env: &Env, appraisal_value: i128) -> RealEstateConfig {
     RealEstateConfig {
         property_address: Symbol::new(env, "123MainSt"),
@@ -40,6 +44,7 @@ fn real_estate_config(env: &Env, appraisal_value: i128) -> RealEstateConfig {
         property_management_voting: true,
         insurance_status: true,
         appraisal_value,
+        legal_document_hash: legal_hash(env),
     }
 }
 
@@ -52,6 +57,7 @@ fn ip_config(env: &Env, ip_type: &str, expiry_date: u64) -> IPConfig {
         filing_date: 1_000,
         expiry_date,
         valuation: 2_500_000i128,
+        legal_document_hash: legal_hash(env),
     }
 }
 
@@ -126,6 +132,7 @@ fn valid_agricultural_config_records_harvest_cycle() {
             planting_date,
             harvest_date,
             expected_yield: 50_000i128,
+            legal_document_hash: legal_hash(&env),
         },
     );
 
@@ -163,6 +170,7 @@ fn agricultural_subtype_metadata_is_set() {
             planting_date: 0,
             harvest_date: 90 * 86_400,
             expected_yield: 1_000,
+            legal_document_hash: legal_hash(&env),
         },
     );
 
@@ -187,6 +195,7 @@ fn agricultural_harvest_date_must_follow_planting_date() {
             planting_date: 100,
             harvest_date: 100,
             expected_yield: 1_000,
+            legal_document_hash: legal_hash(&env),
         },
     );
 }
@@ -203,6 +212,7 @@ fn agricultural_expected_yield_must_be_positive() {
             planting_date: 0,
             harvest_date: 100,
             expected_yield: 0,
+            legal_document_hash: legal_hash(&env),
         },
     );
 }

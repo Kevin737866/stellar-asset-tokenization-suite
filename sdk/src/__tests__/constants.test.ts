@@ -121,7 +121,7 @@ describe('Constants', () => {
       expect(VALID_REGULATION_FRAMEWORKS).toContain('REG_D');
       expect(VALID_REGULATION_FRAMEWORKS).toContain('REG_S');
       expect(VALID_REGULATION_FRAMEWORKS).toContain('RULE_144');
-      expect(VALID_REGULATION_FRAMEWORKS).toContain('REG_A+');
+      expect(VALID_REGULATION_FRAMEWORKS).toContain('REG_A_PLUS');
     });
 
     it('RENTAL_YIELD_MAX_BASIS_POINTS is 10000', () => {

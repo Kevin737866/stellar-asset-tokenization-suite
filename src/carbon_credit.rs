@@ -1,6 +1,10 @@
-use soroban_sdk::{contracterror, contracttype, Env, Map, Symbol, Vec, panic_with_error, String};
+use crate::asset_class_handlers::{
+    set_legal_document_hash, validate_legal_document_hash, validate_metadata_size, AssetClassError,
+};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_metadata_size};
+use soroban_sdk::{
+    contracterror, contracttype, panic_with_error, BytesN, Env, Map, String, Symbol, Vec,
+};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -18,6 +22,8 @@ pub struct CarbonCreditConfig {
     pub project_metadata: Map<Symbol, Symbol>,
     pub verification_standard: Symbol,
     pub carbon_offset_amount: i128,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
 pub fn create_carbon_credit_config(
@@ -26,33 +32,53 @@ pub fn create_carbon_credit_config(
     carbon_config: CarbonCreditConfig,
 ) -> AssetConfig {
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_legal_document_hash(&env, &carbon_config.legal_document_hash);
 
     let current_year = (env.ledger().timestamp() / 31536000) + 1970;
     if carbon_config.vintage_year < 1990 || (carbon_config.vintage_year as u64) > current_year {
         panic_with_error!(&env, AssetClassError::InvalidVintage);
     }
 
-    let valid_standards = Vec::from_array(&env, [
-        Symbol::new(&env, "VCS"),
-        Symbol::new(&env, "GS"),
-        Symbol::new(&env, "CDM"),
-        Symbol::new(&env, "ACR"),
-    ]);
-    
+    let valid_standards = Vec::from_array(
+        &env,
+        [
+            Symbol::new(&env, "VCS"),
+            Symbol::new(&env, "GS"),
+            Symbol::new(&env, "CDM"),
+            Symbol::new(&env, "ACR"),
+        ],
+    );
+
     if !valid_standards.contains(&carbon_config.verification_standard) {
         panic_with_error!(&env, AssetClassError::InvalidVerificationStandard);
     }
 
     let mut metadata = base_config.metadata;
-    metadata.set(Symbol::new(&env, "project_id"), String::from_str(&env, &carbon_config.project_id.to_string()));
-    metadata.set(Symbol::new(&env, "vintage_year"), String::from_str(&env, &carbon_config.vintage_year.to_string()));
-    metadata.set(Symbol::new(&env, "retirement_functionality"), String::from_str(&env, &carbon_config.retirement_functionality.to_string()));
-    metadata.set(Symbol::new(&env, "verification_standard"), String::from_str(&env, &carbon_config.verification_standard.to_string()));
-    metadata.set(Symbol::new(&env, "carbon_offset_amount"), String::from_str(&env, &carbon_config.carbon_offset_amount.to_string()));
+    metadata.set(
+        Symbol::new(&env, "project_id"),
+        String::from_str(&env, &carbon_config.project_id.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "vintage_year"),
+        String::from_str(&env, &carbon_config.vintage_year.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "retirement_functionality"),
+        String::from_str(&env, &carbon_config.retirement_functionality.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "verification_standard"),
+        String::from_str(&env, &carbon_config.verification_standard.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "carbon_offset_amount"),
+        String::from_str(&env, &carbon_config.carbon_offset_amount.to_string()),
+    );
 
     for (key, value) in carbon_config.project_metadata {
         metadata.set(key, String::from_str(&env, &value.to_string()));
     }
+    set_legal_document_hash(&env, &mut metadata, &carbon_config.legal_document_hash);
 
     AssetConfig {
         metadata,
