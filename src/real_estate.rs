@@ -1,6 +1,11 @@
-use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, panic_with_error, String};
+use crate::asset_class_handlers::{
+    set_legal_document_hash, validate_address_not_zero, validate_legal_document_hash,
+    validate_metadata_size, AssetClassError,
+};
 use crate::asset_factory::AssetConfig;
-use crate::asset_class_handlers::{AssetClassError, validate_address_not_zero, validate_metadata_size};
+use soroban_sdk::{
+    contracterror, contracttype, panic_with_error, Address, BytesN, Env, String, Symbol,
+};
 
 /// Issue #171: allowed range for a tokenized property's appraisal value,
 /// expressed in the asset's base currency units.
@@ -24,6 +29,8 @@ pub struct RealEstateConfig {
     pub property_management_voting: bool,
     pub insurance_status: bool,
     pub appraisal_value: i128,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
 pub fn create_real_estate_config(
@@ -45,13 +52,30 @@ pub fn create_real_estate_config(
     }
 
     validate_metadata_size(&env, base_config.metadata.len(), 100);
+    validate_legal_document_hash(&env, &real_estate_config.legal_document_hash);
 
     let mut metadata = base_config.metadata;
-    metadata.set(Symbol::new(&env, "property_address"), String::from_str(&env, &real_estate_config.property_address.to_string()));
-    metadata.set(Symbol::new(&env, "location_oracle"), String::from_str(&env, &format!("{:?}", real_estate_config.location_oracle)));
-    metadata.set(Symbol::new(&env, "rental_yield"), String::from_str(&env, &real_estate_config.rental_yield_rate.to_string()));
-    metadata.set(Symbol::new(&env, "insurance_status"), String::from_str(&env, &real_estate_config.insurance_status.to_string()));
-    metadata.set(Symbol::new(&env, "appraisal_value"), String::from_str(&env, &real_estate_config.appraisal_value.to_string()));
+    metadata.set(
+        Symbol::new(&env, "property_address"),
+        String::from_str(&env, &real_estate_config.property_address.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "location_oracle"),
+        String::from_str(&env, &format!("{:?}", real_estate_config.location_oracle)),
+    );
+    metadata.set(
+        Symbol::new(&env, "rental_yield"),
+        String::from_str(&env, &real_estate_config.rental_yield_rate.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "insurance_status"),
+        String::from_str(&env, &real_estate_config.insurance_status.to_string()),
+    );
+    metadata.set(
+        Symbol::new(&env, "appraisal_value"),
+        String::from_str(&env, &real_estate_config.appraisal_value.to_string()),
+    );
+    set_legal_document_hash(&env, &mut metadata, &real_estate_config.legal_document_hash);
 
     AssetConfig {
         metadata,

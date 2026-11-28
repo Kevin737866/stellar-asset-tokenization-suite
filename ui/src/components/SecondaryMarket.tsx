@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Address } from 'stellar-sdk';
 import { StellarRWASDK } from '../../sdk/src';
 import { AssetInfo, OrderBook, Trade, Order, OrderType } from '../../sdk/src/types';
 import { useToast, useErrorTranslator } from './Toast';
@@ -9,6 +10,54 @@ interface SecondaryMarketProps {
   userAddress: string;
 }
 
+interface OrderFillStatus {
+  remaining: string;
+  filled: string;
+  total: string;
+  filledPercent: number;
+  isPartiallyFilled: boolean;
+  statusLabel: 'Partially Filled' | 'Open';
+}
+
+/** Computes remaining quantity and partial-fill status for an open order. */
+function getOrderFillStatus(order: Order): OrderFillStatus {
+  const totalNum = parseFloat(order.amount || '0');
+  const filledNum = parseFloat(order.filledAmount || '0');
+  const rawRemaining = order.remainingAmount !== undefined && order.remainingAmount !== ''
+    ? parseFloat(order.remainingAmount)
+    : totalNum - (Number.isFinite(filledNum) ? filledNum : 0);
+
+  const safeTotal = Number.isFinite(totalNum) && totalNum > 0 ? totalNum : 0;
+  const safeFilled = Number.isFinite(filledNum) && filledNum > 0 ? filledNum : 0;
+  const safeRemaining = Number.isFinite(rawRemaining) && rawRemaining >= 0
+    ? rawRemaining
+    : Math.max(0, safeTotal - safeFilled);
+
+  const effectiveFilled = safeFilled > 0
+    ? safeFilled
+    : Math.max(0, safeTotal - safeRemaining);
+
+  const isPartiallyFilled = safeRemaining > 0 && (safeFilled > 0 || (safeTotal > 0 && safeRemaining < safeTotal));
+  const filledPercent = safeTotal > 0
+    ? Math.min(100, Math.max(0, Math.round((effectiveFilled / safeTotal) * 100)))
+    : 0;
+
+  return {
+    remaining: order.remainingAmount !== undefined && order.remainingAmount !== ''
+      ? order.remainingAmount
+      : String(safeRemaining),
+    filled: order.filledAmount !== undefined && order.filledAmount !== ''
+      ? order.filledAmount
+      : String(effectiveFilled),
+    total: order.amount || '0',
+    filledPercent,
+    isPartiallyFilled,
+    statusLabel: isPartiallyFilled ? 'Partially Filled' : 'Open',
+  };
+}
+const QUOTE_CURRENCY = 'USDC';
+const QUOTE_CURRENCY_DECIMALS = 6;
+
 const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddress }) => {
   const toast = useToast();
   const translateError = useErrorTranslator();
@@ -17,12 +66,14 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const [trades, setTrades] = useState<Trade[]>([]);
   const [vwap, setVwap] = useState<string>('0');
   const [userOrders, setUserOrders] = useState<Order[]>([]);
+  const [ordersFetchError, setOrdersFetchError] = useState<string | null>(null);
   const [kycStatus, setKycStatus] = useState<boolean>(false);
   const [dividendHalt, setDividendHalt] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+  const [cancellingOrderId, setCancellingOrderId] = useState<number | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [isNetworkError, setIsNetworkError] = useState(false);
 
@@ -62,6 +113,11 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
     return { min, max, range: max - min || 1 };
   }, [chartData]);
 
+  const activeUserOrders = useMemo(
+    () => userOrders.filter(order => order.isActive && Number(order.remainingAmount) > 0),
+    [userOrders]
+  );
+
   const fetchMarketData = useCallback(async (showToasts: boolean = true) => {
     setFetchError(null);
 
@@ -70,13 +126,34 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
       const tr = await sdk.marketClient.getRecentTrades(asset.token_address);
       const v = await sdk.marketClient.getVWAP(asset.token_address);
       const kyc = await sdk.complianceClient.getKYCStatus(userAddress);
+      const orders = userAddress
+        ? await sdk.marketClient.getUserOrders(userAddress).catch(() => [] as Order[])
+        : [];
+      const openOrders = orders.filter(
+        (order) =>
+          order.isActive &&
+          (!order.tokenAddress || order.tokenAddress === asset.token_address)
+      );
 
       setOrderBook(ob);
       setTrades(tr);
       setVwap(v);
       setKycStatus(kyc.is_verified);
+      setUserOrders(openOrders);
       setFetchError(null);
       setIsNetworkError(false);
+
+      try {
+        const orders = await sdk.marketClient.getUserOrders(new Address(userAddress));
+        setUserOrders(orders);
+        setOrdersFetchError(null);
+      } catch (err: any) {
+        const { title, message } = translateError(err);
+        setOrdersFetchError(message);
+        if (showToasts) {
+          toast.error(title, `Unable to load your active orders. ${message}`);
+        }
+      }
 
       const portfolioValue = await sdk.marketClient.getMarketStats(asset.token_address).catch(() => null);
       if (portfolioValue && parseFloat(portfolioValue.avgPrice) > 0) {
@@ -194,6 +271,38 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
   const handleRetryFetch = () => {
     setIsLoadingData(true);
     fetchMarketData();
+  };
+
+  const handleCancelOrder = async (order: Order) => {
+    if (order.trader.toString() !== userAddress) {
+      toast.warning('Unable to Cancel Order', 'Only the account that placed an order can cancel it.');
+      return;
+    }
+
+    const filledAmount = Number(order.filledAmount);
+    const remainingAmount = Number(order.remainingAmount);
+    const isPartiallyFilled = filledAmount > 0 && remainingAmount > 0;
+    if (
+      isPartiallyFilled &&
+      !window.confirm(
+        `Order #${order.orderId} has already filled ${order.filledAmount} ${asset.symbol}. ` +
+        `Cancel the remaining ${order.remainingAmount} ${asset.symbol}?`
+      )
+    ) {
+      return;
+    }
+
+    setCancellingOrderId(order.orderId);
+    try {
+      await sdk.marketClient.cancelOrder(new Address(userAddress), order.orderId);
+      toast.success('Order Cancelled', `Order #${order.orderId} has been cancelled.`);
+      await fetchMarketData(false);
+    } catch (err: any) {
+      const { title, message } = translateError(err);
+      toast.error(title, message);
+    } finally {
+      setCancellingOrderId(null);
+    }
   };
 
   const handleSideKeyDown = (targetSide: 'buy' | 'sell') => (e: React.KeyboardEvent) => {
@@ -379,22 +488,42 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
               </button>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-              <input
-                type="number"
-                step="any"
-                placeholder="Price"
-                value={price}
-                onChange={e => setPrice(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <input
-                type="number"
-                step="any"
-                placeholder="Amount"
-                value={amount}
-                onChange={e => setAmount(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
+              <div>
+                <label htmlFor="market-order-price" className="mb-1 block text-xs text-gray-500 dark:text-gray-400">
+                  Price ({QUOTE_CURRENCY})
+                </label>
+                <input
+                  id="market-order-price"
+                  type="number"
+                  step="any"
+                  placeholder="Price"
+                  value={price}
+                  onChange={e => setPrice(e.target.value)}
+                  aria-describedby="market-order-price-precision"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <p id="market-order-price-precision" className="mt-1 text-xs text-gray-400">
+                  Quote currency precision: {QUOTE_CURRENCY_DECIMALS} decimal places.
+                </p>
+              </div>
+              <div>
+                <label htmlFor="market-order-amount" className="mb-1 block text-xs text-gray-500 dark:text-gray-400">
+                  Amount ({asset.symbol})
+                </label>
+                <input
+                  id="market-order-amount"
+                  type="number"
+                  step="any"
+                  placeholder="Amount"
+                  value={amount}
+                  onChange={e => setAmount(e.target.value)}
+                  aria-describedby="market-order-amount-precision"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <p id="market-order-amount-precision" className="mt-1 text-xs text-gray-400">
+                  Token precision: {asset.decimals} decimal {asset.decimals === 1 ? 'place' : 'places'}.
+                </p>
+              </div>
             </div>
 
             {feePreview && (
@@ -438,12 +567,12 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
           <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">Recent Trades</h2>
           {trades.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-xs">
+              <table className="w-full text-xs" aria-label="Recent trades">
                 <thead>
                   <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-                    <th className="pb-1 font-medium">Time</th>
-                    <th className="pb-1 font-medium">Price</th>
-                    <th className="pb-1 font-medium">Amount</th>
+                    <th scope="col" className="pb-1 font-medium">Time</th>
+                    <th scope="col" className="pb-1 font-medium">Price</th>
+                    <th scope="col" className="pb-1 font-medium">Amount</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -461,6 +590,70 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
             </div>
           ) : (
             <p className="text-sm text-gray-400 text-center py-8">No recent trades</p>
+          )}
+        </section>
+
+        <section className="lg:col-span-3 border border-gray-200 dark:border-gray-700 rounded-lg p-4" aria-label="Open orders">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Open Orders</h2>
+            <span className="text-xs text-gray-500 dark:text-gray-400">{userOrders.length} active</span>
+          </div>
+          {userOrders.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+                    <th className="pb-2 font-medium">Order</th>
+                    <th className="pb-2 font-medium">Side</th>
+                    <th className="pb-2 font-medium">Price</th>
+                    <th className="pb-2 font-medium">Remaining / Total</th>
+                    <th className="pb-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {userOrders.map((order) => {
+                    const fillStatus = getOrderFillStatus(order);
+                    const isBuy = order.orderType === OrderType.BUY || order.orderType === 'buy';
+                    return (
+                      <tr key={order.orderId} className="border-b border-gray-100 dark:border-gray-800 last:border-b-0">
+                        <td className="py-2 font-medium text-gray-700 dark:text-gray-300">#{order.orderId}</td>
+                        <td className={`py-2 font-semibold uppercase ${isBuy ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                          {order.orderType}
+                        </td>
+                        <td className="py-2">{order.price}</td>
+                        <td className="py-2" aria-label={`Remaining quantity: ${fillStatus.remaining} of ${fillStatus.total}`}>
+                          <span className="font-medium">{fillStatus.remaining}</span>
+                          <span className="text-gray-400"> / {fillStatus.total}</span>
+                          {fillStatus.isPartiallyFilled && (
+                            <div className="w-24 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full mt-1 overflow-hidden">
+                              <div
+                                className="h-full bg-amber-500 rounded-full"
+                                style={{ width: `${fillStatus.filledPercent}%` }}
+                              />
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${
+                              fillStatus.isPartiallyFilled
+                                ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+                                : 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300'
+                            }`}
+                            aria-label={`Order status: ${fillStatus.statusLabel}${fillStatus.isPartiallyFilled ? ` (${fillStatus.filledPercent}% filled)` : ''}`}
+                          >
+                            {fillStatus.statusLabel}
+                            {fillStatus.isPartiallyFilled && ` (${fillStatus.filledPercent}%)`}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400 text-center py-6">No open orders</p>
           )}
         </section>
 
@@ -483,7 +676,7 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
             </div>
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Active Orders</label>
-              <span className="text-base font-semibold">{userOrders.length}</span>
+              <span className="text-base font-semibold">{activeUserOrders.length}</span>
             </div>
             <div className="text-center">
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Last Trade</label>
@@ -491,6 +684,48 @@ const SecondaryMarket: React.FC<SecondaryMarketProps> = ({ sdk, asset, userAddre
                 {trades.length > 0 ? trades[trades.length - 1].fill_price : '—'}
               </span>
             </div>
+          </div>
+          <div className="mt-5 border-t border-gray-200 dark:border-gray-700 pt-4">
+            <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">Your Active Orders</h3>
+            {ordersFetchError ? (
+              <p className="text-sm text-red-600 dark:text-red-400" role="alert">
+                Unable to load your active orders: {ordersFetchError}
+              </p>
+            ) : activeUserOrders.length > 0 ? (
+              <ul className="space-y-2">
+                {activeUserOrders.map(order => {
+                  const isOwner = order.trader.toString() === userAddress;
+                  const isPartiallyFilled = Number(order.filledAmount) > 0 && Number(order.remainingAmount) > 0;
+                  return (
+                    <li
+                      key={order.orderId}
+                      className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-lg bg-gray-50 dark:bg-gray-800 p-3 text-sm"
+                    >
+                      <div>
+                        <span className="font-medium">{order.orderType.toUpperCase()} #{order.orderId}</span>
+                        <span className="ml-2 text-gray-500 dark:text-gray-400">
+                          {order.filledAmount} filled · {order.remainingAmount} remaining @ {order.price}
+                        </span>
+                        {isPartiallyFilled && (
+                          <span className="ml-2 text-amber-700 dark:text-amber-400">Partially filled</span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleCancelOrder(order)}
+                        disabled={!isOwner || cancellingOrderId !== null}
+                        aria-label={`Cancel ${isPartiallyFilled ? 'remaining quantity of ' : ''}order ${order.orderId}`}
+                        className="rounded border border-red-300 px-3 py-1 text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950"
+                      >
+                        {cancellingOrderId === order.orderId ? 'Cancelling…' : 'Cancel order'}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-400">No active orders</p>
+            )}
           </div>
         </section>
       </main>

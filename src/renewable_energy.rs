@@ -1,5 +1,6 @@
-use soroban_sdk::{contracterror, contracttype, Env, Symbol, panic_with_error, String};
+use crate::asset_class_handlers::{set_legal_document_hash, validate_legal_document_hash};
 use crate::asset_factory::AssetConfig;
+use soroban_sdk::{contracterror, contracttype, panic_with_error, BytesN, Env, String, Symbol};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -16,13 +17,11 @@ pub struct RECConfig {
     pub mwh_amount: i128,
     pub grid_region: Symbol,
     pub compliance_period_expiry: u64,
+    /// Issue #384: hash of the legal document backing this asset.
+    pub legal_document_hash: BytesN<32>,
 }
 
-pub fn create_rec_config(
-    env: Env,
-    base_config: AssetConfig,
-    rec_config: RECConfig,
-) -> AssetConfig {
+pub fn create_rec_config(env: Env, base_config: AssetConfig, rec_config: RECConfig) -> AssetConfig {
     let valid_sources = [
         Symbol::new(&env, "SOLAR"),
         Symbol::new(&env, "WIND"),
@@ -49,6 +48,8 @@ pub fn create_rec_config(
         panic_with_error!(&env, RECError::ExpiredCompliancePeriod);
     }
 
+    validate_legal_document_hash(&env, &rec_config.legal_document_hash);
+
     let mut compliance_rules = base_config.compliance_rules;
     compliance_rules.holding_period_days = 0;
     compliance_rules.accredited_investor_only = false;
@@ -70,6 +71,7 @@ pub fn create_rec_config(
         Symbol::new(&env, "compliance_period_expiry"),
         String::from_str(&env, &rec_config.compliance_period_expiry.to_string()),
     );
+    set_legal_document_hash(&env, &mut metadata, &rec_config.legal_document_hash);
 
     AssetConfig {
         compliance_rules,

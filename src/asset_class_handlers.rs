@@ -1,5 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, panic_with_error, Address, Env, Map, Symbol, String, Vec,
+    contract, contracterror, contractimpl, panic_with_error, Address, BytesN, Env, Map, String,
+    Symbol, Vec,
 };
 
 use crate::asset_factory::{AssetClass, AssetConfig, ComplianceRules, DividendSchedule};
@@ -26,6 +27,7 @@ pub enum AssetClassError {
     InvalidParameters = 8,
     InvalidRegulationFramework = 9,
     InvalidVerificationStandard = 10,
+    InvalidLegalDocumentHash = 11,
 }
 
 // ── Shared Validation Helpers (Issue #179) ───────────────────────────────────
@@ -44,6 +46,35 @@ pub fn validate_date_range(env: &Env, start: u64, end: u64) {
     if start >= end {
         panic_with_error!(env, AssetClassError::InvalidDueDate);
     }
+}
+
+// ── Legal document hash (Issue #384) ─────────────────────────────────────────
+
+/// Metadata key under which every asset class records its legal-document hash.
+///
+/// Using one shared key and one shared encoding keeps the field consistent
+/// across asset classes, and avoids a storage migration because the hash lives
+/// in the existing `AssetConfig::metadata` map.
+pub const LEGAL_DOCUMENT_HASH_KEY: &str = "legal_document_hash";
+
+/// Reject an absent (all-zero) legal-document hash. A tokenized asset must
+/// reference a real legal document, so the zero sentinel is never valid.
+pub fn validate_legal_document_hash(env: &Env, hash: &BytesN<32>) {
+    if hash == &BytesN::from_array(env, &[0u8; 32]) {
+        panic_with_error!(env, AssetClassError::InvalidLegalDocumentHash);
+    }
+}
+
+/// Validate and record the legal-document hash on an asset config's metadata.
+///
+/// Every asset-class config creator calls this helper so that the hash is
+/// stored under the same key with the same encoding, whatever the asset class.
+pub fn set_legal_document_hash(env: &Env, metadata: &mut Map<Symbol, String>, hash: &BytesN<32>) {
+    validate_legal_document_hash(env, hash);
+    metadata.set(
+        Symbol::new(env, LEGAL_DOCUMENT_HASH_KEY),
+        String::from_str(env, &format!("{:?}", hash)),
+    );
 }
 
 #[contract]
